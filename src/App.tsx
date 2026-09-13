@@ -48,7 +48,8 @@ import {
   RefreshCcw,
   Pin,
   PinOff,
-  GripVertical
+  GripVertical,
+  Layers
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DragDropContext, Droppable, Draggable as DraggableDnd } from '@hello-pangea/dnd';
@@ -80,6 +81,10 @@ import { Category, Task } from './types';
 import { cn, formatDate } from './lib/utils';
 import { auth, db, signIn, logOut } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
+import { AuthModal } from './components/AuthModal';
+import { TaskExplorerTree } from './components/TaskExplorerTree';
+import { TaskTabsDetail } from './components/TaskTabsDetail';
+import { FocusHeaderSection } from './components/FocusHeaderSection';
 import Papa from 'papaparse';
 import { 
   collection, 
@@ -121,6 +126,16 @@ export default function App() {
   const APP_VERSION = "2.5.12";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authModalError, setAuthModalError] = useState<any>(null);
+  const [isLocalMode, setIsLocalMode] = useState<boolean>(() => {
+    try {
+      const mode = localStorage.getItem('navfor_mode');
+      return mode === 'local' || (!auth.currentUser && localStorage.getItem('navfor_local_tasks') !== null);
+    } catch {
+      return false;
+    }
+  });
   const [tasks, setTasks] = useState<Task[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProject, setSelectedProject] = useState<string>('All');
@@ -138,6 +153,141 @@ export default function App() {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
   const [activeSection, setActiveSection] = useState<string>('General');
   const [mobileView, setMobileView] = useState<'summary' | 'urgent' | 'focus' | 'calendar' | 'archive' | 'trash' | 'settings'>('urgent');
+
+  // Multi-tab and Explorer state
+  const [openTaskIds, setOpenTaskIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_open_tabs');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeTabTaskId, setActiveTabTaskId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('navfor_active_tab') || null;
+    } catch {
+      return null;
+    }
+  });
+  const [explorerWidth, setExplorerWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_explorer_width');
+      return saved ? Number(saved) : 310;
+    } catch {
+      return 310;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('navfor_open_tabs', JSON.stringify(openTaskIds));
+      if (activeTabTaskId) {
+        localStorage.setItem('navfor_active_tab', activeTabTaskId);
+      } else {
+        localStorage.removeItem('navfor_active_tab');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, [openTaskIds, activeTabTaskId]);
+
+  const handleOpenTaskInTab = (taskId: string) => {
+    setOpenTaskIds(prev => {
+      if (prev.includes(taskId)) return prev;
+      return [...prev, taskId];
+    });
+    setActiveTabTaskId(taskId);
+    if (viewMode !== 'dashboard') {
+      setViewMode('dashboard');
+    }
+    if (window.innerWidth < 1024) {
+      setMobileView('focus');
+    }
+  };
+
+  const handleCloseTaskTab = (taskId: string) => {
+    setOpenTaskIds(prev => {
+      const next = prev.filter(id => id !== taskId);
+      if (activeTabTaskId === taskId) {
+        const idx = prev.indexOf(taskId);
+        const nextActive = next[idx] || next[idx - 1] || null;
+        setActiveTabTaskId(nextActive);
+      }
+      return next;
+    });
+  };
+
+  const handleCloseAllTabs = () => {
+    setOpenTaskIds([]);
+    setActiveTabTaskId(null);
+  };
+
+  const handleExplorerWidthChange = (w: number) => {
+    setExplorerWidth(w);
+    try {
+      localStorage.setItem('navfor_explorer_width', String(w));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleCreateTaskDirect = async (taskData: {
+    title: string;
+    project: string;
+    deadline?: number;
+    isAllDay?: boolean;
+    notes?: string;
+  }) => {
+    if (!user && !isLocalMode) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+    const newTask: any = {
+      userId: user ? user.uid : 'local-user',
+      title: taskData.title.trim(),
+      project: taskData.project.trim() || 'General',
+      notes: taskData.notes || '',
+      urls: [],
+      section: activeSection,
+      category: 'Focus' as Category,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isDone: false,
+      isStarred: false,
+      isAllDay: taskData.isAllDay ?? true,
+      ...(taskData.deadline ? { deadline: taskData.deadline } : {})
+    };
+
+    try {
+      pushToHistory();
+      let newId = '';
+      if (user) {
+        const docRef = await addDoc(collection(db, 'tasks'), newTask);
+        newId = docRef.id;
+      } else {
+        newId = 'local_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+        const created: Task = { id: newId, ...newTask };
+        syncLocalTasks([created, ...tasks]);
+      }
+      handleOpenTaskInTab(newId);
+      setMessage({ text: "タスクを追加しました。", type: 'info' });
+    } catch (err) {
+      if (user) {
+        handleFirestoreError(err, OperationType.CREATE, 'tasks');
+      }
+    }
+  };
+
+  const handleDuplicateTask = async (task: Task) => {
+    await handleCreateTaskDirect({
+      title: `${task.title} (コピー)`,
+      project: task.project,
+      notes: task.notes,
+      deadline: task.deadline,
+      isAllDay: task.isAllDay
+    });
+  };
   
   // Track swipe cooldown
   const lastSwipeTime = React.useRef(0);
@@ -901,13 +1051,29 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthLoading(false);
+      if (u) {
+        setIsLocalMode(false);
+      }
     });
     return () => unsubscribe();
   }, []);
 
   // Settings Sync
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      if (isLocalMode) {
+        try {
+          const raw = localStorage.getItem('navfor_local_settings');
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            setSettings(prev => ({ ...prev, ...parsed }));
+          }
+        } catch (e) {
+          console.error("Local settings load error:", e);
+        }
+      }
+      return;
+    }
 
     const settingsRef = doc(db, 'settings', user.uid);
     const unsubscribe = onSnapshot(settingsRef, (docSnap) => {
@@ -963,12 +1129,68 @@ export default function App() {
     }, (err) => handleFirestoreError(err, OperationType.GET, `settings/${user.uid}`));
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, isLocalMode]);
 
   // Tasks Sync
   useEffect(() => {
     if (!user) {
-      setTasks([]);
+      if (isLocalMode) {
+        try {
+          const raw = localStorage.getItem('navfor_local_tasks') || localStorage.getItem('focusflow_tasks');
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+              setTasks(parsed);
+              return;
+            }
+          }
+          // Sample tasks for immediate local use
+          const sampleTasks: Task[] = [
+            {
+              id: 'local_sample_1',
+              userId: 'local-user',
+              title: 'ERG: 推進器パラメータ解析の完了',
+              project: 'ERG/Propulsion',
+              category: 'Urgent',
+              createdAt: Date.now() - 3600000,
+              updatedAt: Date.now(),
+              isDone: false,
+              isStarred: true,
+              section: 'General'
+            },
+            {
+              id: 'local_sample_2',
+              userId: 'local-user',
+              title: 'MESSENGER: 軌道補正データの確認',
+              project: 'MESSENGER/Trajectory',
+              category: 'Focus',
+              createdAt: Date.now() - 7200000,
+              updatedAt: Date.now(),
+              isDone: false,
+              isStarred: false,
+              section: 'General'
+            },
+            {
+              id: 'local_sample_3',
+              userId: 'local-user',
+              title: 'NavFOR: Firebase連携とドメイン認証設定',
+              project: 'NavFOR/Setup',
+              category: 'Focus',
+              createdAt: Date.now() - 1800000,
+              updatedAt: Date.now(),
+              isDone: false,
+              isStarred: true,
+              section: 'General'
+            }
+          ];
+          setTasks(sampleTasks);
+          localStorage.setItem('navfor_local_tasks', JSON.stringify(sampleTasks));
+        } catch (e) {
+          console.error("Local tasks load error:", e);
+        }
+      } else {
+        setTasks([]);
+      }
       return;
     }
 
@@ -987,47 +1209,59 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [user, settings.archiveThresholdDays]);
+  }, [user, isLocalMode, settings.archiveThresholdDays]);
 
   // Migration Helper
   useEffect(() => {
     if (!user || authLoading) return;
 
     const migrate = async () => {
-      const savedTasks = localStorage.getItem('focusflow_tasks');
-      const savedSettings = localStorage.getItem('focusflow_settings');
+      const savedTasks = localStorage.getItem('navfor_local_tasks') || localStorage.getItem('focusflow_tasks');
+      const savedSettings = localStorage.getItem('navfor_local_settings') || localStorage.getItem('focusflow_settings');
 
       if (savedTasks || savedSettings) {
         const hasData = await getDocs(query(collection(db, 'tasks'), where('userId', '==', user.uid)));
         if (hasData.empty) {
-          // Trigger migration
           if (savedSettings) {
-            const parsed = JSON.parse(savedSettings);
-            await setDoc(doc(db, 'settings', user.uid), {
-              userId: user.uid,
-              ...parsed
-            }).catch(e => console.error("Migration settings error", e));
+            try {
+              const parsed = JSON.parse(savedSettings);
+              await setDoc(doc(db, 'settings', user.uid), {
+                userId: user.uid,
+                ...parsed
+              }).catch(e => console.error("Migration settings error", e));
+            } catch (e) {
+              console.error("Settings parse error", e);
+            }
           }
 
           if (savedTasks) {
-            const parsed = JSON.parse(savedTasks);
-            const batch = writeBatch(db);
-            parsed.forEach((t: any) => {
-              const newRef = doc(collection(db, 'tasks'));
-              batch.set(newRef, {
-                ...t,
-                userId: user.uid,
-                createdAt: Number(t.createdAt) || Date.now(),
-                updatedAt: Number(t.updatedAt) || Date.now(),
-              });
-            });
-            await batch.commit().catch(e => console.error("Migration tasks error", e));
+            try {
+              const parsed = JSON.parse(savedTasks);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                const batch = writeBatch(db);
+                parsed.forEach((t: any) => {
+                  const newRef = doc(collection(db, 'tasks'));
+                  batch.set(newRef, {
+                    ...t,
+                    userId: user.uid,
+                    createdAt: Number(t.createdAt) || Date.now(),
+                    updatedAt: Number(t.updatedAt) || Date.now(),
+                  });
+                });
+                await batch.commit().catch(e => console.error("Migration tasks error", e));
+              }
+            } catch (e) {
+              console.error("Tasks parse error", e);
+            }
           }
           
           // Clear local storage after migration
+          localStorage.removeItem('navfor_local_tasks');
+          localStorage.removeItem('navfor_local_settings');
           localStorage.removeItem('focusflow_tasks');
           localStorage.removeItem('focusflow_settings');
-          setMessage({ text: "Local data has been migrated to the cloud.", type: 'info' });
+          localStorage.removeItem('navfor_mode');
+          setMessage({ text: "ローカルデータをクラウドに同期しました。", type: 'info' });
         }
       }
     };
@@ -1035,10 +1269,18 @@ export default function App() {
     migrate();
   }, [user, authLoading]);
 
+  // Local state persistence helper
+  const syncLocalTasks = (newTasks: Task[]) => {
+    setTasks(newTasks);
+    try {
+      localStorage.setItem('navfor_local_tasks', JSON.stringify(newTasks));
+    } catch (e) {
+      console.error('Failed to save to local storage', e);
+    }
+  };
+
   // Save Settings wrapper
   const saveSettings = async (updates: Partial<typeof settings>) => {
-    if (!user) return;
-    
     setSettings(prev => {
       const next = { ...prev, ...updates };
 
@@ -1047,11 +1289,19 @@ export default function App() {
         setDirHandle(null);
       }
 
-      // Trigger Firestore update with the most current state
-      setDoc(doc(db, 'settings', user.uid), {
-        userId: user.uid,
-        ...next
-      }, { merge: true }).catch(err => handleFirestoreError(err, OperationType.WRITE, `settings/${user.uid}`));
+      if (user) {
+        // Trigger Firestore update with the most current state
+        setDoc(doc(db, 'settings', user.uid), {
+          userId: user.uid,
+          ...next
+        }, { merge: true }).catch(err => handleFirestoreError(err, OperationType.WRITE, `settings/${user.uid}`));
+      } else {
+        try {
+          localStorage.setItem('navfor_local_settings', JSON.stringify(next));
+        } catch (e) {
+          console.error("Local settings write error", e);
+        }
+      }
       return next;
     });
   };
@@ -1469,10 +1719,10 @@ export default function App() {
 
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTaskTitle.trim() || !newTaskProject.trim() || !user) return;
+    if (!newTaskTitle.trim() || !newTaskProject.trim() || (!user && !isLocalMode)) return;
     
     const newTask: any = {
-      userId: user.uid,
+      userId: user ? user.uid : 'local-user',
       title: newTaskTitle.trim(),
       project: newTaskProject.trim(),
       notes: newTaskNotes.trim(),
@@ -1500,21 +1750,31 @@ export default function App() {
 
     try {
       pushToHistory();
-      await addDoc(collection(db, 'tasks'), newTask);
+      if (user) {
+        await addDoc(collection(db, 'tasks'), newTask);
+      } else {
+        const localId = 'local_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+        const created: Task = { id: localId, ...newTask };
+        syncLocalTasks([created, ...tasks]);
+      }
       setNewTaskTitle('');
       setNewTaskProject('');
       setNewTaskNotes('');
       setNewTaskUrls(['']);
       setNewTaskDeadline('');
       setIsTaskAllDay(true);
-      setMessage({ text: "Task added to Focus list.", type: 'info' });
+      setMessage({ text: "タスクを追加しました。", type: 'info' });
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'tasks');
+      if (user) {
+        handleFirestoreError(err, OperationType.CREATE, 'tasks');
+      } else {
+        console.error("Local add error", err);
+      }
     }
   };
 
   const moveTask = async (id: string, newCategory: Category) => {
-    if (!user) return;
+    if (!user && !isLocalMode) return;
     if (newCategory === 'Urgent') {
       const isAlreadyUrgent = tasks.find(t => t.id === id)?.category === 'Urgent';
       if (!isAlreadyUrgent) {
@@ -1530,107 +1790,134 @@ export default function App() {
         }
       }
     }
-    try {
-      pushToHistory();
-      await updateDoc(doc(db, 'tasks', id), { 
-        category: newCategory, 
-        updatedAt: Date.now() 
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
-    }
-  };
-
-  const updateTask = async (id: string, updates: Partial<Task>) => {
-    if (!user) return;
-    try {
-      pushToHistory();
-      await updateDoc(doc(db, 'tasks', id), { 
-        ...updates, 
-        updatedAt: Date.now() 
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
-    }
-  };
-
-  const toggleDone = async (id: string) => {
-    if (!user) return;
-    const task = tasks.find(t => t.id === id);
-    if (!task) return;
-    try {
-      pushToHistory();
-      const isBecomingDone = !task.isDone;
-      const updates: any = { 
-        isDone: isBecomingDone, 
-        updatedAt: Date.now() 
-      };
-
-      // Auto-move from Focus (Urgent) to ToDo (Focus) if checked
-      if (isBecomingDone && task.category === 'Urgent') {
-        updates.category = 'Focus';
-      }
-
-      await updateDoc(doc(db, 'tasks', id), updates);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
-    }
-  };
-
-  const deleteTask = async (id: string) => {
-    if (!user) return;
-    const task = tasks.find(t => t.id === id);
-    if (!task) return;
-
-    if (task.category === 'Trash') {
-      // If already in trash, perm delete
+    pushToHistory();
+    if (user) {
       try {
-        pushToHistory();
-        await deleteDoc(doc(db, 'tasks', id));
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `tasks/${id}`);
-      }
-    } else {
-      // Move to trash
-      try {
-        pushToHistory();
         await updateDoc(doc(db, 'tasks', id), { 
-          category: 'Trash', 
+          category: newCategory, 
           updatedAt: Date.now() 
         });
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
       }
+    } else {
+      syncLocalTasks(tasks.map(t => t.id === id ? { ...t, category: newCategory, updatedAt: Date.now() } : t));
+    }
+  };
+
+  const updateTask = async (id: string, updates: Partial<Task>) => {
+    if (!user && !isLocalMode) return;
+    pushToHistory();
+    if (user) {
+      try {
+        await updateDoc(doc(db, 'tasks', id), { 
+          ...updates, 
+          updatedAt: Date.now() 
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t));
+    }
+  };
+
+  const toggleDone = async (id: string) => {
+    if (!user && !isLocalMode) return;
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    pushToHistory();
+    const isBecomingDone = !task.isDone;
+    const updates: any = { 
+      isDone: isBecomingDone, 
+      updatedAt: Date.now() 
+    };
+
+    // Auto-move from Focus (Urgent) to ToDo (Focus) if checked
+    if (isBecomingDone && task.category === 'Urgent') {
+      updates.category = 'Focus';
+    }
+
+    if (user) {
+      try {
+        await updateDoc(doc(db, 'tasks', id), updates);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => t.id === id ? { ...t, ...updates } : t));
+    }
+  };
+
+  const deleteTask = async (id: string) => {
+    if (!user && !isLocalMode) return;
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+
+    pushToHistory();
+    if (task.category === 'Trash') {
+      // If already in trash, perm delete
+      if (user) {
+        try {
+          await deleteDoc(doc(db, 'tasks', id));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.DELETE, `tasks/${id}`);
+        }
+      } else {
+        syncLocalTasks(tasks.filter(t => t.id !== id));
+      }
+    } else {
+      // Move to trash
+      if (user) {
+        try {
+          await updateDoc(doc(db, 'tasks', id), { 
+            category: 'Trash', 
+            updatedAt: Date.now() 
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
+        }
+      } else {
+        syncLocalTasks(tasks.map(t => t.id === id ? { ...t, category: 'Trash', updatedAt: Date.now() } : t));
+      }
     }
   };
 
   const toggleStar = async (id: string) => {
-    if (!user) return;
+    if (!user && !isLocalMode) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
-    try {
-      pushToHistory();
-      await updateDoc(doc(db, 'tasks', id), { 
-        isStarred: !task.isStarred, 
-        updatedAt: Date.now() 
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
+    pushToHistory();
+    if (user) {
+      try {
+        await updateDoc(doc(db, 'tasks', id), { 
+          isStarred: !task.isStarred, 
+          updatedAt: Date.now() 
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => t.id === id ? { ...t, isStarred: !task.isStarred, updatedAt: Date.now() } : t));
     }
   };
 
   const togglePin = async (id: string) => {
-    if (!user) return;
+    if (!user && !isLocalMode) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
-    try {
-      pushToHistory();
-      await updateDoc(doc(db, 'tasks', id), { 
-        isPinned: !task.isPinned, 
-        updatedAt: Date.now() 
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
+    pushToHistory();
+    if (user) {
+      try {
+        await updateDoc(doc(db, 'tasks', id), { 
+          isPinned: !task.isPinned, 
+          updatedAt: Date.now() 
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => t.id === id ? { ...t, isPinned: !task.isPinned, updatedAt: Date.now() } : t));
     }
   };
 
@@ -1709,16 +1996,20 @@ export default function App() {
   };
 
   const permanentlyDeleteTask = async (id: string) => {
-    if (!user) return;
-    try {
-      await deleteDoc(doc(db, 'tasks', id));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `tasks/${id}`);
+    if (!user && !isLocalMode) return;
+    if (user) {
+      try {
+        await deleteDoc(doc(db, 'tasks', id));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `tasks/${id}`);
+      }
+    } else {
+      syncLocalTasks(tasks.filter(t => t.id !== id));
     }
   };
 
   const emptyTrash = async () => {
-    if (!user) return;
+    if (!user && !isLocalMode) return;
     
     // Respect active filters (Project, Section, and Time Filter)
     const now = Date.now();
@@ -1740,21 +2031,27 @@ export default function App() {
 
     if (!window.confirm(`Permanently delete ${trashTasksVisible.length} items matching current filters? This cannot be undone.`)) return;
 
-    try {
-      pushToHistory();
-      const batch = writeBatch(db);
-      trashTasksVisible.forEach(t => {
-        batch.delete(doc(db, 'tasks', t.id));
-      });
-      await batch.commit();
-      setMessage({ text: `${trashTasksVisible.length} items permanently deleted.`, type: 'info' });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, 'batch/empty-trash');
+    pushToHistory();
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        trashTasksVisible.forEach(t => {
+          batch.delete(doc(db, 'tasks', t.id));
+        });
+        await batch.commit();
+        setMessage({ text: `${trashTasksVisible.length} items permanently deleted.`, type: 'info' });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, 'batch/empty-trash');
+      }
+    } else {
+      const visibleIds = new Set(trashTasksVisible.map(t => t.id));
+      syncLocalTasks(tasks.filter(t => !visibleIds.has(t.id)));
+      setMessage({ text: `${trashTasksVisible.length} 件のアイテムを完全に削除しました。`, type: 'info' });
     }
   };
 
   const pickDailyTasks = async (selectedIds: string[]) => {
-    if (!user) return;
+    if (!user && !isLocalMode) return;
     const currentUrgentCount = tasks.filter(t => t.category === 'Urgent').length;
     if (currentUrgentCount + selectedIds.length > settings.urgentLimit) {
       setMessage({ 
@@ -1764,27 +2061,44 @@ export default function App() {
       return;
     }
 
-    try {
-      const batch = writeBatch(db);
-      const now = Date.now();
-      selectedIds.forEach(id => {
-        batch.update(doc(db, 'tasks', id), { 
-          category: 'Urgent', 
-          updatedAt: now 
+    pushToHistory();
+    const now = Date.now();
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        selectedIds.forEach(id => {
+          batch.update(doc(db, 'tasks', id), { 
+            category: 'Urgent', 
+            updatedAt: now 
+          });
         });
-      });
-      await batch.commit();
+        await batch.commit();
+        setIsPickingDaily(false);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, 'batch/tasks');
+      }
+    } else {
+      const idSet = new Set(selectedIds);
+      syncLocalTasks(tasks.map(t => idSet.has(t.id) ? { ...t, category: 'Urgent', updatedAt: now } : t));
       setIsPickingDaily(false);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, 'batch/tasks');
     }
   };
 
-  const handleSignIn = async () => {
+  const handleSignIn = async (forceOpenModal = false) => {
+    if (forceOpenModal) {
+      setAuthModalError(null);
+      setIsAuthModalOpen(true);
+      return;
+    }
     try {
       await signIn();
-    } catch (err) {
-      setMessage({ text: "Sign in failed.", type: 'error' });
+      setIsAuthModalOpen(false);
+      setAuthModalError(null);
+      setMessage({ text: "Googleアカウントでログインしました。", type: 'info' });
+    } catch (err: any) {
+      console.error("Sign in failed:", err);
+      setAuthModalError(err);
+      setIsAuthModalOpen(true);
     }
   };
 
@@ -2874,8 +3188,12 @@ export default function App() {
             {user ? (
               <>
                 <div className="text-right flex flex-col items-end leading-none hidden sm:flex">
-                  <span className="text-[9px] font-black uppercase tracking-[0.2em] text-indigo-500/50 mb-0.5">{t('Authenticated')}</span>
-                  <span className="text-xs font-bold text-slate-700">{user.displayName || user.email?.split('@')[0]}</span>
+                  <span className="text-[9px] font-black uppercase tracking-[0.2em] text-indigo-500/50 mb-0.5">
+                    {user.isAnonymous ? 'ゲスト (匿名)' : t('Authenticated')}
+                  </span>
+                  <span className="text-xs font-bold text-slate-700 max-w-[120px] truncate">
+                    {user.displayName || user.email?.split('@')[0] || 'ゲスト'}
+                  </span>
                 </div>
                 <div className="w-9 h-9 rounded-xl overflow-hidden border-2 border-white shadow-xl shadow-indigo-100/50 bg-indigo-50 flex items-center justify-center text-indigo-400 shrink-0">
                   {user.photoURL ? (
@@ -2892,6 +3210,21 @@ export default function App() {
                   <LogOut size={16} />
                 </button>
               </>
+            ) : isLocalMode ? (
+              <div className="flex items-center gap-2">
+                <div className="text-right flex flex-col items-end leading-none hidden sm:flex">
+                  <span className="text-[9px] font-black uppercase tracking-[0.2em] text-amber-500 mb-0.5">ローカル保存</span>
+                  <span className="text-xs font-bold text-slate-600">オフライン</span>
+                </div>
+                <button 
+                  onClick={() => setIsAuthModalOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-bold hover:bg-amber-100 transition-all shadow-sm"
+                  title="Firebase認証 / クラウド同期を開く"
+                >
+                  <LogIn size={14} />
+                  <span>クラウド同期</span>
+                </button>
+              </div>
             ) : (
               <button 
                 onClick={() => handleSignIn()}
@@ -2905,16 +3238,19 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Content Grid */}
-      <main className="flex-1 p-4 md:p-6 grid grid-cols-12 gap-6 min-h-0 overflow-hidden relative">
+      {/* Main Content */}
+      <main className={cn(
+        "flex-1 min-h-0 overflow-hidden relative",
+        viewMode === 'dashboard' ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3" : "p-4 md:p-6 grid grid-cols-12 gap-6"
+      )}>
         {/* Mobile Navigation (Bottom) */}
         <div className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-slate-200 z-[70] flex items-center justify-around px-2 shadow-[0_-4px_20px_rgba(0,0,0,0.1)]">
           <button 
             onClick={() => { setViewMode('dashboard'); setMobileView('summary'); }}
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'summary' ? "text-indigo-600" : "text-slate-400")}
           >
-            <Plus size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">{t('Entry')}</span>
+            <Layers size={20} />
+            <span className="text-[9px] font-bold uppercase tracking-tighter">ツリー</span>
           </button>
           <button 
             onClick={() => { setViewMode('dashboard'); setMobileView('urgent'); }}
@@ -2927,8 +3263,8 @@ export default function App() {
             onClick={() => { setViewMode('dashboard'); setMobileView('focus'); }}
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'focus' ? "text-indigo-600" : "text-slate-400")}
           >
-            <Target size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">{t('Focus')}</span>
+            <FileText size={20} />
+            <span className="text-[9px] font-bold uppercase tracking-tighter">詳細</span>
           </button>
           <button 
             onClick={() => { setViewMode('calendar'); setMobileView('calendar'); }}
@@ -2960,346 +3296,31 @@ export default function App() {
           </button>
         </div>
 
-        {/* Sidebar / Input Section */}
-        <aside className={cn(
-          "col-span-12 lg:col-span-3 flex flex-col gap-6 overflow-y-auto custom-scrollbar pb-24 lg:pb-0",
-          (viewMode !== 'dashboard' || mobileView !== 'summary') && "hidden lg:flex"
-        )}>
-          {!user ? (
-            <div className="bg-indigo-600 rounded-2xl p-8 text-white flex flex-col items-center text-center gap-6 shadow-xl shadow-indigo-100">
-              <div className="w-16 h-16 bg-white/20 rounded-3xl flex items-center justify-center">
-                <Target size={32} />
-              </div>
-              <div>
-                <h3 className="text-xl font-bold mb-2">Sync to Cloud</h3>
-                <p className="text-sm opacity-80 leading-relaxed">Sign in to securely access your NavFOR system across all devices with real-time sync.</p>
-              </div>
-              <button 
-                onClick={() => handleSignIn()}
-                className="w-full py-4 bg-white text-indigo-600 rounded-xl font-bold hover:bg-slate-50 transition-all flex items-center justify-center gap-3 active:scale-95"
-              >
-                <LogIn size={18} />
-                Continue with Google
-              </button>
-            </div>
-          ) : (
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 shrink-0">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-sm font-bold uppercase tracking-wider text-slate-500">{t('TaskEntry')}</h2>
-                {/* Desktop layout title helper */}
-                <div className="hidden lg:block h-3" />
-              </div>
-              <form onSubmit={handleAddTask} className="space-y-4">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-600">{t('ProjectCode')} <span className="text-red-500">*</span></label>
-                  <div className="relative">
-                    <input 
-                      list="project-suggestions"
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-                      placeholder={t('ExampleProjects')}
-                      value={newTaskProject}
-                      onChange={(e) => setNewTaskProject(e.target.value)}
-                      onKeyDown={(e) => {
-                        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleAddTask(e);
-                      }}
-                    />
-                    <datalist id="project-suggestions">
-                      {projects.filter(p => p !== 'All').map(p => <option key={p} value={p} />)}
-                    </datalist>
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-600">{t('TaskDetail')} <span className="text-red-500">*</span></label>
-                  <textarea 
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none h-20 resize-none" 
-                    placeholder={t('DetailsPlaceholder')}
-                    value={newTaskTitle}
-                    onChange={(e) => setNewTaskTitle(e.target.value)}
-                    onKeyDown={(e) => {
-                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleAddTask(e);
-                    }}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-600 uppercase tracking-widest text-[9px] opacity-60 flex items-center justify-between">
-                    <span>{t('Memos')}</span>
-                    <button 
-                      type="button" 
-                      onClick={() => setIsNewTaskMemoExpanded(!isNewTaskMemoExpanded)}
-                      className="text-indigo-600 hover:underline p-1"
-                    >
-                      {isNewTaskMemoExpanded ? t('Shrink') : t('Expand')}
-                    </button>
-                  </label>
-                  <textarea 
-                    className={cn(
-                      "w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none transition-all duration-300",
-                      isNewTaskMemoExpanded ? "h-64" : "h-16"
-                    )}
-                    placeholder={t('ContextSubtasks')}
-                    value={newTaskNotes}
-                    onChange={(e) => setNewTaskNotes(e.target.value)}
-                    onKeyDown={(e) => {
-                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleAddTask(e);
-                    }}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-600 flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-[9px] uppercase tracking-widest opacity-60"><LinkIcon size={12} /> {t('Urls')}</span>
-                    {newTaskUrls[newTaskUrls.length - 1]?.trim() && (
-                      <button type="button" onClick={() => setNewTaskUrls([...newTaskUrls, ''])} className="text-[9px] text-indigo-600 hover:underline">+ {t('Add')}</button>
-                    )}
-                  </label>
-                  {newTaskUrls.map((u, i) => (
-                    <div key={i} className="flex gap-1 group">
-                      <div className="relative flex-1">
-                        <input 
-                          type="url"
-                          className={cn(
-                            "w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-[10px] focus:ring-2 focus:ring-indigo-500 outline-none",
-                            u.trim() && "pr-8"
-                          )}
-                          placeholder={t('UrlPlaceholder')}
-                          value={u}
-                          onChange={(e) => {
-                            const next = [...newTaskUrls];
-                            next[i] = e.target.value;
-                            setNewTaskUrls(next);
-                          }}
-                          onKeyDown={(e) => {
-                            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleAddTask(e);
-                          }}
-                        />
-                        {u.trim() && (
-                          <a 
-                            href={u.startsWith('http') ? u : `https://${u}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-indigo-400 hover:text-indigo-600 transition-colors"
-                          >
-                            <ExternalLink size={12} />
-                          </a>
-                        )}
-                      </div>
-                      {(newTaskUrls.length > 1 || u.trim()) && (
-                        <button 
-                          type="button" 
-                          onClick={() => {
-                            const next = newTaskUrls.filter((_, idx) => idx !== i);
-                            setNewTaskUrls(next.length === 0 ? [''] : next);
-                          }}
-                          className="px-1 text-slate-300 hover:text-red-500 transition-colors"
-                        >
-                          <X size={14} />
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-slate-600 flex items-center gap-1.5 uppercase tracking-widest text-[9px] opacity-60">
-                      <Calendar size={12} className="text-slate-400" />
-                      {t('Deadline')}
-                    </label>
-                    {newTaskDeadline && (
-                      <button 
-                        type="button" 
-                        onClick={() => setNewTaskDeadline('')}
-                        className="text-[9px] font-bold text-red-500 hover:underline"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-              <div className="flex items-center gap-2">
-                <input 
-                  type={isTaskAllDay ? "date" : "datetime-local"}
-                  className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[11px] focus:ring-2 focus:ring-indigo-500 outline-none text-slate-400 font-medium [&::-webkit-calendar-picker-indicator]:opacity-30 [&::-webkit-calendar-picker-indicator]:invert-[0.2] [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                  value={newTaskDeadline}
-                  onChange={(e) => setNewTaskDeadline(e.target.value)}
-                />
-                <button
-                  type="button"
-                  onClick={() => setIsTaskAllDay(!isTaskAllDay)}
-                  className={cn(
-                    "px-2.5 py-2 rounded-lg border flex items-center justify-center transition-all shrink-0",
-                    isTaskAllDay ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-400"
-                  )}
-                  title={isTaskAllDay ? "Switch to Time" : "Switch to All Day"}
-                >
-                  {isTaskAllDay ? <Clock size={14} /> : <span className="text-[10px] font-black">ALL DAY</span>}
-                </button>
-              </div>
-                </div>
-                <button 
-                  type="submit"
-                  disabled={!newTaskTitle.trim() || !newTaskProject.trim()}
-                  className="w-full bg-indigo-600 text-white font-semibold py-2 rounded-lg text-sm shadow-md shadow-indigo-100 hover:bg-indigo-700 active:scale-[0.98] transition-all disabled:opacity-50"
-                >
-                  {t('AddToFocus')}
-                </button>
-              </form>
-            </div>
-          )}
-
-          <div className="bg-slate-800 text-slate-300 rounded-xl p-5 shrink-0">
-            <h2 className="text-sm font-bold uppercase tracking-wider mb-4 flex items-center justify-between">
-              {t('WorkflowHealth')}
-              <Activity size={14} className="text-indigo-400" />
-            </h2>
-            <div className="space-y-4">
-              <div className="space-y-2 pb-4 border-b border-slate-700/50">
-                <div className="flex justify-between text-[10px] font-black uppercase tracking-widest opacity-40">
-                  <span>{t('GlobalLoad')}</span>
-                  <span>{stats.focusTasksCount} / {settings.criticalThreshold}</span>
-                </div>
-                <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
-                  <div 
-                    className={cn("h-full transition-all duration-1000", stats.gaugeColor)} 
-                    style={{ width: `${stats.loadPercentage}%` }}
-                  ></div>
-                </div>
-              </div>
-
-              <div className="space-y-2.5">
-                {settings.sections.map(sec => (
-                  <div key={sec} className="flex flex-col gap-1">
-                    <div className="flex items-center text-[10px] h-7 gap-2">
-                      <div className="flex-1 min-w-0">
-                        <span className={cn(
-                          "font-bold uppercase tracking-tight truncate block",
-                          activeSection === sec ? "text-indigo-400" : "text-slate-500"
-                        )}>
-                          {sec}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1 font-mono text-[8.5px] ml-auto shrink-0">
-                        <div className="flex items-center gap-1 bg-rose-500/15 px-1.5 py-0.5 rounded w-[62px]" title="Focus">
-                          <span className="text-rose-300/80 font-medium font-sans">Focus</span>
-                          <span className="font-bold text-white ml-auto">{stats.sectionMetrics[sec]?.urgent || 0}</span>
-                        </div>
-                        <div className="flex items-center gap-1 bg-cyan-500/15 px-1.5 py-0.5 rounded w-[62px]" title="ToDo">
-                          <span className="text-cyan-300/80 font-medium font-sans">ToDo</span>
-                          <span className="font-bold text-white ml-auto">{stats.sectionMetrics[sec]?.focus || 0}</span>
-                        </div>
-                        <span className="text-slate-500 font-bold ml-1">|</span>
-                        <div className="flex items-center gap-1.5 ml-1" title="Active / Total">
-                          <div className="w-[20px] flex justify-center">
-                            <span className="text-white font-bold">{(stats.sectionMetrics[sec]?.urgent || 0) + (stats.sectionMetrics[sec]?.focus || 0)}</span>
-                          </div>
-                          <div className="flex items-center gap-0.5 text-slate-500 min-w-[28px] justify-end">
-                             <span className="font-bold">/</span>
-                             <span>{stats.sectionMetrics[sec]?.total || 0}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-                  <div className="pt-2 border-t border-slate-700/50 flex justify-between items-start pt-3">
-                <div className="space-y-1">
-                  <p className="text-[9px] font-black uppercase tracking-tighter text-slate-500">{t('SystemState')}</p>
-                  <p className={cn("text-[10px] font-bold uppercase leading-none flex items-baseline gap-1", stats.textColor)}>
-                    <span>{stats.focusTasksCount >= settings.criticalThreshold ? t('CriticalLoad') : stats.focusTasksCount >= stats.warningThreshold ? t('WarningHighLoad') : t('SafeCapacity')}</span>
-                    <span className="text-[9px] opacity-70">({stats.loadPercentage}%)</span>
-                  </p>
-                </div>
-                <div className="text-right flex flex-col items-end gap-1">
-                  <div className="flex flex-col items-end">
-                    <p className="text-[9px] font-black uppercase tracking-tighter text-slate-500">{t('DoneToday')}</p>
-                    <p className="text-[10px] font-bold text-emerald-400 font-mono">{stats.doneToday}</p>
-                  </div>
-                  <div className="flex gap-3">
-                    {stats.pendingDeadlines > 0 && (
-                      <div className="flex flex-col items-end">
-                        <p className="text-[9px] font-black uppercase tracking-tighter text-amber-500">{t('Approaching')}</p>
-                        <p className="text-[10px] font-bold text-amber-500 font-mono">{stats.pendingDeadlines}</p>
-                      </div>
-                    )}
-                    {stats.expiredDeadlines > 0 && (
-                      <div className="flex flex-col items-end">
-                        <p className="text-[9px] font-black uppercase tracking-tighter text-red-500">{t('Expired')}</p>
-                        <p className="text-[10px] font-bold text-red-500 font-mono">{stats.expiredDeadlines}</p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
+        {/* VS Code-Style Explorer Tree */}
+        {viewMode === 'dashboard' && (
+          <div className={cn(
+            "h-full min-h-0 shrink-0",
+            mobileView !== 'summary' && "hidden lg:flex"
+          )}>
+            <TaskExplorerTree
+              tasks={filteredTasks}
+              activeTaskId={activeTabTaskId}
+              openTaskIds={openTaskIds}
+              onSelectTask={handleOpenTaskInTab}
+              onAddTask={handleCreateTaskDirect}
+              onToggleDone={toggleDone}
+              onToggleStar={toggleStar}
+              activeSection={activeSection}
+              width={explorerWidth}
+              onWidthChange={handleExplorerWidthChange}
+              deadlineThresholdDays={settings.deadlineThreshold}
+              t={t}
+            />
           </div>
-
-          {/* Project Distribution Analysis */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 shrink-0 overflow-hidden">
-            <h2 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-1.5">
-              <Activity size={12} /> {t('GeneralProjectOverview')} ({activeSection} {t('WorkspaceLabel')})
-            </h2>
-            <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-              {(Object.entries(stats.projectStats) as [string, any][])
-                .filter(([proj]) => proj !== 'All' && proj.trim() !== '')
-                .sort((a, b) => (b[1].urgent.todo + b[1].focus.todo) - (a[1].urgent.todo + a[1].focus.todo))
-                .slice(0, 15)
-                .map(([proj, s]) => (
-                <div key={proj} className="p-3 rounded-xl border border-slate-100 bg-slate-50/30 group hover:border-indigo-100 hover:bg-indigo-50/10 transition-all flex flex-col gap-2">
-                  <div className="flex justify-between items-start">
-                    <div className="min-w-0 pr-2">
-                      <h3 className="text-[11px] font-black uppercase tracking-tight text-slate-700 truncate group-hover:text-indigo-600 transition-colors leading-tight">{proj}</h3>
-                      <p className="text-[8px] text-slate-400 font-medium mt-0.5">{t('LastUpdatedLabel')}: {s.lastUpdated > 0 ? format(s.lastUpdated, 'MM/dd HH:mm') : t('StatusNever')}</p>
-                    </div>
-                    <div className="bg-white px-2 py-0.5 rounded shadow-sm border border-slate-100 shrink-0">
-                      <span className="text-[10px] font-mono font-bold text-slate-500">{s.total} <span className="text-[8px] font-sans font-black opacity-30">{t('TotalLabel')}</span></span>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-4 gap-1">
-                    {[
-                      { key: 'Urgent', color: 'rose', data: s.urgent },
-                      { key: 'Focus', color: 'indigo', data: s.focus },
-                      { key: 'Archive', color: 'slate', data: s.archive },
-                      { key: 'Trash', color: 'red', data: s.trash }
-                    ].map(cat => (
-                      <div key={cat.key} className="bg-white shadow-[0_1px_2px_rgba(0,0,0,0.02)] p-1.5 rounded-lg border border-slate-100/50 flex flex-col items-center">
-                        <span className={cn("text-[7px] font-black uppercase tracking-[0.05em] mb-1 truncate w-full text-center", 
-                          cat.key === 'Urgent' ? 'text-rose-500' : 
-                          cat.key === 'Focus' ? 'text-indigo-500' : 
-                          cat.key === 'Archive' ? 'text-slate-400' : 'text-red-400'
-                        )}>{t(cat.key)}</span>
-                        <div className="flex flex-col items-center leading-none">
-                          <span className={cn("font-bold text-[10px]", 
-                            cat.data.todo > 0 ? (
-                              cat.key === 'Urgent' ? 'text-rose-600' : 
-                              cat.key === 'Focus' ? 'text-indigo-600' : 
-                              cat.key === 'Archive' ? 'text-slate-500' : 'text-red-600'
-                            ) : "text-slate-200"
-                          )}>{cat.data.todo}</span>
-                          <span className="text-[7px] text-slate-400 mt-0.5 whitespace-nowrap">
-                            ({t('Done')}: {cat.data.done})
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="h-1 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner">
-                    <div className="bg-rose-500 transition-all duration-700" style={{ width: `${((s.urgent.todo + s.urgent.done) / s.total) * 100}%` }} />
-                    <div className="bg-indigo-500 transition-all duration-700" style={{ width: `${((s.focus.todo + s.focus.done) / s.total) * 100}%` }} />
-                    <div className="bg-slate-300 transition-all duration-700" style={{ width: `${((s.archive.todo + s.archive.done) / s.total) * 100}%` }} />
-                    <div className="bg-red-200 transition-all duration-700" style={{ width: `${((s.trash.todo + s.trash.done) / s.total) * 100}%` }} />
-                  </div>
-                </div>
-              ))}
-              {Object.keys(stats.projectStats).length === 0 && (
-                <p className="text-[10px] text-slate-400 italic text-center py-2">{t('NoTasks')}</p>
-              )}
-            </div>
-          </div>
-        </aside>
+        )}
 
         {/* Task Columns */}
-        <div className="col-span-12 lg:col-span-9 h-full min-h-0 overflow-hidden relative">
+        <div className={cn("h-full min-h-0 overflow-hidden relative", viewMode === 'dashboard' ? "flex-1 min-w-0" : "col-span-12")}>
           <AnimatePresence mode="wait">
             <motion.div
               key={viewMode}
@@ -3310,311 +3331,45 @@ export default function App() {
               className="h-full"
             >
               {viewMode === 'dashboard' ? (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full lg:pb-0">
-              {/* Urgent Column */}
-              <section className={cn(
-                "flex flex-col rounded-2xl border p-4 min-h-0 bg-red-50/50 border-red-100 transition-all h-full",
-                mobileView === 'urgent' ? "flex" : "hidden lg:flex"
-              )}>
-                <div className="flex items-center justify-between mb-4 px-2">
-                  <div className="flex items-center gap-3">
-                    <h3 className="font-bold flex items-center gap-2 text-red-700">
-                      <span className="w-2.5 h-2.5 rounded-full shadow-sm bg-red-500"></span>
-                      {t('Urgent')}
-                    </h3>
-                    <div className="flex bg-white/50 border border-red-100 rounded-lg p-0.5">
-                      <button 
-                        onClick={() => saveSettings({ displayModeFocus: 'large' })}
-                        className={cn("p-1 rounded transition-all", settings.displayModeFocus === 'large' ? "bg-white shadow-sm text-red-600" : "text-slate-400")}
-                        title={t('LargeView')}
-                      >
-                        <Grid2X2 size={10} />
-                      </button>
-                      <button 
-                        onClick={() => saveSettings({ displayModeFocus: 'standard' })}
-                        className={cn("p-1 rounded transition-all", settings.displayModeFocus === 'standard' ? "bg-white shadow-sm text-red-600" : "text-slate-400")}
-                        title={t('StandardView')}
-                      >
-                        <LayoutGrid size={10} />
-                      </button>
-                      <button 
-                        onClick={() => saveSettings({ displayModeFocus: 'compact' })}
-                        className={cn("p-1 rounded transition-all", settings.displayModeFocus === 'compact' ? "bg-white shadow-sm text-red-600" : "text-slate-400")}
-                        title={t('CompactView')}
-                      >
-                        <LayoutList size={10} />
-                      </button>
-                    </div>
+                <div className="flex-1 h-full min-w-0 flex flex-col gap-3 min-h-0 overflow-hidden">
+                  {/* Top: Focus Header Section */}
+                  <div className={cn(mobileView === 'focus' && "hidden lg:block")}>
+                    <FocusHeaderSection
+                      urgentTasks={filteredTasks.filter(t => t.category === 'Urgent')}
+                      urgentLimit={settings.urgentLimit}
+                      onSelectTask={handleOpenTaskInTab}
+                      onToggleDone={toggleDone}
+                      onToggleStar={toggleStar}
+                      onMoveTask={moveTask}
+                      onOpenDailyPick={() => setIsPickingDaily(true)}
+                      activeTaskId={activeTabTaskId}
+                      deadlineThresholdDays={settings.deadlineThreshold}
+                      t={t}
+                    />
                   </div>
-                  <span className="text-[10px] font-bold bg-white px-2 py-0.5 rounded border uppercase text-red-400 border-red-100">
-                    <span className="md:inline hidden">Slots: </span> {settings.urgentLimit}
-                  </span>
-                </div>
-                
-                <div className="flex-1 space-y-3 overflow-y-auto overflow-x-visible pr-1 custom-scrollbar pb-24 lg:pb-10">
-                  <div className={cn(
-                    "grid grid-cols-1 gap-3",
-                    settings.displayModeFocus !== 'compact' && (settings.displayModeFocus === 'large' ? "md:grid-cols-2 lg:grid-cols-1" : 
-                                   settings.displayModeFocus === 'standard' ? "md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-1" : 
-                                   "md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-1")
-                  )}>
-                    <AnimatePresence mode="popLayout">
-                      {filteredTasks
-                        .filter(t => t.category === 'Urgent')
-                      .sort((a, b) => {
-                        // Priority 1: Done state (lowest priority)
-                        if (a.isDone && !b.isDone) return 1;
-                        if (!a.isDone && b.isDone) return -1;
 
-                        // If both are done, sort UNCONDITIONALLY by recency
-                        if (a.isDone && b.isDone) {
-                          return (b.updatedAt || 0) - (a.updatedAt || 0);
-                        }
-
-                        // Priority 2: Pinned tasks (global)
-                        const pinA = !!a.isPinned;
-                        const pinB = !!b.isPinned;
-                        if (pinA !== pinB) return pinA ? -1 : 1;
-                        
-                        // Priority 3: Deadline (earliest first)
-                        if (a.deadline && b.deadline) return a.deadline - b.deadline;
-                        if (a.deadline) return -1;
-                        if (b.deadline) return 1;
-
-                        // Priority 4: Starred (starred first)
-                        const starA = !!a.isStarred;
-                        const starB = !!b.isStarred;
-                        if (starA !== starB) return starA ? -1 : 1;
-
-                        // Priority 5: Recency (updatedAt descending)
-                        return (b.updatedAt || 0) - (a.updatedAt || 0);
-                      })
-                      .map(task => (
-                        <TaskCard 
-                          key={task.id} 
-                          task={task} 
-                          onToggle={() => toggleDone(task.id)}
-                          onMove={(newCat) => moveTask(task.id, newCat)}
-                          onDelete={() => deleteTask(task.id)}
-                          onEdit={() => setEditingTask(task)}
-                          onStar={() => toggleStar(task.id)}
-                          onPin={() => togglePin(task.id)}
-                          t={t}
-                          variant="Urgent"
-                          displayMode={settings.displayModeFocus}
-                          deadlineThreshold={settings.deadlineThreshold}
-                        />
-                      ))}
-                  </AnimatePresence>
+                  {/* Bottom: VS Code Multi-Tab Task Detail View */}
+                  <div className={cn("flex-1 min-h-0 flex flex-col", mobileView === 'urgent' && "hidden lg:flex")}>
+                    <TaskTabsDetail
+                      tasks={tasks}
+                      openTaskIds={openTaskIds}
+                      activeTaskId={activeTabTaskId}
+                      onSelectTab={(id) => setActiveTabTaskId(id)}
+                      onCloseTab={handleCloseTaskTab}
+                      onCloseAllTabs={handleCloseAllTabs}
+                      onUpdateTask={updateTask}
+                      onMoveTask={moveTask}
+                      onDeleteTask={deleteTask}
+                      onToggleDone={toggleDone}
+                      onToggleStar={toggleStar}
+                      onTogglePin={togglePin}
+                      onDuplicateTask={handleDuplicateTask}
+                      deadlineThresholdDays={settings.deadlineThreshold}
+                      t={t}
+                    />
                   </div>
-                  {filteredTasks.filter(t => t.category === 'Urgent').length === 0 && (
-                    <div className="py-20 flex flex-col items-center justify-center text-slate-300 opacity-40">
-                      <Zap size={48} strokeWidth={1} />
-                      <span className="text-[10px] font-bold mt-2 uppercase tracking-tighter italic">{t('NoUrgent')}</span>
-                    </div>
-                  )}
                 </div>
-              </section>
-
-              {/* Focus Column (Spans 2) */}
-              <section className={cn(
-                "col-span-1 lg:col-span-2 flex flex-col rounded-2xl border p-4 min-h-0 bg-indigo-50/50 border-indigo-100 transition-all h-full",
-                mobileView === 'focus' ? "flex" : "hidden lg:flex"
-              )}>
-                <div className="flex items-center justify-between mb-4 px-2">
-                  <div className="flex items-center gap-3">
-                    <h3 className="font-bold flex items-center gap-2 text-indigo-700">
-                      <span className="w-2.5 h-2.5 rounded-full shadow-sm bg-indigo-500"></span>
-                      {t('Focus')}
-                    </h3>
-                    <div className="flex bg-white/50 border border-indigo-100 rounded-lg p-0.5">
-                      <button 
-                        onClick={() => saveSettings({ displayModeTodo: 'large' })}
-                        className={cn("p-1 rounded transition-all", settings.displayModeTodo === 'large' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400")}
-                        title={t('LargeView')}
-                      >
-                        <Grid2X2 size={10} />
-                      </button>
-                      <button 
-                        onClick={() => saveSettings({ displayModeTodo: 'standard' })}
-                        className={cn("p-1 rounded transition-all", settings.displayModeTodo === 'standard' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400")}
-                        title={t('StandardView')}
-                      >
-                        <LayoutGrid size={10} />
-                      </button>
-                      <button 
-                        onClick={() => saveSettings({ displayModeTodo: 'compact' })}
-                        className={cn("p-1 rounded transition-all", settings.displayModeTodo === 'compact' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400")}
-                        title={t('CompactView')}
-                      >
-                        <LayoutList size={10} />
-                      </button>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => setIsPickingDaily(true)}
-                    className="text-[10px] font-bold text-indigo-500 uppercase tracking-tight hover:underline transition-all"
-                  >
-                    {t('Extract')} &rarr;
-                  </button>
-                </div>
-                
-                <div className="flex-1 space-y-6 overflow-y-auto overflow-x-visible pr-1 custom-scrollbar pb-24 lg:pb-10">
-                  {groupedFocusTasks.expired.length > 0 && (
-                    <div className="space-y-2 mb-4">
-                       <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-red-600 bg-red-100/50 px-2 py-1.5 rounded-lg border border-red-200 flex items-center gap-2">
-                        <AlertCircle size={12} strokeWidth={3} />
-                        {t('ExpiredGlobal')}
-                      </h4>
-                      <div className={cn(
-                        "grid grid-cols-1 gap-2.5",
-                        settings.displayModeTodo !== 'compact' && (settings.displayModeTodo === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                      )}>
-                        <AnimatePresence mode="popLayout">
-                          {groupedFocusTasks.expired.map(task => (
-                            <TaskCard 
-                              key={task.id} 
-                              task={task} 
-                              onToggle={() => toggleDone(task.id)}
-                              onMove={(newCat) => moveTask(task.id, newCat)}
-                              onDelete={() => deleteTask(task.id)}
-                              onEdit={() => setEditingTask(task)}
-                              onStar={() => toggleStar(task.id)}
-                              onPin={() => togglePin(task.id)}
-                              t={t}
-                              variant="Focus"
-                              displayMode={settings.displayModeTodo}
-                              deadlineThreshold={settings.deadlineThreshold}
-                            />
-                          ))}
-                        </AnimatePresence>
-                      </div>
-                    </div>
-                  )}
-
-                  {groupedFocusTasks.nearDeadline.length > 0 && (
-                    <div className="space-y-2 mb-8">
-                       <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-500 bg-amber-50/50 px-2 py-1.5 rounded-lg border border-amber-100 flex items-center gap-2">
-                        <AlertTriangle size={12} strokeWidth={3} />
-                        {t('ApproachingGlobal')}
-                      </h4>
-                      <div className={cn(
-                        "grid grid-cols-1 gap-2.5",
-                        settings.displayModeTodo !== 'compact' && (settings.displayModeTodo === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                      )}>
-                        <AnimatePresence mode="popLayout">
-                          {groupedFocusTasks.nearDeadline.map(task => (
-                            <TaskCard 
-                              key={task.id} 
-                              task={task} 
-                              onToggle={() => toggleDone(task.id)}
-                              onMove={(newCat) => moveTask(task.id, newCat)}
-                              onDelete={() => deleteTask(task.id)}
-                              onEdit={() => setEditingTask(task)}
-                              onStar={() => toggleStar(task.id)}
-                              onPin={() => togglePin(task.id)}
-                              t={t}
-                              variant="Focus"
-                              displayMode={settings.displayModeTodo}
-                              deadlineThreshold={settings.deadlineThreshold}
-                            />
-                          ))}
-                        </AnimatePresence>
-                      </div>
-                    </div>
-                  )}
-
-                  {groupedFocusTasks.pinned.length > 0 && (
-                    <div className="space-y-2 mb-8">
-                       <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-600 bg-indigo-50 px-2 py-1.5 rounded-lg border border-indigo-100 flex items-center gap-2">
-                        <Pin size={12} strokeWidth={3} className="rotate-45" />
-                        {t('PinnedGlobal')}
-                      </h4>
-                      <div className={cn(
-                        "grid grid-cols-1 gap-2.5",
-                        settings.displayModeTodo !== 'compact' && (settings.displayModeTodo === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                      )}>
-                        <AnimatePresence mode="popLayout">
-                          {groupedFocusTasks.pinned.map(task => (
-                            <TaskCard 
-                              key={task.id} 
-                              task={task} 
-                              onToggle={() => toggleDone(task.id)}
-                              onMove={(newCat) => moveTask(task.id, newCat)}
-                              onDelete={() => deleteTask(task.id)}
-                              onEdit={() => setEditingTask(task)}
-                              onStar={() => toggleStar(task.id)}
-                              onPin={() => togglePin(task.id)}
-                              t={t}
-                              variant="Focus"
-                              displayMode={settings.displayModeTodo}
-                              deadlineThreshold={settings.deadlineThreshold}
-                            />
-                          ))}
-                        </AnimatePresence>
-                      </div>
-                    </div>
-                  )}
-
-                  {Object.keys(groupedFocusTasks.grouped).length > 0 ? (
-                    (Object.entries(groupedFocusTasks.grouped) as [string, Task[]][]).map(([project, tasks]) => {
-                      const isCollapsed = collapsedProjects.has(project);
-                      return (
-                        <div key={project} className="space-y-2">
-                          <button 
-                            onClick={() => toggleProjectCollapse(project)}
-                            className="sticky top-0 z-20 w-full flex items-center gap-4 px-2 py-2.5 hover:opacity-90 transition-opacity bg-indigo-50/90 backdrop-blur-md border-b border-indigo-200/50"
-                          >
-                            <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 bg-white shadow-sm px-2.5 py-1 rounded-lg border border-slate-200 flex items-center gap-1.5">
-                              {isCollapsed ? <ChevronRight size={10} /> : <ChevronDown size={10} />}
-                              {project}
-                            </h4>
-                            <div className="h-px flex-1 bg-indigo-300/30"></div>
-                            <span className="text-[9px] font-bold text-indigo-400 bg-indigo-100 px-2 py-0.5 rounded-full uppercase tracking-tighter">
-                              {tasks.length} item{tasks.length > 1 ? 's' : ''}
-                            </span>
-                          </button>
-                          
-                          {!isCollapsed && (
-                            <div className={cn(
-                              "grid grid-cols-1 gap-2.5",
-                              settings.displayModeTodo !== 'compact' && (settings.displayModeTodo === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                            )}>
-                              <AnimatePresence mode="popLayout">
-                                {tasks.map(task => (
-                                  <TaskCard 
-                                    key={task.id} 
-                                    task={task} 
-                                    onToggle={() => toggleDone(task.id)}
-                                    onMove={(newCat) => moveTask(task.id, newCat)}
-                                    onDelete={() => deleteTask(task.id)}
-                                    onEdit={() => setEditingTask(task)}
-                                    onStar={() => toggleStar(task.id)}
-                                    onPin={() => togglePin(task.id)}
-                                    t={t}
-                                    variant="Focus"
-                                    displayMode={settings.displayModeTodo}
-                                    deadlineThreshold={settings.deadlineThreshold}
-                                  />
-                                ))}
-                              </AnimatePresence>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  ) : (
-                    groupedFocusTasks.nearDeadline.length === 0 && (
-                      <div className="py-20 flex flex-col items-center justify-center text-slate-300 opacity-40">
-                        <Target size={48} strokeWidth={1} />
-                        <span className="text-[10px] font-bold mt-2 uppercase tracking-tighter italic">{t('NoFocus')}</span>
-                      </div>
-                    )
-                  )}
-                </div>
-              </section>
-            </div>
-          ) : viewMode === 'calendar' ? (
+              ) : viewMode === 'calendar' ? (
             /* Calendar Mode */
             <CalendarView 
               tasks={searchAndProjectFilteredTasks} 
@@ -4570,6 +4325,28 @@ export default function App() {
             onDelete={() => deleteTask(editingTask.id)}
             t={t}
             projects={projects}
+          />
+        )}
+        {isAuthModalOpen && (
+          <AuthModal
+            isOpen={isAuthModalOpen}
+            onClose={() => {
+              setIsAuthModalOpen(false);
+              setAuthModalError(null);
+            }}
+            initialError={authModalError}
+            onSuccess={() => {
+              setIsAuthModalOpen(false);
+              setAuthModalError(null);
+              setIsLocalMode(false);
+              setMessage({ text: "Google認証に成功しました。クラウド同期が有効です。", type: 'info' });
+            }}
+            onSwitchToLocalMode={() => {
+              setIsLocalMode(true);
+              localStorage.setItem('navfor_mode', 'local');
+              setIsAuthModalOpen(false);
+              setMessage({ text: "ローカルモード（オフライン保存）に切り替えました。", type: 'info' });
+            }}
           />
         )}
       </AnimatePresence>
