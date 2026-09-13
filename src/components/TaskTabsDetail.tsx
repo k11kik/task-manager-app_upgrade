@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   X, 
   CheckCircle2, 
@@ -22,7 +22,12 @@ import {
   Minimize2,
   Folder,
   Tag,
-  Save
+  Save,
+  Columns2,
+  Split,
+  ArrowRightLeft,
+  MoveRight,
+  MoveLeft
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
@@ -46,13 +51,46 @@ interface TaskTabsDetailProps {
   t: (key: string) => string;
 }
 
-export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
-  tasks,
+// Single Pane Editor View Component
+interface SinglePaneViewProps {
+  paneIndex: 0 | 1;
+  isActivePane: boolean;
+  isSplit: boolean;
+  openTaskIds: string[];
+  activeTaskId: string | null;
+  tasks: Task[];
+  onFocusPane: () => void;
+  onSelectTab: (taskId: string) => void;
+  onCloseTab: (taskId: string) => void;
+  onCloseAllTabs: () => void;
+  onMoveTabToOtherPane?: (taskId: string) => void;
+  onToggleSplit: () => void;
+  onCloseSplit?: () => void;
+  onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
+  onMoveTask: (taskId: string, category: Category) => void;
+  onDeleteTask: (taskId: string) => void;
+  onToggleDone: (taskId: string) => void;
+  onToggleStar: (taskId: string) => void;
+  onTogglePin: (taskId: string) => void;
+  onDuplicateTask?: (task: Task) => void;
+  deadlineThresholdDays?: number;
+  t: (key: string) => string;
+}
+
+const SinglePaneView: React.FC<SinglePaneViewProps> = ({
+  paneIndex,
+  isActivePane,
+  isSplit,
   openTaskIds,
   activeTaskId,
+  tasks,
+  onFocusPane,
   onSelectTab,
   onCloseTab,
   onCloseAllTabs,
+  onMoveTabToOtherPane,
+  onToggleSplit,
+  onCloseSplit,
   onUpdateTask,
   onMoveTask,
   onDeleteTask,
@@ -63,22 +101,19 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   deadlineThresholdDays = 3,
   t
 }) => {
-  // Current active task
   const activeTask = useMemo(() => {
     return tasks.find(t => t.id === activeTaskId) || null;
   }, [tasks, activeTaskId]);
 
-  // Local draft state for active task editing
   const [draftTitle, setDraftTitle] = useState('');
   const [draftProject, setDraftProject] = useState('');
   const [draftNotes, setDraftNotes] = useState('');
   const [draftUrls, setDraftUrls] = useState<string[]>([]);
   const [draftDeadline, setDraftDeadline] = useState('');
   const [draftIsAllDay, setDraftIsAllDay] = useState(false);
-  const [isMaximized, setIsMaximized] = useState(false);
   const [savedIndicator, setSavedIndicator] = useState(false);
 
-  // Sync draft when activeTask changes
+  // Sync drafts when activeTask changes
   useEffect(() => {
     if (activeTask) {
       setDraftTitle(activeTask.title);
@@ -94,7 +129,6 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     }
   }, [activeTask?.id]);
 
-  // Save changes to task
   const handleSaveField = (updates: Partial<Task>) => {
     if (!activeTask) return;
     onUpdateTask(activeTask.id, updates);
@@ -138,43 +172,50 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     handleSaveField({ urls: next.filter(u => u.trim() !== '') });
   };
 
-  // Open tasks mapped
   const openTasks = useMemo(() => {
     return openTaskIds
       .map(id => tasks.find(t => t.id === id))
       .filter((t): t is Task => t !== undefined);
   }, [openTaskIds, tasks]);
 
-  // Breadcrumb segments from project path
   const breadcrumbSegments = useMemo(() => {
     if (!activeTask) return [];
-    const parts = (activeTask.project || 'General').split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
-    return parts;
+    return (activeTask.project || 'General').split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
   }, [activeTask?.project]);
 
   return (
-    <div className={cn(
-      "flex flex-col flex-1 h-full min-h-0 bg-white border border-slate-200/90 rounded-xl overflow-hidden shadow-xs transition-all",
-      isMaximized && "fixed inset-4 z-50 rounded-2xl shadow-2xl"
-    )}>
-      {/* VS Code-style Tab Bar */}
-      <div className="flex items-center justify-between bg-slate-100/90 border-b border-slate-200 overflow-x-auto select-none custom-scrollbar shrink-0 h-9">
-        <div className="flex items-center h-full flex-1 overflow-x-auto">
+    <div 
+      onClick={onFocusPane}
+      className={cn(
+        "flex flex-col flex-1 h-full min-h-0 bg-white border border-slate-200/90 rounded-xl overflow-hidden shadow-2xs transition-all relative",
+        isActivePane && isSplit && "ring-2 ring-indigo-500/50 border-indigo-300"
+      )}
+    >
+      {/* VS Code Tab Bar */}
+      <div className={cn(
+        "flex items-center justify-between border-b overflow-x-auto select-none custom-scrollbar shrink-0 h-9 transition-colors",
+        isActivePane ? "bg-slate-100/95 border-slate-300" : "bg-slate-50 border-slate-200"
+      )}>
+        <div className="flex items-center h-full flex-1 overflow-x-auto min-w-0">
           {openTasks.map(task => {
             const isActive = task.id === activeTaskId;
             return (
               <div
                 key={task.id}
-                onClick={() => onSelectTab(task.id)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onFocusPane();
+                  onSelectTab(task.id);
+                }}
                 className={cn(
-                  "group relative flex items-center gap-2 px-3 h-full border-r border-slate-200 text-xs font-medium cursor-pointer transition-colors max-w-[200px] shrink-0",
+                  "group relative flex items-center gap-1.5 px-3 h-full border-r border-slate-200 text-xs font-medium cursor-pointer transition-colors max-w-[180px] shrink-0",
                   isActive
                     ? "bg-white text-slate-900 border-t-2 border-t-indigo-600 font-semibold shadow-xs"
                     : "text-slate-500 hover:bg-slate-200/60 hover:text-slate-800"
                 )}
                 title={`${task.project} > ${task.title}`}
               >
-                {/* Status Dot / Icon */}
+                {/* Status Dot */}
                 {task.isDone ? (
                   <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
                 ) : task.category === 'Urgent' ? (
@@ -188,9 +229,24 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   {task.title}
                 </span>
 
-                {/* Star indicator on tab */}
+                {/* Star indicator */}
                 {task.isStarred && (
                   <Star size={10} fill="currentColor" className="text-amber-400 shrink-0" />
+                )}
+
+                {/* Move to other pane button (if split) */}
+                {isSplit && onMoveTabToOtherPane && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onMoveTabToOtherPane(task.id);
+                    }}
+                    className="p-0.5 rounded hover:bg-indigo-100 text-slate-400 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                    title={paneIndex === 0 ? "右のペインへ移動" : "左のペインへ移動"}
+                  >
+                    {paneIndex === 0 ? <MoveRight size={10} /> : <MoveLeft size={10} />}
+                  </button>
                 )}
 
                 {/* Close Tab Button */}
@@ -200,7 +256,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     e.stopPropagation();
                     onCloseTab(task.id);
                   }}
-                  className="p-0.5 rounded hover:bg-slate-300/80 text-slate-400 hover:text-slate-700 opacity-60 group-hover:opacity-100 transition-opacity ml-1 shrink-0"
+                  className="p-0.5 rounded hover:bg-slate-300/80 text-slate-400 hover:text-slate-700 opacity-60 group-hover:opacity-100 transition-opacity ml-0.5 shrink-0"
                   title="タブを閉じる"
                 >
                   <X size={11} />
@@ -216,35 +272,64 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
           )}
         </div>
 
-        {/* Tab Bar Actions */}
+        {/* Tab Bar Actions (Right side of tab bar) */}
         <div className="flex items-center gap-1 px-2 shrink-0">
           {savedIndicator && (
             <span className="text-[10px] text-emerald-600 font-medium animate-pulse flex items-center gap-1">
               <Save size={10} /> 保存済
             </span>
           )}
+
+          {/* Split Editor Button */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleSplit();
+            }}
+            className={cn(
+              "p-1 rounded transition-colors flex items-center gap-1 text-[10px] font-semibold",
+              isSplit 
+                ? "bg-indigo-100 text-indigo-700 hover:bg-indigo-200" 
+                : "text-slate-500 hover:bg-slate-200 hover:text-slate-800"
+            )}
+            title={isSplit ? "分割を解除" : "エディタを左右に分割 (Split Editor)"}
+          >
+            <Columns2 size={13} />
+            <span className="hidden xl:inline">{isSplit ? '分割解除' : '分割'}</span>
+          </button>
+
+          {/* Close split pane button (for secondary pane) */}
+          {isSplit && paneIndex === 1 && onCloseSplit && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onCloseSplit();
+              }}
+              className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+              title="このエディタペインを閉じる"
+            >
+              <X size={13} />
+            </button>
+          )}
+
           {openTasks.length > 0 && (
             <button
-              onClick={onCloseAllTabs}
-              className="px-2 py-0.5 text-[10px] text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded transition-colors"
-              title="すべてのタブを閉じる"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCloseAllTabs();
+              }}
+              className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded transition-colors"
+              title="このペインの全タブを閉じる"
             >
               すべて閉じる
             </button>
           )}
-          <button
-            onClick={() => setIsMaximized(!isMaximized)}
-            className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded transition-colors"
-            title={isMaximized ? "縮小" : "最大化"}
-          >
-            {isMaximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-          </button>
         </div>
       </div>
 
       {/* Detail Content Area */}
       {activeTask ? (
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-5 flex flex-col gap-5">
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 lg:p-5 flex flex-col gap-4">
           {/* Breadcrumb / Project Hierarchy path */}
           <div className="flex items-center flex-wrap gap-1.5 text-xs text-slate-400 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100">
             <Folder size={13} className="text-amber-500" />
@@ -271,7 +356,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   }
                 }}
                 className="bg-white border border-slate-200 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-700 outline-none focus:ring-1 focus:ring-indigo-500"
-                placeholder="プロジェクト/サブプロジェクト"
+                placeholder="プロジェクト/サブフォルダ"
               />
             </div>
           </div>
@@ -284,9 +369,9 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               title={activeTask.isDone ? "未完了に戻す" : "完了にする"}
             >
               {activeTask.isDone ? (
-                <CheckCircle2 size={24} className="text-emerald-500" />
+                <CheckCircle2 size={22} className="text-emerald-500" />
               ) : (
-                <Circle size={24} className="hover:text-indigo-500" />
+                <Circle size={22} className="hover:text-indigo-500 text-slate-300" />
               )}
             </button>
 
@@ -302,7 +387,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                 rows={1}
                 placeholder="タスクのタイトル..."
                 className={cn(
-                  "w-full text-lg font-bold text-slate-900 border-0 border-b border-transparent hover:border-slate-200 focus:border-indigo-500 outline-none bg-transparent transition-all resize-none leading-snug py-0.5",
+                  "w-full text-base lg:text-lg font-bold text-slate-900 border-0 border-b border-transparent hover:border-slate-200 focus:border-indigo-500 outline-none bg-transparent transition-all resize-none leading-snug py-0.5",
                   activeTask.isDone && "line-through text-slate-400"
                 )}
               />
@@ -313,35 +398,35 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               <button
                 onClick={() => onToggleStar(activeTask.id)}
                 className={cn(
-                  "p-2 rounded-lg transition-colors border",
+                  "p-1.5 rounded-lg transition-colors border",
                   activeTask.isStarred
                     ? "bg-amber-50 border-amber-200 text-amber-500"
                     : "border-slate-200 text-slate-400 hover:bg-slate-50"
                 )}
                 title="スター切り替え"
               >
-                <Star size={16} fill={activeTask.isStarred ? "currentColor" : "none"} />
+                <Star size={15} fill={activeTask.isStarred ? "currentColor" : "none"} />
               </button>
 
               <button
                 onClick={() => onTogglePin(activeTask.id)}
                 className={cn(
-                  "p-2 rounded-lg transition-colors border",
+                  "p-1.5 rounded-lg transition-colors border",
                   activeTask.isPinned
                     ? "bg-indigo-50 border-indigo-200 text-indigo-600"
                     : "border-slate-200 text-slate-400 hover:bg-slate-50"
                 )}
                 title="ピン留め"
               >
-                <Pin size={16} className={activeTask.isPinned ? "rotate-45" : ""} />
+                <Pin size={15} className={activeTask.isPinned ? "rotate-45" : ""} />
               </button>
             </div>
           </div>
 
           {/* Priority / Category Selector & Deadline Strip */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-50/70 p-4 rounded-xl border border-slate-100">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-slate-50/70 p-3 rounded-xl border border-slate-100">
             {/* Category / Slot Switcher */}
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1">
                 <Tag size={11} />
                 ステータス / スロット
@@ -351,7 +436,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   type="button"
                   onClick={() => onMoveTask(activeTask.id, 'Urgent')}
                   className={cn(
-                    "flex-1 py-1.5 px-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 border",
+                    "flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1 border",
                     activeTask.category === 'Urgent'
                       ? "bg-red-500 text-white border-red-600 shadow-xs"
                       : "bg-white text-slate-600 border-slate-200 hover:border-red-300"
@@ -364,7 +449,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   type="button"
                   onClick={() => onMoveTask(activeTask.id, 'Focus')}
                   className={cn(
-                    "flex-1 py-1.5 px-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 border",
+                    "flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1 border",
                     activeTask.category === 'Focus'
                       ? "bg-indigo-600 text-white border-indigo-700 shadow-xs"
                       : "bg-white text-slate-600 border-slate-200 hover:border-indigo-300"
@@ -377,7 +462,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
             </div>
 
             {/* Deadline settings */}
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <div className="flex items-center justify-between">
                 <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1">
                   <Clock size={11} />
@@ -393,12 +478,12 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   </button>
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <input
                   type={draftIsAllDay ? "date" : "datetime-local"}
                   value={draftDeadline}
                   onChange={(e) => handleDeadlineChange(e.target.value)}
-                  className="flex-1 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 outline-none focus:ring-1 focus:ring-indigo-500"
+                  className="flex-1 bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-xs text-slate-700 outline-none focus:ring-1 focus:ring-indigo-500"
                 />
                 <button
                   type="button"
@@ -408,26 +493,26 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     handleDeadlineChange(draftDeadline, nextAllDay);
                   }}
                   className={cn(
-                    "px-2 py-1.5 rounded-lg border text-[10px] font-bold transition-all shrink-0",
+                    "px-2 py-1 rounded-lg border text-[10px] font-bold transition-all shrink-0",
                     draftIsAllDay
                       ? "bg-indigo-600 text-white border-indigo-600"
                       : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
                   )}
                 >
-                  {draftIsAllDay ? "終日" : "時刻指定"}
+                  {draftIsAllDay ? "終日" : "時刻"}
                 </button>
               </div>
             </div>
           </div>
 
           {/* Notes / Memos Area */}
-          <div className="flex-1 flex flex-col gap-1.5 min-h-[140px]">
+          <div className="flex-1 flex flex-col gap-1 min-h-[120px]">
             <div className="flex items-center justify-between">
               <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
                 <FileText size={13} className="text-indigo-500" />
                 メモ・コンテキスト・サブタスク
               </label>
-              <span className="text-[10px] text-slate-400">Ctrl+Enter またはフォーカスを外すと保存</span>
+              <span className="text-[10px] text-slate-400">フォーカスを外すと自動保存</span>
             </div>
             <textarea
               value={draftNotes}
@@ -438,12 +523,12 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                 }
               }}
               placeholder="タスクに関する背景、チェックリスト、次のアクションなどのメモ..."
-              className="w-full flex-1 min-h-[120px] bg-slate-50/50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 leading-relaxed outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white transition-all font-mono"
+              className="w-full flex-1 min-h-[100px] bg-slate-50/50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 leading-relaxed outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white transition-all font-mono"
             />
           </div>
 
           {/* Reference URLs */}
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <div className="flex items-center justify-between">
               <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
                 <LinkIcon size={13} className="text-indigo-500" />
@@ -467,7 +552,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                       placeholder="https://..."
                       value={url}
                       onChange={(e) => handleUrlChange(i, e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-xs text-slate-700 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500"
                     />
                     {url.trim() && (
                       <a
@@ -487,7 +572,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                       onClick={() => handleRemoveUrl(i)}
                       className="p-1 text-slate-300 hover:text-red-500 transition-colors"
                     >
-                      <X size={14} />
+                      <X size={13} />
                     </button>
                   )}
                 </div>
@@ -496,59 +581,264 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
           </div>
 
           {/* Footer Metadata & Actions */}
-          <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
-            <div className="flex items-center gap-4 text-[10px]">
-              <span>作成: {format(activeTask.createdAt, 'yyyy/MM/dd HH:mm')}</span>
-              <span>更新: {activeTask.updatedAt ? format(activeTask.updatedAt, 'yyyy/MM/dd HH:mm') : '-'}</span>
+          <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+            <div className="flex items-center gap-3 text-[10px]">
+              <span>作成: {format(activeTask.createdAt, 'MM/dd HH:mm')}</span>
+              <span>更新: {activeTask.updatedAt ? format(activeTask.updatedAt, 'MM/dd HH:mm') : '-'}</span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               {onDuplicateTask && (
                 <button
                   type="button"
                   onClick={() => onDuplicateTask(activeTask)}
-                  className="px-2.5 py-1 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-medium"
+                  className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-medium"
                 >
-                  <Copy size={12} />
+                  <Copy size={11} />
                   複製
                 </button>
               )}
               <button
                 type="button"
                 onClick={() => onMoveTask(activeTask.id, 'Archive')}
-                className="px-2.5 py-1 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-medium"
+                className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-medium"
               >
-                <Archive size={12} />
+                <Archive size={11} />
                 アーカイブ
               </button>
               <button
                 type="button"
                 onClick={() => onDeleteTask(activeTask.id)}
-                className="px-2.5 py-1 text-red-600 hover:bg-red-50 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-medium"
+                className="px-2 py-1 text-red-600 hover:bg-red-50 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-medium"
               >
-                <Trash2 size={12} />
+                <Trash2 size={11} />
                 ゴミ箱へ
               </button>
             </div>
           </div>
         </div>
       ) : (
-        /* Empty State when no task tab is active */
-        <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-slate-400 bg-slate-50/40">
-          <div className="w-14 h-14 bg-white rounded-2xl shadow-sm border border-slate-200/80 flex items-center justify-center text-indigo-500 mb-3">
-            <FileText size={26} strokeWidth={1.5} />
+        /* Empty State */
+        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-slate-400 bg-slate-50/40">
+          <div className="w-12 h-12 bg-white rounded-2xl shadow-sm border border-slate-200/80 flex items-center justify-center text-indigo-500 mb-2">
+            <FileText size={22} strokeWidth={1.5} />
           </div>
-          <h3 className="text-sm font-bold text-slate-700 mb-1">
+          <h3 className="text-xs font-bold text-slate-700 mb-1">
             タスクが選択されていません
           </h3>
-          <p className="text-xs text-slate-400 max-w-sm leading-relaxed mb-4">
-            左側のエクスプローラーツリーからプロジェクトやタスクをクリックすると、VS Codeのようにタブで詳細を開いて確認・編集できます。
+          <p className="text-[11px] text-slate-400 max-w-xs leading-relaxed mb-3">
+            左側のエクスプローラーやFocusエリアからタスクをクリックして開きます。
           </p>
-          <div className="flex items-center gap-2 text-[11px] text-slate-500 bg-white px-3 py-1.5 rounded-lg border border-slate-200">
-            <Zap size={12} className="text-amber-500" />
-            <span>複数タスクを同時にタブで開いて切り替え可能</span>
-          </div>
+          {isSplit && (
+            <span className="text-[10px] text-indigo-500 bg-indigo-50 px-2 py-1 rounded border border-indigo-100">
+              ペイン {paneIndex + 1} (アクティブ: {isActivePane ? 'Yes' : 'No'})
+            </span>
+          )}
         </div>
+      )}
+    </div>
+  );
+};
+
+export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
+  tasks,
+  openTaskIds,
+  activeTaskId,
+  onSelectTab,
+  onCloseTab,
+  onCloseAllTabs,
+  onUpdateTask,
+  onMoveTask,
+  onDeleteTask,
+  onToggleDone,
+  onToggleStar,
+  onTogglePin,
+  onDuplicateTask,
+  deadlineThresholdDays = 3,
+  t
+}) => {
+  // Split Editor State
+  const [isSplit, setIsSplit] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('navfor_editor_split') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const [activePaneIndex, setActivePaneIndex] = useState<0 | 1>(0);
+
+  // Secondary Pane Tabs & Active state
+  const [pane1OpenTaskIds, setPane1OpenTaskIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_pane1_tabs');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [pane1ActiveTaskId, setPane1ActiveTaskId] = useState<string | null>(null);
+
+  // Save Split state
+  const handleToggleSplit = () => {
+    const nextSplit = !isSplit;
+    setIsSplit(nextSplit);
+    try {
+      localStorage.setItem('navfor_editor_split', String(nextSplit));
+    } catch (e) {
+      console.error(e);
+    }
+    // If splitting and pane 1 has no tabs, clone active task to pane 1 or select one
+    if (nextSplit && pane1OpenTaskIds.length === 0 && activeTaskId) {
+      setPane1OpenTaskIds([activeTaskId]);
+      setPane1ActiveTaskId(activeTaskId);
+    }
+  };
+
+  const handleCloseSplit = () => {
+    setIsSplit(false);
+    setActivePaneIndex(0);
+    try {
+      localStorage.setItem('navfor_editor_split', 'false');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // When activeTaskId from props changes (e.g. from Explorer tree or Focus click)
+  useEffect(() => {
+    if (!activeTaskId) return;
+
+    if (isSplit && activePaneIndex === 1) {
+      // Open in secondary pane
+      if (!pane1OpenTaskIds.includes(activeTaskId)) {
+        const next = [...pane1OpenTaskIds, activeTaskId];
+        setPane1OpenTaskIds(next);
+        try {
+          localStorage.setItem('navfor_pane1_tabs', JSON.stringify(next));
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      setPane1ActiveTaskId(activeTaskId);
+    }
+    // If activePaneIndex === 0, the prop change is naturally handled by onSelectTab & openTaskIds in App.tsx
+  }, [activeTaskId, isSplit, activePaneIndex]);
+
+  // Secondary pane tab handlers
+  const handleSelectPane1Tab = (taskId: string) => {
+    setActivePaneIndex(1);
+    setPane1ActiveTaskId(taskId);
+  };
+
+  const handleClosePane1Tab = (taskId: string) => {
+    const next = pane1OpenTaskIds.filter(id => id !== taskId);
+    setPane1OpenTaskIds(next);
+    try {
+      localStorage.setItem('navfor_pane1_tabs', JSON.stringify(next));
+    } catch (e) {
+      console.error(e);
+    }
+    if (pane1ActiveTaskId === taskId) {
+      setPane1ActiveTaskId(next.length > 0 ? next[next.length - 1] : null);
+    }
+  };
+
+  const handleCloseAllPane1Tabs = () => {
+    setPane1OpenTaskIds([]);
+    setPane1ActiveTaskId(null);
+    try {
+      localStorage.setItem('navfor_pane1_tabs', JSON.stringify([]));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Move tab from Pane 0 -> Pane 1
+  const handleMoveTabToPane1 = (taskId: string) => {
+    if (!pane1OpenTaskIds.includes(taskId)) {
+      const next = [...pane1OpenTaskIds, taskId];
+      setPane1OpenTaskIds(next);
+      try {
+        localStorage.setItem('navfor_pane1_tabs', JSON.stringify(next));
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    setPane1ActiveTaskId(taskId);
+    setActivePaneIndex(1);
+    onCloseTab(taskId);
+  };
+
+  // Move tab from Pane 1 -> Pane 0
+  const handleMoveTabToPane0 = (taskId: string) => {
+    if (!openTaskIds.includes(taskId)) {
+      onSelectTab(taskId);
+    }
+    setActivePaneIndex(0);
+    handleClosePane1Tab(taskId);
+  };
+
+  return (
+    <div className="flex-1 h-full min-h-0 flex flex-row gap-2 overflow-hidden">
+      {/* Pane 0 (Primary / Left) */}
+      <SinglePaneView
+        paneIndex={0}
+        isActivePane={activePaneIndex === 0}
+        isSplit={isSplit}
+        openTaskIds={openTaskIds}
+        activeTaskId={activeTaskId}
+        tasks={tasks}
+        onFocusPane={() => setActivePaneIndex(0)}
+        onSelectTab={onSelectTab}
+        onCloseTab={onCloseTab}
+        onCloseAllTabs={onCloseAllTabs}
+        onMoveTabToOtherPane={isSplit ? handleMoveTabToPane1 : undefined}
+        onToggleSplit={handleToggleSplit}
+        onCloseSplit={undefined}
+        onUpdateTask={onUpdateTask}
+        onMoveTask={onMoveTask}
+        onDeleteTask={(id) => {
+          onDeleteTask(id);
+          handleClosePane1Tab(id);
+        }}
+        onToggleDone={onToggleDone}
+        onToggleStar={onToggleStar}
+        onTogglePin={onTogglePin}
+        onDuplicateTask={onDuplicateTask}
+        deadlineThresholdDays={deadlineThresholdDays}
+        t={t}
+      />
+
+      {/* Pane 1 (Secondary / Right) when isSplit is true */}
+      {isSplit && (
+        <SinglePaneView
+          paneIndex={1}
+          isActivePane={activePaneIndex === 1}
+          isSplit={isSplit}
+          openTaskIds={pane1OpenTaskIds}
+          activeTaskId={pane1ActiveTaskId}
+          tasks={tasks}
+          onFocusPane={() => setActivePaneIndex(1)}
+          onSelectTab={handleSelectPane1Tab}
+          onCloseTab={handleClosePane1Tab}
+          onCloseAllTabs={handleCloseAllPane1Tabs}
+          onMoveTabToOtherPane={handleMoveTabToPane0}
+          onToggleSplit={handleToggleSplit}
+          onCloseSplit={handleCloseSplit}
+          onUpdateTask={onUpdateTask}
+          onMoveTask={onMoveTask}
+          onDeleteTask={(id) => {
+            onDeleteTask(id);
+            handleClosePane1Tab(id);
+          }}
+          onToggleDone={onToggleDone}
+          onToggleStar={onToggleStar}
+          onTogglePin={onTogglePin}
+          onDuplicateTask={onDuplicateTask}
+          deadlineThresholdDays={deadlineThresholdDays}
+          t={t}
+        />
       )}
     </div>
   );

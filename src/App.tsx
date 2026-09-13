@@ -3300,7 +3300,7 @@ export default function App() {
         {viewMode === 'dashboard' && (
           <div className={cn(
             "h-full min-h-0 shrink-0",
-            mobileView !== 'summary' && "hidden lg:flex"
+            mobileView !== 'summary' && mobileView !== 'urgent' && "hidden lg:flex"
           )}>
             <TaskExplorerTree
               tasks={filteredTasks}
@@ -3310,16 +3310,21 @@ export default function App() {
               onAddTask={handleCreateTaskDirect}
               onToggleDone={toggleDone}
               onToggleStar={toggleStar}
+              onTogglePin={togglePin}
+              onMoveTask={moveTask}
+              onMoveTaskFolder={(taskId, newProject) => updateTask(taskId, { project: newProject })}
               activeSection={activeSection}
               width={explorerWidth}
               onWidthChange={handleExplorerWidthChange}
+              urgentLimit={settings.urgentLimit}
+              onOpenDailyPick={() => setIsPickingDaily(true)}
               deadlineThresholdDays={settings.deadlineThreshold}
               t={t}
             />
           </div>
         )}
 
-        {/* Task Columns */}
+        {/* Task Columns / Editor Area */}
         <div className={cn("h-full min-h-0 overflow-hidden relative", viewMode === 'dashboard' ? "flex-1 min-w-0" : "col-span-12")}>
           <AnimatePresence mode="wait">
             <motion.div
@@ -3331,43 +3336,28 @@ export default function App() {
               className="h-full"
             >
               {viewMode === 'dashboard' ? (
-                <div className="flex-1 h-full min-w-0 flex flex-col gap-3 min-h-0 overflow-hidden">
-                  {/* Top: Focus Header Section */}
-                  <div className={cn(mobileView === 'focus' && "hidden lg:block")}>
-                    <FocusHeaderSection
-                      urgentTasks={filteredTasks.filter(t => t.category === 'Urgent')}
-                      urgentLimit={settings.urgentLimit}
-                      onSelectTask={handleOpenTaskInTab}
-                      onToggleDone={toggleDone}
-                      onToggleStar={toggleStar}
-                      onMoveTask={moveTask}
-                      onOpenDailyPick={() => setIsPickingDaily(true)}
-                      activeTaskId={activeTabTaskId}
-                      deadlineThresholdDays={settings.deadlineThreshold}
-                      t={t}
-                    />
-                  </div>
-
-                  {/* Bottom: VS Code Multi-Tab Task Detail View */}
-                  <div className={cn("flex-1 min-h-0 flex flex-col", mobileView === 'urgent' && "hidden lg:flex")}>
-                    <TaskTabsDetail
-                      tasks={tasks}
-                      openTaskIds={openTaskIds}
-                      activeTaskId={activeTabTaskId}
-                      onSelectTab={(id) => setActiveTabTaskId(id)}
-                      onCloseTab={handleCloseTaskTab}
-                      onCloseAllTabs={handleCloseAllTabs}
-                      onUpdateTask={updateTask}
-                      onMoveTask={moveTask}
-                      onDeleteTask={deleteTask}
-                      onToggleDone={toggleDone}
-                      onToggleStar={toggleStar}
-                      onTogglePin={togglePin}
-                      onDuplicateTask={handleDuplicateTask}
-                      deadlineThresholdDays={settings.deadlineThreshold}
-                      t={t}
-                    />
-                  </div>
+                <div className={cn(
+                  "flex-1 h-full min-w-0 flex flex-col min-h-0 overflow-hidden",
+                  (mobileView === 'summary' || mobileView === 'urgent') && "hidden lg:flex"
+                )}>
+                  {/* VS Code Multi-Tab Split Task Editor View */}
+                  <TaskTabsDetail
+                    tasks={tasks}
+                    openTaskIds={openTaskIds}
+                    activeTaskId={activeTabTaskId}
+                    onSelectTab={(id) => setActiveTabTaskId(id)}
+                    onCloseTab={handleCloseTaskTab}
+                    onCloseAllTabs={handleCloseAllTabs}
+                    onUpdateTask={updateTask}
+                    onMoveTask={moveTask}
+                    onDeleteTask={deleteTask}
+                    onToggleDone={toggleDone}
+                    onToggleStar={toggleStar}
+                    onTogglePin={togglePin}
+                    onDuplicateTask={handleDuplicateTask}
+                    deadlineThresholdDays={settings.deadlineThreshold}
+                    t={t}
+                  />
                 </div>
               ) : viewMode === 'calendar' ? (
             /* Calendar Mode */

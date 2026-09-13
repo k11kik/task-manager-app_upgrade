@@ -16,10 +16,15 @@ import {
   Search, 
   FolderPlus, 
   FilePlus, 
-  Filter,
-  Layers,
-  Sparkles,
-  Pin
+  Filter, 
+  Layers, 
+  Sparkles, 
+  Pin, 
+  PinOff,
+  Zap, 
+  Trash2,
+  FolderMinus,
+  MoveDown
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
@@ -40,9 +45,14 @@ interface TaskExplorerTreeProps {
   onAddTask: (taskData: { title: string; project: string; deadline?: number; isAllDay?: boolean; notes?: string }) => Promise<void>;
   onToggleDone: (taskId: string) => void;
   onToggleStar: (taskId: string) => void;
+  onTogglePin?: (taskId: string) => void;
+  onMoveTask: (taskId: string, category: Category) => void;
+  onMoveTaskFolder: (taskId: string, newProject: string) => void;
   activeSection: string;
   width: number;
   onWidthChange: (width: number) => void;
+  urgentLimit?: number;
+  onOpenDailyPick?: () => void;
   deadlineThresholdDays?: number;
   t: (key: string) => string;
 }
@@ -55,23 +65,40 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   onAddTask,
   onToggleDone,
   onToggleStar,
+  onTogglePin,
+  onMoveTask,
+  onMoveTaskFolder,
   activeSection,
   width,
   onWidthChange,
+  urgentLimit = 3,
+  onOpenDailyPick,
   deadlineThresholdDays = 3,
   t
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Per-workspace collapsed folders state
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => {
     try {
-      const saved = localStorage.getItem('navfor_collapsed_folders');
+      const saved = localStorage.getItem(`navfor_collapsed_${activeSection}`);
       return saved ? new Set<string>(JSON.parse(saved)) : new Set<string>();
     } catch {
       return new Set<string>();
     }
   });
-  
-  // Custom user-created empty folders
+
+  // Re-sync collapsed folders when activeSection changes
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`navfor_collapsed_${activeSection}`);
+      setCollapsedFolders(saved ? new Set<string>(JSON.parse(saved)) : new Set<string>());
+    } catch {
+      setCollapsedFolders(new Set<string>());
+    }
+  }, [activeSection]);
+
+  // Per-workspace custom empty folders
   const [customFolders, setCustomFolders] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
@@ -81,7 +108,25 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     }
   });
 
-  // State for creating a new task or folder in an inline input
+  // Re-sync customFolders when activeSection changes (ensures workspace isolation)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
+      setCustomFolders(saved ? JSON.parse(saved) : []);
+    } catch {
+      setCustomFolders([]);
+    }
+  }, [activeSection]);
+
+  // Sections collapse state (Focus section, Pinned section)
+  const [isFocusSectionCollapsed, setIsFocusSectionCollapsed] = useState(false);
+  const [isPinnedSectionCollapsed, setIsPinnedSectionCollapsed] = useState(false);
+
+  // Drag over states
+  const [isFocusDragOver, setIsFocusDragOver] = useState(false);
+  const [dragOverFolderPath, setDragOverFolderPath] = useState<string | null>(null);
+
+  // Inline creation state
   const [creatingInFolder, setCreatingInFolder] = useState<{ path: string; type: 'task' | 'folder' } | null>(null);
   const [inlineInputValue, setInlineInputValue] = useState('');
   const [isFilterActiveOnly, setIsFilterActiveOnly] = useState(false);
@@ -101,7 +146,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const handleMouseMove = (moveEvent: MouseEvent) => {
       if (!isResizing.current) return;
       const delta = moveEvent.clientX - startX.current;
-      const newWidth = Math.max(220, Math.min(580, startWidth.current + delta));
+      const newWidth = Math.max(240, Math.min(600, startWidth.current + delta));
       onWidthChange(newWidth);
     };
 
@@ -124,9 +169,18 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   const saveCollapsed = (newSet: Set<string>) => {
     setCollapsedFolders(newSet);
     try {
-      localStorage.setItem('navfor_collapsed_folders', JSON.stringify(Array.from(newSet)));
+      localStorage.setItem(`navfor_collapsed_${activeSection}`, JSON.stringify(Array.from(newSet)));
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const saveCustomFolders = (folders: string[]) => {
+    setCustomFolders(folders);
+    try {
+      localStorage.setItem(`navfor_folders_${activeSection}`, JSON.stringify(folders));
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -184,7 +238,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       return current;
     };
 
-    // Ensure custom empty folders are in the tree
+    // Ensure custom empty folders for THIS activeSection are in the tree
     customFolders.forEach(folderPath => {
       if (!folderPath) return;
       const parts = folderPath.split('/').map(p => p.trim()).filter(Boolean);
@@ -192,7 +246,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     });
 
     // Distribute tasks into folder tree
-    // Only show active tasks (Urgent & Focus by default, not Trash unless specified)
+    // Only show active tasks (Urgent & Focus) in the explorer
     const activeTasks = tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus');
 
     activeTasks.forEach(task => {
@@ -214,6 +268,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     return root;
   }, [tasks, customFolders, searchQuery, isFilterActiveOnly]);
 
+  // Handle creating new folder or task
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!creatingInFolder || !inlineInputValue.trim()) {
@@ -229,12 +284,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       const newFolderPath = path ? `${path}/${value}` : value;
       if (!customFolders.includes(newFolderPath)) {
         const next = [...customFolders, newFolderPath];
-        setCustomFolders(next);
-        try {
-          localStorage.setItem(`navfor_folders_${activeSection}`, JSON.stringify(next));
-        } catch (err) {
-          console.error(err);
-        }
+        saveCustomFolders(next);
       }
       // Ensure parent folders are expanded
       if (path && collapsedFolders.has(path)) {
@@ -261,7 +311,53 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     setInlineInputValue('');
   };
 
-  // Helper to count total tasks under a folder (recursive)
+  // Remove an empty custom folder
+  const handleDeleteCustomFolder = (folderPath: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const next = customFolders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
+    saveCustomFolders(next);
+  };
+
+  // Urgent (Focus) tasks list
+  const urgentTasks = useMemo(() => {
+    return tasks
+      .filter(t => t.category === 'Urgent')
+      .filter(t => {
+        if (isFilterActiveOnly && t.isDone) return false;
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          return t.title.toLowerCase().includes(q) || t.project.toLowerCase().includes(q);
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+        if (a.deadline && b.deadline) return a.deadline - b.deadline;
+        if (a.deadline) return -1;
+        if (b.deadline) return 1;
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+  }, [tasks, isFilterActiveOnly, searchQuery]);
+
+  // Pinned tasks list
+  const pinnedTasks = useMemo(() => {
+    return tasks
+      .filter(t => t.isPinned && (t.category === 'Urgent' || t.category === 'Focus'))
+      .filter(t => {
+        if (isFilterActiveOnly && t.isDone) return false;
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          return t.title.toLowerCase().includes(q) || t.project.toLowerCase().includes(q);
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+  }, [tasks, isFilterActiveOnly, searchQuery]);
+
+  // Recursive counts helper
   const countFolderTasks = (node: FolderNode): { total: number; done: number; urgent: number } => {
     let total = node.tasks.length;
     let done = node.tasks.filter(t => t.isDone).length;
@@ -276,22 +372,84 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     return { total, done, urgent };
   };
 
+  // Drag and Drop handlers for tasks and folders
+  const handleTaskDragStart = (e: React.DragEvent, task: Task) => {
+    e.dataTransfer.setData('text/plain', JSON.stringify({
+      type: 'task',
+      taskId: task.id,
+      currentCategory: task.category,
+      currentProject: task.project
+    }));
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleFocusDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsFocusDragOver(false);
+    try {
+      const dataStr = e.dataTransfer.getData('text/plain');
+      if (!dataStr) return;
+      const data = JSON.parse(dataStr);
+      if (data.type === 'task' && data.taskId) {
+        onMoveTask(data.taskId, 'Urgent');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleFolderDrop = (e: React.DragEvent, targetFolderPath: string) => {
+    e.preventDefault();
+    setDragOverFolderPath(null);
+    try {
+      const dataStr = e.dataTransfer.getData('text/plain');
+      if (!dataStr) return;
+      const data = JSON.parse(dataStr);
+      if (data.type === 'task' && data.taskId) {
+        if (data.currentProject !== targetFolderPath) {
+          onMoveTaskFolder(data.taskId, targetFolderPath);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   // Render a folder node and its children
   const renderFolder = (node: FolderNode, depth = 0) => {
     const isCollapsed = collapsedFolders.has(node.fullPath);
     const hasChildren = node.subfolders.size > 0 || node.tasks.length > 0;
-    const isRootFolder = depth === 0;
     const counts = countFolderTasks(node);
-
     const isCreatingHere = creatingInFolder?.path === node.fullPath;
+    const isDragOver = dragOverFolderPath === node.fullPath;
 
     return (
-      <div key={node.fullPath} className="select-none">
+      <div 
+        key={node.fullPath} 
+        className="select-none"
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = 'move';
+          if (dragOverFolderPath !== node.fullPath) {
+            setDragOverFolderPath(node.fullPath);
+          }
+        }}
+        onDragLeave={(e) => {
+          e.stopPropagation();
+          if (dragOverFolderPath === node.fullPath) {
+            setDragOverFolderPath(null);
+          }
+        }}
+        onDrop={(e) => handleFolderDrop(e, node.fullPath)}
+      >
         {/* Folder row */}
         <div
           className={cn(
-            "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-semibold cursor-pointer transition-colors",
-            "hover:bg-slate-200/60 text-slate-700",
+            "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-semibold cursor-pointer transition-all",
+            isDragOver 
+              ? "bg-indigo-100 border-2 border-dashed border-indigo-500 text-indigo-900 shadow-sm"
+              : "hover:bg-slate-200/60 text-slate-700",
             depth === 0 ? "font-bold text-slate-800 tracking-tight" : "text-slate-600 font-medium"
           )}
           style={{ paddingLeft: `${Math.max(6, depth * 14 + 6)}px` }}
@@ -333,7 +491,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 if (isCollapsed) toggleFolder(node.fullPath);
               }}
               className="p-1 rounded hover:bg-slate-300/60 text-slate-500 hover:text-indigo-600 transition-colors"
-              title="Add task in this folder"
+              title="このフォルダにタスクを追加"
             >
               <Plus size={12} strokeWidth={2.5} />
             </button>
@@ -344,10 +502,20 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 if (isCollapsed) toggleFolder(node.fullPath);
               }}
               className="p-1 rounded hover:bg-slate-300/60 text-slate-500 hover:text-amber-600 transition-colors"
-              title="Add subfolder"
+              title="サブフォルダを追加"
             >
               <FolderPlus size={12} />
             </button>
+            {/* Delete folder button if empty */}
+            {counts.total === 0 && node.subfolders.size === 0 && (
+              <button
+                onClick={(e) => handleDeleteCustomFolder(node.fullPath, e)}
+                className="p-1 rounded hover:bg-red-100 text-slate-400 hover:text-red-500 transition-colors"
+                title="空フォルダを削除"
+              >
+                <Trash2 size={11} />
+              </button>
+            )}
           </div>
         </div>
 
@@ -358,7 +526,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             {isCreatingHere && (
               <form 
                 onSubmit={handleCreateSubmit}
-                className="flex items-center gap-1.5 py-1 px-2 my-0.5 bg-indigo-50/70 border border-indigo-200 rounded-md"
+                className="flex items-center gap-1.5 py-1 px-2 my-0.5 bg-indigo-50/80 border border-indigo-200 rounded-md"
                 style={{ marginLeft: `${(depth + 1) * 14 + 6}px` }}
               >
                 {creatingInFolder.type === 'folder' ? (
@@ -408,17 +576,12 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             {/* Tasks in this folder */}
             {node.tasks
               .sort((a, b) => {
-                // Done tasks sink to bottom
                 if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
-                // Urgent first
                 if (a.category !== b.category) return a.category === 'Urgent' ? -1 : 1;
-                // Starred next
                 if (a.isStarred !== b.isStarred) return a.isStarred ? -1 : 1;
-                // Earliest deadline next
                 if (a.deadline && b.deadline) return a.deadline - b.deadline;
                 if (a.deadline) return -1;
                 if (b.deadline) return 1;
-                // Recency
                 return (b.updatedAt || 0) - (a.updatedAt || 0);
               })
               .map(task => renderTaskItem(task, depth + 1))}
@@ -433,6 +596,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const isSelected = activeTaskId === task.id;
     const isOpenInTabs = openTaskIds.includes(task.id);
     const now = Date.now();
+    const isUrgent = task.category === 'Urgent';
 
     // Deadline indicators
     let deadlineStatus: 'expired' | 'approaching' | 'normal' | null = null;
@@ -455,10 +619,12 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     return (
       <div
         key={task.id}
+        draggable={true}
+        onDragStart={(e) => handleTaskDragStart(e, task)}
         onClick={() => onSelectTask(task.id)}
         style={{ paddingLeft: `${depth * 14 + 6}px` }}
         className={cn(
-          "group relative flex items-center gap-1.5 py-1 px-2 rounded-md text-xs cursor-pointer transition-colors select-none",
+          "group relative flex items-center gap-1.5 py-1 px-2 rounded-md text-xs cursor-pointer transition-all select-none",
           isSelected 
             ? "bg-indigo-100/90 text-indigo-950 font-medium shadow-xs" 
             : isOpenInTabs 
@@ -475,24 +641,42 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             onToggleDone(task.id);
           }}
           className="text-slate-400 hover:text-indigo-600 transition-colors shrink-0"
-          title={task.isDone ? 'Mark undone' : 'Mark done'}
+          title={task.isDone ? '未完了にする' : '完了にする'}
         >
           {task.isDone ? (
             <CheckCircle2 size={13} className="text-emerald-500" />
           ) : (
-            <Circle size={13} className={cn("hover:text-indigo-500", task.category === 'Urgent' ? "text-red-400" : "text-slate-300")} />
+            <Circle size={13} className={cn("hover:text-indigo-500", isUrgent ? "text-red-400" : "text-slate-300")} />
           )}
         </button>
 
-        {/* Urgent indicator dot */}
-        {task.category === 'Urgent' && !task.isDone && (
-          <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" title="Focus / Urgent" />
+        {/* Urgent dot */}
+        {isUrgent && !task.isDone && (
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0 shadow-xs" title="Focus / Urgent" />
         )}
 
         {/* Task Title */}
         <span className="truncate flex-1 text-[11.5px] leading-tight font-normal">
           {task.title}
         </span>
+
+        {/* Focus Move / Toggle Icon (Zap) */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onMoveTask(task.id, isUrgent ? 'Focus' : 'Urgent');
+          }}
+          className={cn(
+            "shrink-0 p-0.5 rounded transition-all",
+            isUrgent
+              ? "text-red-500 hover:text-red-700 hover:bg-red-50"
+              : "text-slate-300 hover:text-amber-500 hover:bg-slate-100 opacity-0 group-hover:opacity-100"
+          )}
+          title={isUrgent ? "フォーカスを解除 (ToDoに戻す)" : "フォーカスに追加 (最優先スロットへ)"}
+        >
+          <Zap size={11} fill={isUrgent ? "currentColor" : "none"} />
+        </button>
 
         {/* Star icon */}
         {task.isStarred ? (
@@ -503,7 +687,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               onToggleStar(task.id);
             }}
             className="text-amber-400 hover:text-amber-500 shrink-0"
-            title="Starred"
+            title="スター解除"
           >
             <Star size={11} fill="currentColor" />
           </button>
@@ -515,7 +699,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               onToggleStar(task.id);
             }}
             className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-            title="Star task"
+            title="スターを付ける"
           >
             <Star size={11} />
           </button>
@@ -554,7 +738,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       className="relative flex flex-col h-full bg-slate-50/90 border-r border-slate-200/90 select-none shrink-0 overflow-hidden"
     >
       {/* VS Code-style Header / Toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white/60">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white/70 shrink-0">
         <div className="flex items-center gap-1.5 min-w-0">
           <Layers size={14} className="text-indigo-600 shrink-0" />
           <span className="text-[11px] font-black uppercase tracking-wider text-slate-700 truncate">
@@ -604,7 +788,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       </div>
 
       {/* Search & Filter Bar */}
-      <div className="p-2 border-b border-slate-200/70 bg-white/40 space-y-1.5">
+      <div className="p-2 border-b border-slate-200/70 bg-white/40 space-y-1.5 shrink-0">
         <div className="relative flex items-center">
           <Search size={12} className="absolute left-2.5 text-slate-400" />
           <input
@@ -642,75 +826,334 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         </div>
       </div>
 
-      {/* Tree Content Area */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-1 custom-scrollbar space-y-0.5">
-        {/* Root level creation input if active */}
-        {creatingInFolder?.path === '' && (
-          <form 
-            onSubmit={handleCreateSubmit}
-            className="flex items-center gap-1.5 py-1 px-2 my-1 bg-indigo-50 border border-indigo-200 rounded-md shadow-xs"
+      {/* Scrollable Container containing: 1. FOCUS (Urgent), 2. PINNED, 3. EXPLORER TREE */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar flex flex-col">
+        
+        {/* --- 1. FOCUS SECTION (Pinned at top of explorer, drop target) --- */}
+        <div 
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            setIsFocusDragOver(true);
+          }}
+          onDragLeave={() => setIsFocusDragOver(false)}
+          onDrop={handleFocusDrop}
+          className={cn(
+            "border-b border-red-100/80 bg-red-50/30 transition-all",
+            isFocusDragOver && "bg-red-100/80 border-red-400 ring-2 ring-red-400 ring-inset"
+          )}
+        >
+          {/* Focus Section Header */}
+          <div 
+            onClick={() => setIsFocusSectionCollapsed(!isFocusSectionCollapsed)}
+            className="flex items-center justify-between px-2.5 py-1.5 bg-red-100/40 hover:bg-red-100/70 cursor-pointer text-red-900 transition-colors"
           >
-            {creatingInFolder.type === 'folder' ? (
-              <Folder size={14} className="text-amber-500 shrink-0" />
-            ) : (
-              <FileText size={14} className="text-indigo-500 shrink-0" />
+            <div className="flex items-center gap-1.5">
+              <span className="text-red-500">
+                {isFocusSectionCollapsed ? <ChevronRight size={12} strokeWidth={2.5} /> : <ChevronDown size={12} strokeWidth={2.5} />}
+              </span>
+              <span className="w-2 h-2 rounded-full bg-red-500 shadow-xs" />
+              <span className="text-[10px] font-black uppercase tracking-wider text-red-800">
+                FOCUS ({t('Urgent')})
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+              <span className={cn(
+                "text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border",
+                urgentTasks.filter(t => !t.isDone).length >= urgentLimit
+                  ? "bg-red-500 text-white border-red-600"
+                  : "bg-white text-red-600 border-red-200"
+              )}>
+                {urgentTasks.filter(t => !t.isDone).length}/{urgentLimit}
+              </span>
+              {onOpenDailyPick && (
+                <button
+                  onClick={onOpenDailyPick}
+                  className="text-[9px] font-bold text-red-600 hover:underline px-1 py-0.5"
+                  title="未完了タスクからFocusを抽出"
+                >
+                  {t('Extract')}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Focus Task List (Compact format) */}
+          {!isFocusSectionCollapsed && (
+            <div className="p-1 space-y-0.5">
+              {urgentTasks.map(task => {
+                const isSelected = activeTaskId === task.id;
+                const isOpen = openTaskIds.includes(task.id);
+                return (
+                  <div
+                    key={task.id}
+                    draggable={true}
+                    onDragStart={(e) => handleTaskDragStart(e, task)}
+                    onClick={() => onSelectTask(task.id)}
+                    className={cn(
+                      "group relative flex items-center gap-1.5 py-1 px-2 rounded-md text-xs cursor-pointer transition-all",
+                      isSelected 
+                        ? "bg-red-100 text-red-950 font-medium shadow-xs" 
+                        : isOpen 
+                          ? "bg-white text-slate-800 shadow-2xs hover:bg-red-50/50" 
+                          : "text-slate-700 hover:bg-white/80 hover:shadow-2xs",
+                      task.isDone && "opacity-50 line-through text-slate-400"
+                    )}
+                  >
+                    {/* Checkbox */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleDone(task.id);
+                      }}
+                      className="text-red-400 hover:text-emerald-600 transition-colors shrink-0"
+                    >
+                      {task.isDone ? (
+                        <CheckCircle2 size={13} className="text-emerald-500" />
+                      ) : (
+                        <Circle size={13} className="text-red-400 hover:text-emerald-500" />
+                      )}
+                    </button>
+
+                    {/* Title */}
+                    <span className="truncate flex-1 text-[11.5px] leading-tight font-medium text-slate-800">
+                      {task.title}
+                    </span>
+
+                    {/* Unfocus button (Move back to normal ToDo) */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMoveTask(task.id, 'Focus');
+                      }}
+                      className="text-red-400 hover:text-slate-600 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="フォーカスから外す (通常ToDoへ)"
+                    >
+                      <Zap size={11} fill="currentColor" />
+                    </button>
+
+                    {/* Star */}
+                    {task.isStarred ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleStar(task.id);
+                        }}
+                        className="text-amber-400 hover:text-amber-500 shrink-0"
+                      >
+                        <Star size={11} fill="currentColor" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleStar(task.id);
+                        }}
+                        className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover:opacity-100"
+                      >
+                        <Star size={11} />
+                      </button>
+                    )}
+
+                    {/* Project pill */}
+                    <span className="text-[9px] text-slate-400 max-w-[60px] truncate shrink-0 font-mono">
+                      {task.project.split('/').pop()}
+                    </span>
+
+                    {isSelected && (
+                      <div className="absolute right-0 top-1 bottom-1 w-1 bg-red-500 rounded-l" />
+                    )}
+                  </div>
+                );
+              })}
+
+              {urgentTasks.length === 0 && (
+                <div className="py-2.5 px-3 text-center text-[10px] text-red-500/70 border border-dashed border-red-200 rounded-md bg-white/40">
+                  下のツリーからタスクをドラッグ＆ドロップ、または⚡をクリックしてFocusに追加
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* --- 2. PINNED SECTION (Displayed below Focus area) --- */}
+        {pinnedTasks.length > 0 && (
+          <div className="border-b border-indigo-100/80 bg-indigo-50/30 transition-all">
+            {/* Pinned Section Header */}
+            <div 
+              onClick={() => setIsPinnedSectionCollapsed(!isPinnedSectionCollapsed)}
+              className="flex items-center justify-between px-2.5 py-1.5 bg-indigo-100/40 hover:bg-indigo-100/70 cursor-pointer text-indigo-900 transition-colors"
+            >
+              <div className="flex items-center gap-1.5">
+                <span className="text-indigo-500">
+                  {isPinnedSectionCollapsed ? <ChevronRight size={12} strokeWidth={2.5} /> : <ChevronDown size={12} strokeWidth={2.5} />}
+                </span>
+                <Pin size={11} className="text-indigo-600 rotate-45" />
+                <span className="text-[10px] font-black uppercase tracking-wider text-indigo-800">
+                  PINNED ({pinnedTasks.length})
+                </span>
+              </div>
+            </div>
+
+            {/* Pinned Task List (Compact format) */}
+            {!isPinnedSectionCollapsed && (
+              <div className="p-1 space-y-0.5">
+                {pinnedTasks.map(task => {
+                  const isSelected = activeTaskId === task.id;
+                  const isOpen = openTaskIds.includes(task.id);
+                  return (
+                    <div
+                      key={task.id}
+                      draggable={true}
+                      onDragStart={(e) => handleTaskDragStart(e, task)}
+                      onClick={() => onSelectTask(task.id)}
+                      className={cn(
+                        "group relative flex items-center gap-1.5 py-1 px-2 rounded-md text-xs cursor-pointer transition-all",
+                        isSelected 
+                          ? "bg-indigo-100 text-indigo-950 font-medium shadow-xs" 
+                          : isOpen 
+                            ? "bg-white text-slate-800 shadow-2xs hover:bg-indigo-50/50" 
+                            : "text-slate-700 hover:bg-white/80 hover:shadow-2xs",
+                        task.isDone && "opacity-50 line-through text-slate-400"
+                      )}
+                    >
+                      {/* Checkbox */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleDone(task.id);
+                        }}
+                        className="text-indigo-400 hover:text-emerald-600 transition-colors shrink-0"
+                      >
+                        {task.isDone ? (
+                          <CheckCircle2 size={13} className="text-emerald-500" />
+                        ) : (
+                          <Circle size={13} className="text-indigo-300 hover:text-emerald-500" />
+                        )}
+                      </button>
+
+                      {/* Title */}
+                      <span className="truncate flex-1 text-[11.5px] leading-tight font-medium text-slate-800">
+                        {task.title}
+                      </span>
+
+                      {/* Unpin button */}
+                      {onTogglePin && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onTogglePin(task.id);
+                          }}
+                          className="text-indigo-500 hover:text-slate-600 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="ピン留めを解除"
+                        >
+                          <PinOff size={11} />
+                        </button>
+                      )}
+
+                      {/* Star */}
+                      {task.isStarred && (
+                        <Star size={11} fill="currentColor" className="text-amber-400 shrink-0" />
+                      )}
+
+                      {/* Project pill */}
+                      <span className="text-[9px] text-slate-400 max-w-[60px] truncate shrink-0 font-mono">
+                        {task.project.split('/').pop()}
+                      </span>
+
+                      {isSelected && (
+                        <div className="absolute right-0 top-1 bottom-1 w-1 bg-indigo-600 rounded-l" />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             )}
-            <input
-              autoFocus
-              type="text"
-              placeholder={creatingInFolder.type === 'folder' ? 'プロジェクト名 (例: ERG/Sub1)...' : 'タスク名...'}
-              value={inlineInputValue}
-              onChange={(e) => setInlineInputValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  setCreatingInFolder(null);
-                  setInlineInputValue('');
-                }
-              }}
-              className="w-full bg-white border border-indigo-200 rounded px-1.5 py-0.5 text-xs outline-none focus:ring-1 focus:ring-indigo-500 font-normal"
-            />
-            <button 
-              type="submit" 
-              disabled={!inlineInputValue.trim()}
-              className="px-2 py-0.5 bg-indigo-600 text-white rounded text-[11px] font-bold disabled:opacity-40"
-            >
-              追加
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setCreatingInFolder(null);
-                setInlineInputValue('');
-              }}
-              className="p-0.5 text-slate-400 hover:text-slate-600"
-            >
-              <X size={12} />
-            </button>
-          </form>
-        )}
-
-        {/* Folders & Tasks */}
-        {rootFolderList.map(node => renderFolder(node, 0))}
-
-        {/* Empty state if no projects / tasks */}
-        {rootFolderList.length === 0 && (
-          <div className="flex flex-col items-center justify-center p-8 text-center text-slate-400">
-            <FolderPlus size={32} strokeWidth={1.5} className="mb-2 opacity-40 text-slate-400" />
-            <p className="text-xs font-semibold text-slate-600 mb-1">プロジェクトがありません</p>
-            <p className="text-[10px] text-slate-400 leading-relaxed mb-3">
-              上の「+」ボタンから新しいプロジェクトやタスクを作成できます。
-            </p>
-            <button
-              onClick={() => {
-                setCreatingInFolder({ path: '', type: 'folder' });
-                setInlineInputValue('ERG');
-              }}
-              className="px-3 py-1 bg-indigo-600 text-white rounded text-[11px] font-bold hover:bg-indigo-700 transition-all shadow-xs"
-            >
-              + ERG プロジェクトを作成
-            </button>
           </div>
         )}
+
+        {/* --- 3. EXPLORER PROJECT TREE SECTION --- */}
+        <div className="flex-1 p-1 space-y-0.5 min-h-[200px]">
+          <div className="px-2 py-1 flex items-center justify-between text-[9px] font-black uppercase tracking-wider text-slate-400">
+            <span>{activeSection} PROJECTS & TASKS</span>
+            <span className="font-mono lowercase text-[8px] text-slate-400">d&d to move folder</span>
+          </div>
+
+          {/* Root level creation input if active */}
+          {creatingInFolder?.path === '' && (
+            <form 
+              onSubmit={handleCreateSubmit}
+              className="flex items-center gap-1.5 py-1 px-2 my-1 bg-indigo-50 border border-indigo-200 rounded-md shadow-xs"
+            >
+              {creatingInFolder.type === 'folder' ? (
+                <Folder size={14} className="text-amber-500 shrink-0" />
+              ) : (
+                <FileText size={14} className="text-indigo-500 shrink-0" />
+              )}
+              <input
+                autoFocus
+                type="text"
+                placeholder={creatingInFolder.type === 'folder' ? 'プロジェクト名 (例: ERG/Phase1)...' : 'タスク名...'}
+                value={inlineInputValue}
+                onChange={(e) => setInlineInputValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setCreatingInFolder(null);
+                    setInlineInputValue('');
+                  }
+                }}
+                className="w-full bg-white border border-indigo-200 rounded px-1.5 py-0.5 text-xs outline-none focus:ring-1 focus:ring-indigo-500 font-normal"
+              />
+              <button 
+                type="submit" 
+                disabled={!inlineInputValue.trim()}
+                className="px-2 py-0.5 bg-indigo-600 text-white rounded text-[11px] font-bold disabled:opacity-40"
+              >
+                追加
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreatingInFolder(null);
+                  setInlineInputValue('');
+                }}
+                className="p-0.5 text-slate-400 hover:text-slate-600"
+              >
+                <X size={12} />
+              </button>
+            </form>
+          )}
+
+          {/* Folders & Tasks Tree */}
+          {rootFolderList.map(node => renderFolder(node, 0))}
+
+          {/* Empty state if no projects / tasks */}
+          {rootFolderList.length === 0 && (
+            <div className="flex flex-col items-center justify-center p-8 text-center text-slate-400">
+              <FolderPlus size={32} strokeWidth={1.5} className="mb-2 opacity-40 text-slate-400" />
+              <p className="text-xs font-semibold text-slate-600 mb-1">フォルダ・タスクがありません</p>
+              <p className="text-[10px] text-slate-400 leading-relaxed mb-3">
+                上の「+」ボタンから現在のワークスペース（{activeSection}）に新規フォルダやタスクを作成できます。
+              </p>
+              <button
+                onClick={() => {
+                  setCreatingInFolder({ path: '', type: 'folder' });
+                  setInlineInputValue('ProjectA');
+                }}
+                className="px-3 py-1 bg-indigo-600 text-white rounded text-[11px] font-bold hover:bg-indigo-700 transition-all shadow-xs"
+              >
+                + 最初のプロジェクトを作成
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Resizer Handle for Width Dragging */}
