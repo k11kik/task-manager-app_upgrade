@@ -8,8 +8,6 @@ import {
   Plus, 
   Star, 
   Clock, 
-  AlertTriangle, 
-  AlertCircle, 
   CheckCircle2, 
   Circle, 
   X, 
@@ -18,17 +16,19 @@ import {
   FilePlus, 
   Filter, 
   Layers, 
-  Sparkles, 
   Pin, 
-  PinOff,
   Zap, 
   Trash2,
-  FolderMinus,
-  MoveDown
+  MoreHorizontal,
+  Edit2,
+  CornerDownRight,
+  Sparkles,
+  Copy,
+  PanelLeftClose
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
-import { format } from 'date-fns';
+import { format, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
 
 export interface FolderNode {
   name: string;
@@ -48,12 +48,20 @@ interface TaskExplorerTreeProps {
   onTogglePin?: (taskId: string) => void;
   onMoveTask: (taskId: string, category: Category) => void;
   onMoveTaskFolder: (taskId: string, newProject: string) => void;
+  onMoveFolder?: (sourceFolderPath: string, targetFolderPath: string) => void;
+  onRenameFolder?: (oldFolderPath: string, newFolderPath: string) => void;
+  onDeleteFolder?: (folderPath: string) => void;
+  onRenameTask?: (taskId: string, newTitle: string) => void;
+  onDeleteTask?: (taskId: string) => void;
+  onDuplicateTask?: (task: Task, targetProject?: string) => void;
+  onToggleCollapse?: () => void;
   activeSection: string;
   width: number;
   onWidthChange: (width: number) => void;
   urgentLimit?: number;
   onOpenDailyPick?: () => void;
   deadlineThresholdDays?: number;
+  language?: string;
   t: (key: string) => string;
 }
 
@@ -68,15 +76,33 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   onTogglePin,
   onMoveTask,
   onMoveTaskFolder,
+  onMoveFolder,
+  onRenameFolder,
+  onDeleteFolder,
+  onRenameTask,
+  onDeleteTask,
+  onDuplicateTask,
+  onToggleCollapse,
   activeSection,
   width,
   onWidthChange,
   urgentLimit = 3,
   onOpenDailyPick,
   deadlineThresholdDays = 3,
+  language = 'en',
   t
 }) => {
+  const isJa = language === 'ja';
+  const copiedTaskIdRef = useRef<string | null>(null);
+  const lastPasteTimeRef = useRef<number>(0);
+
+  // Search & Filter state
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isFilterActiveOnly, setIsFilterActiveOnly] = useState(false);
+
+  // Selected item key for keyboard navigation ('folder:PATH' or 'task:ID')
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
   // Per-workspace collapsed folders state
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => {
@@ -110,13 +136,25 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
   // Re-sync customFolders when activeSection changes (ensures workspace isolation)
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
-      setCustomFolders(saved ? JSON.parse(saved) : []);
-    } catch {
-      setCustomFolders([]);
-    }
+    const syncFolders = () => {
+      try {
+        const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
+        setCustomFolders(saved ? JSON.parse(saved) : []);
+      } catch {
+        setCustomFolders([]);
+      }
+    };
+    syncFolders();
+    window.addEventListener('navfor_folders_updated', syncFolders);
+    return () => window.removeEventListener('navfor_folders_updated', syncFolders);
   }, [activeSection]);
+
+  // Sync selectedKey with activeTaskId
+  useEffect(() => {
+    if (activeTaskId) {
+      setSelectedKey(`task:${activeTaskId}`);
+    }
+  }, [activeTaskId]);
 
   // Sections collapse state (Focus section, Pinned section)
   const [isFocusSectionCollapsed, setIsFocusSectionCollapsed] = useState(false);
@@ -126,10 +164,25 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   const [isFocusDragOver, setIsFocusDragOver] = useState(false);
   const [dragOverFolderPath, setDragOverFolderPath] = useState<string | null>(null);
 
-  // Inline creation state
+  // Inline creation state: type is 'task' | 'folder'
   const [creatingInFolder, setCreatingInFolder] = useState<{ path: string; type: 'task' | 'folder' } | null>(null);
   const [inlineInputValue, setInlineInputValue] = useState('');
-  const [isFilterActiveOnly, setIsFilterActiveOnly] = useState(false);
+
+  // Inline rename state
+  const [renamingItem, setRenamingItem] = useState<{ type: 'folder' | 'task'; idOrPath: string; initialValue: string } | null>(null);
+  const [renameInputValue, setRenameInputValue] = useState('');
+
+  // 3-dots dropdown menu state
+  const [activeMenu, setActiveMenu] = useState<{ type: 'folder' | 'task'; idOrPath: string; x: number; y: number } | null>(null);
+
+  // Close 3-dots menu on window click
+  useEffect(() => {
+    const handleOutsideClick = () => setActiveMenu(null);
+    if (activeMenu) {
+      window.addEventListener('click', handleOutsideClick);
+      return () => window.removeEventListener('click', handleOutsideClick);
+    }
+  }, [activeMenu]);
 
   // Drag resizing logic
   const isResizing = useRef(false);
@@ -146,7 +199,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const handleMouseMove = (moveEvent: MouseEvent) => {
       if (!isResizing.current) return;
       const delta = moveEvent.clientX - startX.current;
-      const newWidth = Math.max(240, Math.min(600, startWidth.current + delta));
+      const newWidth = Math.max(220, Math.min(600, startWidth.current + delta));
       onWidthChange(newWidth);
     };
 
@@ -163,7 +216,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   };
 
   const handleDoubleClickResizer = () => {
-    onWidthChange(320);
+    onWidthChange(310);
   };
 
   const saveCollapsed = (newSet: Set<string>) => {
@@ -219,7 +272,6 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       tasks: []
     };
 
-    // Helper to get or create folder along path
     const getOrCreateFolder = (pathParts: string[]): FolderNode => {
       let current = root;
       let accPath = '';
@@ -238,15 +290,14 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       return current;
     };
 
-    // Ensure custom empty folders for THIS activeSection are in the tree
+    // Include custom folders
     customFolders.forEach(folderPath => {
       if (!folderPath) return;
       const parts = folderPath.split('/').map(p => p.trim()).filter(Boolean);
       getOrCreateFolder(parts);
     });
 
-    // Distribute tasks into folder tree
-    // Only show active tasks (Urgent & Focus) in the explorer
+    // Distribute tasks
     const activeTasks = tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus');
 
     activeTasks.forEach(task => {
@@ -268,9 +319,174 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     return root;
   }, [tasks, customFolders, searchQuery, isFilterActiveOnly]);
 
+  const rootFolderList = useMemo(() => {
+    return (Array.from(treeRoot.subfolders.values()) as FolderNode[]).sort((a, b) => a.name.localeCompare(b.name));
+  }, [treeRoot]);
+
+  // Flatten currently visible items for VS Code keyboard navigation
+  const visibleItems = useMemo(() => {
+    const list: Array<
+      | { type: 'folder'; path: string; node: FolderNode; parentPath: string }
+      | { type: 'task'; task: Task; parentPath: string }
+    > = [];
+
+    const traverse = (node: FolderNode, parentPath: string) => {
+      // Subfolders first
+      const subs = Array.from(node.subfolders.values()).sort((a, b) => a.name.localeCompare(b.name));
+      subs.forEach(sub => {
+        list.push({ type: 'folder', path: sub.fullPath, node: sub, parentPath });
+        if (!collapsedFolders.has(sub.fullPath)) {
+          traverse(sub, sub.fullPath);
+        }
+      });
+      // Tasks
+      node.tasks.forEach(task => {
+        list.push({ type: 'task', task, parentPath: node.fullPath });
+      });
+    };
+
+    rootFolderList.forEach(rootSub => {
+      list.push({ type: 'folder', path: rootSub.fullPath, node: rootSub, parentPath: '' });
+      if (!collapsedFolders.has(rootSub.fullPath)) {
+        traverse(rootSub, rootSub.fullPath);
+      }
+    });
+
+    return list;
+  }, [rootFolderList, collapsedFolders]);
+
+  // Keyboard navigation handler (ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Enter)
+  const handleTreeKeyDown = (e: React.KeyboardEvent) => {
+    if (renamingItem || creatingInFolder) return; // Let input handle keys
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!selectedKey && visibleItems.length > 0) {
+        const first = visibleItems[0];
+        const key = first.type === 'folder' ? `folder:${first.path}` : `task:${first.task.id}`;
+        setSelectedKey(key);
+        if (first.type === 'task') onSelectTask(first.task.id);
+        return;
+      }
+      const idx = visibleItems.findIndex(it => (it.type === 'folder' ? `folder:${it.path}` : `task:${it.task.id}`) === selectedKey);
+      if (idx !== -1 && idx < visibleItems.length - 1) {
+        const next = visibleItems[idx + 1];
+        const key = next.type === 'folder' ? `folder:${next.path}` : `task:${next.task.id}`;
+        setSelectedKey(key);
+        if (next.type === 'task') onSelectTask(next.task.id);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const idx = visibleItems.findIndex(it => (it.type === 'folder' ? `folder:${it.path}` : `task:${it.task.id}`) === selectedKey);
+      if (idx > 0) {
+        const prev = visibleItems[idx - 1];
+        const key = prev.type === 'folder' ? `folder:${prev.path}` : `task:${prev.task.id}`;
+        setSelectedKey(key);
+        if (prev.type === 'task') onSelectTask(prev.task.id);
+      }
+    } else if (e.key === 'ArrowRight') {
+      // If folder and collapsed, expand it
+      if (selectedKey?.startsWith('folder:')) {
+        const path = selectedKey.replace('folder:', '');
+        if (collapsedFolders.has(path)) {
+          e.preventDefault();
+          const next = new Set<string>(collapsedFolders);
+          next.delete(path);
+          saveCollapsed(next);
+        }
+      }
+    } else if (e.key === 'ArrowLeft') {
+      // If folder and expanded, collapse it; if collapsed or task, jump to parent folder
+      if (selectedKey?.startsWith('folder:')) {
+        const path = selectedKey.replace('folder:', '');
+        if (!collapsedFolders.has(path)) {
+          e.preventDefault();
+          const next = new Set<string>(collapsedFolders);
+          next.add(path);
+          saveCollapsed(next);
+        } else {
+          // Jump to parent folder
+          const parts = path.split('/');
+          if (parts.length > 1) {
+            parts.pop();
+            setSelectedKey(`folder:${parts.join('/')}`);
+          }
+        }
+      } else if (selectedKey?.startsWith('task:')) {
+        const taskId = selectedKey.replace('task:', '');
+        const task = tasks.find(t => t.id === taskId);
+        if (task && task.project) {
+          e.preventDefault();
+          setSelectedKey(`folder:${task.project}`);
+        }
+      }
+    } else if (e.key === 'Enter') {
+      // Trigger inline rename!
+      if (selectedKey?.startsWith('task:')) {
+        const taskId = selectedKey.replace('task:', '');
+        const task = tasks.find(t => t.id === taskId);
+        if (task) {
+          e.preventDefault();
+          startRenaming('task', task.id, task.title);
+        }
+      } else if (selectedKey?.startsWith('folder:')) {
+        const path = selectedKey.replace('folder:', '');
+        const parts = path.split('/');
+        const folderName = parts[parts.length - 1];
+        e.preventDefault();
+        startRenaming('folder', path, folderName);
+      }
+    }
+  };
+
+  // Global window key listener for Ctrl+C / Ctrl+V when a task in tree or active task is focused
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Ignore if typing in input / textarea
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+        if (selectedKey?.startsWith('task:')) {
+          const taskId = selectedKey.replace('task:', '');
+          copiedTaskIdRef.current = taskId;
+        } else if (activeTaskId) {
+          copiedTaskIdRef.current = activeTaskId;
+        }
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+        const now = Date.now();
+        if (now - lastPasteTimeRef.current < 500) return; // Prevent double invocation
+        if (copiedTaskIdRef.current && onDuplicateTask) {
+          const taskToCopy = tasks.find(t => t.id === copiedTaskIdRef.current);
+          if (taskToCopy) {
+            e.preventDefault();
+            lastPasteTimeRef.current = now;
+            const targetFolder = getTargetFolderForNewItem() || taskToCopy.project;
+            onDuplicateTask(taskToCopy, targetFolder);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [selectedKey, activeTaskId, tasks, onDuplicateTask]);
+
+  // Helper to determine where new item should be created from header button
+  const getTargetFolderForNewItem = (): string => {
+    if (selectedKey?.startsWith('folder:')) {
+      return selectedKey.replace('folder:', '');
+    }
+    if (selectedKey?.startsWith('task:')) {
+      const taskId = selectedKey.replace('task:', '');
+      const task = tasks.find(t => t.id === taskId);
+      if (task?.project) return task.project;
+    }
+    return '';
+  };
+
   // Handle creating new folder or task
-  const handleCreateSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!creatingInFolder || !inlineInputValue.trim()) {
       setCreatingInFolder(null);
       setInlineInputValue('');
@@ -286,20 +502,18 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         const next = [...customFolders, newFolderPath];
         saveCustomFolders(next);
       }
-      // Ensure parent folders are expanded
       if (path && collapsedFolders.has(path)) {
         const next = new Set<string>(collapsedFolders);
         next.delete(path);
         saveCollapsed(next);
       }
+      setSelectedKey(`folder:${newFolderPath}`);
     } else {
-      // Create task inside this folder
       const targetProject = path || 'General';
       await onAddTask({
         title: value,
         project: targetProject
       });
-      // Expand folder
       if (path && collapsedFolders.has(path)) {
         const next = new Set<string>(collapsedFolders);
         next.delete(path);
@@ -311,11 +525,66 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     setInlineInputValue('');
   };
 
-  // Remove an empty custom folder
-  const handleDeleteCustomFolder = (folderPath: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  // Inline rename handlers
+  const startRenaming = (type: 'folder' | 'task', idOrPath: string, initialValue: string) => {
+    setRenamingItem({ type, idOrPath, initialValue });
+    setRenameInputValue(initialValue);
+    setActiveMenu(null);
+  };
+
+  const handleRenameSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!renamingItem) return;
+
+    const val = renameInputValue.trim();
+    if (val && val !== renamingItem.initialValue) {
+      if (renamingItem.type === 'task') {
+        if (onRenameTask) {
+          onRenameTask(renamingItem.idOrPath, val);
+        }
+      } else {
+        // Folder rename
+        if (onRenameFolder) {
+          const oldPath = renamingItem.idOrPath;
+          const parts = oldPath.split('/');
+          parts[parts.length - 1] = val;
+          const newPath = parts.join('/');
+          onRenameFolder(oldPath, newPath);
+          // Also update customFolders
+          const updatedCustom = customFolders.map(f => {
+            if (f === oldPath) return newPath;
+            if (f.startsWith(oldPath + '/')) return f.replace(oldPath, newPath);
+            return f;
+          });
+          saveCustomFolders(updatedCustom);
+        }
+      }
+    }
+    setRenamingItem(null);
+    setRenameInputValue('');
+  };
+
+  // Folder deletion
+  const handleDeleteFolderAction = (folderPath: string) => {
+    if (!window.confirm(isJa ? `フォルダ「${folderPath}」および中の項目を削除しますか？` : `Delete folder "${folderPath}" and its items?`)) {
+      return;
+    }
+    if (onDeleteFolder) {
+      onDeleteFolder(folderPath);
+    }
     const next = customFolders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
     saveCustomFolders(next);
+    setActiveMenu(null);
+  };
+
+  // Task deletion
+  const handleDeleteTaskAction = (taskId: string) => {
+    if (onDeleteTask) {
+      onDeleteTask(taskId);
+    } else {
+      onMoveTask(taskId, 'Trash');
+    }
+    setActiveMenu(null);
   };
 
   // Urgent (Focus) tasks list
@@ -339,12 +608,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       });
   }, [tasks, isFilterActiveOnly, searchQuery]);
 
-  // Pinned tasks list
+  // Pinned tasks list: EXCLUDE DONE tasks as explicitly requested!
   const pinnedTasks = useMemo(() => {
     return tasks
-      .filter(t => t.isPinned && (t.category === 'Urgent' || t.category === 'Focus'))
+      .filter(t => t.isPinned && !t.isDone && (t.category === 'Urgent' || t.category === 'Focus'))
       .filter(t => {
-        if (isFilterActiveOnly && t.isDone) return false;
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
           return t.title.toLowerCase().includes(q) || t.project.toLowerCase().includes(q);
@@ -352,10 +620,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         return true;
       })
       .sort((a, b) => {
-        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
         return (b.updatedAt || 0) - (a.updatedAt || 0);
       });
-  }, [tasks, isFilterActiveOnly, searchQuery]);
+  }, [tasks, searchQuery]);
 
   // Recursive counts helper
   const countFolderTasks = (node: FolderNode): { total: number; done: number; urgent: number } => {
@@ -372,14 +639,39 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     return { total, done, urgent };
   };
 
-  // Drag and Drop handlers for tasks and folders
+  // Drag handlers
   const handleTaskDragStart = (e: React.DragEvent, task: Task) => {
-    e.dataTransfer.setData('text/plain', JSON.stringify({
+    const payload = {
       type: 'task',
       taskId: task.id,
       currentCategory: task.category,
-      currentProject: task.project
-    }));
+      currentProject: task.project,
+      fromProject: task.project,
+      fromDeadline: task.deadline,
+      fromTimelineColumn: task.timelineColumn,
+      fromOrder: task.order ?? 0
+    };
+    (window as any).__navforDraggingTask = payload;
+    try {
+      e.dataTransfer.setData('application/json', JSON.stringify(payload));
+      e.dataTransfer.setData('text/plain', JSON.stringify(payload));
+    } catch (err) {
+      console.error(err);
+    }
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleFolderDragStart = (e: React.DragEvent, folderPath: string) => {
+    e.stopPropagation();
+    const payload = {
+      type: 'folder',
+      folderPath
+    };
+    (window as any).__navforDraggingFolder = payload;
+    try {
+      e.dataTransfer.setData('application/json', JSON.stringify(payload));
+      e.dataTransfer.setData('text/plain', JSON.stringify(payload));
+    } catch (err) {}
     e.dataTransfer.effectAllowed = 'move';
   };
 
@@ -400,14 +692,33 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
   const handleFolderDrop = (e: React.DragEvent, targetFolderPath: string) => {
     e.preventDefault();
+    e.stopPropagation();
     setDragOverFolderPath(null);
     try {
-      const dataStr = e.dataTransfer.getData('text/plain');
-      if (!dataStr) return;
-      const data = JSON.parse(dataStr);
+      let data: any = null;
+      const raw = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain');
+      if (raw) {
+        try { data = JSON.parse(raw); } catch (e) {}
+      }
+      if (!data && (window as any).__navforDraggingTask) {
+        data = (window as any).__navforDraggingTask;
+      }
+      if (!data && (window as any).__navforDraggingFolder) {
+        data = (window as any).__navforDraggingFolder;
+      }
+      if (!data) return;
+      
       if (data.type === 'task' && data.taskId) {
         if (data.currentProject !== targetFolderPath) {
           onMoveTaskFolder(data.taskId, targetFolderPath);
+        }
+      } else if (data.type === 'folder' && data.folderPath) {
+        // Dragging folder onto another folder!
+        const sourcePath = data.folderPath;
+        if (sourcePath !== targetFolderPath && !targetFolderPath.startsWith(sourcePath + '/')) {
+          if (onMoveFolder) {
+            onMoveFolder(sourcePath, targetFolderPath);
+          }
         }
       }
     } catch (err) {
@@ -415,13 +726,36 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     }
   };
 
+  // Deadline formatting helper for language
+  const formatDeadlineBadge = (deadline: number) => {
+    const now = Date.now();
+    const isOverdue = deadline < now;
+    const targetDate = new Date(deadline);
+    const daysDiff = differenceInCalendarDays(targetDate, new Date());
+
+    if (isOverdue) {
+      return { status: 'expired', label: isJa ? '期限切' : 'Overdue' };
+    }
+    if (isToday(targetDate)) {
+      return { status: 'approaching', label: isJa ? '本日' : 'Today' };
+    }
+    if (isTomorrow(targetDate)) {
+      return { status: 'approaching', label: isJa ? '明日' : 'Tomorrow' };
+    }
+    if (daysDiff <= (deadlineThresholdDays || 3)) {
+      return { status: 'approaching', label: isJa ? `${daysDiff}日後` : `In ${daysDiff}d` };
+    }
+    return { status: 'normal', label: format(targetDate, 'M/d') };
+  };
+
   // Render a folder node and its children
   const renderFolder = (node: FolderNode, depth = 0) => {
     const isCollapsed = collapsedFolders.has(node.fullPath);
-    const hasChildren = node.subfolders.size > 0 || node.tasks.length > 0;
     const counts = countFolderTasks(node);
     const isCreatingHere = creatingInFolder?.path === node.fullPath;
+    const isRenamingHere = renamingItem?.type === 'folder' && renamingItem.idOrPath === node.fullPath;
     const isDragOver = dragOverFolderPath === node.fullPath;
+    const isSelected = selectedKey === `folder:${node.fullPath}`;
 
     return (
       <div 
@@ -445,195 +779,184 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       >
         {/* Folder row */}
         <div
+          draggable={true}
+          onDragStart={(e) => handleFolderDragStart(e, node.fullPath)}
+          onClick={(e) => {
+            e.stopPropagation();
+            setSelectedKey(`folder:${node.fullPath}`);
+            toggleFolder(node.fullPath);
+          }}
           className={cn(
             "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-semibold cursor-pointer transition-all",
             isDragOver 
-              ? "bg-indigo-100 border-2 border-dashed border-indigo-500 text-indigo-900 shadow-sm"
-              : "hover:bg-slate-200/60 text-slate-700",
-            depth === 0 ? "font-bold text-slate-800 tracking-tight" : "text-slate-600 font-medium"
+              ? "bg-indigo-100/90 border border-indigo-500 shadow-xs" 
+              : isSelected 
+                ? "bg-indigo-50/90 text-indigo-950 font-bold" 
+                : "text-slate-700 hover:bg-slate-200/50"
           )}
           style={{ paddingLeft: `${Math.max(6, depth * 14 + 6)}px` }}
-          onClick={() => toggleFolder(node.fullPath)}
         >
-          {/* Collapse Chevron */}
-          <span className="w-3.5 h-3.5 flex items-center justify-center text-slate-400 group-hover:text-slate-600 transition-transform">
-            {hasChildren || isCreatingHere ? (
-              isCollapsed ? <ChevronRight size={12} strokeWidth={2.5} /> : <ChevronDown size={12} strokeWidth={2.5} />
-            ) : (
-              <span className="w-1 h-1 rounded-full bg-slate-300" />
-            )}
+          {/* Chevron */}
+          <span 
+            className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition-transform"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFolder(node.fullPath);
+            }}
+          >
+            {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
           </span>
 
-          {/* Folder Icon */}
-          <span className={cn("transition-colors", isCollapsed ? "text-amber-500/90" : "text-indigo-500")}>
+          {/* Folder icon */}
+          <span className="text-amber-500 shrink-0">
             {isCollapsed ? <Folder size={14} /> : <FolderOpen size={14} />}
           </span>
 
-          {/* Folder Name */}
-          <span className="truncate flex-1 text-[12px]">{node.name}</span>
-
-          {/* Task Count Badge */}
-          {counts.total > 0 && (
-            <span className="text-[10px] font-mono text-slate-400 group-hover:hidden flex items-center gap-1">
-              {counts.urgent > 0 && (
-                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" title={`${counts.urgent} urgent`} />
-              )}
-              <span>{counts.total - counts.done}/{counts.total}</span>
+          {/* Folder name or inline rename input */}
+          {isRenamingHere ? (
+            <form onSubmit={handleRenameSubmit} onClick={(e) => e.stopPropagation()} className="flex-1 min-w-0">
+              <input
+                autoFocus
+                type="text"
+                value={renameInputValue}
+                onChange={(e) => setRenameInputValue(e.target.value)}
+                onBlur={handleRenameSubmit}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setRenamingItem(null);
+                }}
+                className="w-full bg-white border border-indigo-400 rounded px-1 py-0.5 text-xs outline-none shadow-2xs font-mono"
+              />
+            </form>
+          ) : (
+            <span className="truncate flex-1 font-mono tracking-tight text-[11.5px]">
+              {node.name}
             </span>
           )}
 
-          {/* Quick action buttons on hover */}
-          <div className="hidden group-hover:flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+          {/* Task count badges */}
+          {!isRenamingHere && (
+            <div className="flex items-center gap-1 opacity-70 group-hover:opacity-100 transition-opacity">
+              {counts.urgent > 0 && (
+                <span className="text-[9px] font-mono px-1 py-0.2 bg-red-100 text-red-700 font-bold rounded-full">
+                  {counts.urgent}
+                </span>
+              )}
+              <span className="text-[10px] font-mono text-slate-400">
+                {counts.done}/{counts.total}
+              </span>
+            </div>
+          )}
+
+          {/* Action buttons (hover) */}
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ml-1">
+            {/* 3-dots Menu Button */}
             <button
-              onClick={() => {
-                setCreatingInFolder({ path: node.fullPath, type: 'task' });
-                setInlineInputValue('');
-                if (isCollapsed) toggleFolder(node.fullPath);
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                const rect = e.currentTarget.getBoundingClientRect();
+                setActiveMenu({
+                  type: 'folder',
+                  idOrPath: node.fullPath,
+                  x: rect.right,
+                  y: rect.bottom
+                });
               }}
-              className="p-1 rounded hover:bg-slate-300/60 text-slate-500 hover:text-indigo-600 transition-colors"
-              title="このフォルダにタスクを追加"
+              className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-300/40 rounded transition-colors"
+              title={isJa ? "操作オプション" : "Folder options"}
             >
-              <Plus size={12} strokeWidth={2.5} />
+              <MoreHorizontal size={13} />
             </button>
-            <button
-              onClick={() => {
-                setCreatingInFolder({ path: node.fullPath, type: 'folder' });
-                setInlineInputValue('');
-                if (isCollapsed) toggleFolder(node.fullPath);
-              }}
-              className="p-1 rounded hover:bg-slate-300/60 text-slate-500 hover:text-amber-600 transition-colors"
-              title="サブフォルダを追加"
-            >
-              <FolderPlus size={12} />
-            </button>
-            {/* Delete folder button if empty */}
-            {counts.total === 0 && node.subfolders.size === 0 && (
-              <button
-                onClick={(e) => handleDeleteCustomFolder(node.fullPath, e)}
-                className="p-1 rounded hover:bg-red-100 text-slate-400 hover:text-red-500 transition-colors"
-                title="空フォルダを削除"
-              >
-                <Trash2 size={11} />
-              </button>
-            )}
           </div>
         </div>
 
-        {/* Folder Content (Subfolders and Tasks) */}
-        {!isCollapsed && (
-          <div className="flex flex-col">
-            {/* Inline creation input for this folder */}
-            {isCreatingHere && (
-              <form 
-                onSubmit={handleCreateSubmit}
-                className="flex items-center gap-1.5 py-1 px-2 my-0.5 bg-indigo-50/80 border border-indigo-200 rounded-md"
-                style={{ marginLeft: `${(depth + 1) * 14 + 6}px` }}
-              >
-                {creatingInFolder.type === 'folder' ? (
-                  <Folder size={13} className="text-amber-500 shrink-0" />
-                ) : (
-                  <FileText size={13} className="text-indigo-500 shrink-0" />
-                )}
-                <input
-                  autoFocus
-                  type="text"
-                  placeholder={creatingInFolder.type === 'folder' ? 'サブプロジェクト名...' : '新しいタスク名...'}
-                  value={inlineInputValue}
-                  onChange={(e) => setInlineInputValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') {
-                      setCreatingInFolder(null);
-                      setInlineInputValue('');
-                    }
-                  }}
-                  className="w-full bg-white border border-indigo-200 rounded px-1.5 py-0.5 text-xs outline-none focus:ring-1 focus:ring-indigo-500 font-normal"
-                />
-                <button 
-                  type="submit" 
-                  disabled={!inlineInputValue.trim()}
-                  className="px-1.5 py-0.5 bg-indigo-600 text-white rounded text-[10px] font-bold disabled:opacity-40"
-                >
-                  追加
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
+        {/* Inline Create Input inside this folder */}
+        {isCreatingHere && (
+          <div 
+            className="px-2 py-1 flex items-center gap-1.5"
+            style={{ paddingLeft: `${(depth + 1) * 14 + 6}px` }}
+          >
+            <span className="text-slate-400">
+              {creatingInFolder.type === 'folder' ? <Folder size={13} className="text-amber-500" /> : <FileText size={13} className="text-indigo-600" />}
+            </span>
+            <form onSubmit={handleCreateSubmit} className="flex-1 flex items-center gap-1">
+              <input
+                autoFocus
+                type="text"
+                placeholder={
+                  creatingInFolder.type === 'folder' 
+                    ? (isJa ? "フォルダ名..." : "Folder name...") 
+                    : (isJa ? "タスク名..." : "Task name...")
+                }
+                value={inlineInputValue}
+                onChange={(e) => setInlineInputValue(e.target.value)}
+                onBlur={() => {
+                  // Auto cancel if empty on blur as requested!
+                  if (!inlineInputValue.trim()) {
                     setCreatingInFolder(null);
                     setInlineInputValue('');
-                  }}
-                  className="p-0.5 text-slate-400 hover:text-slate-600"
-                >
-                  <X size={12} />
-                </button>
-              </form>
-            )}
+                  } else {
+                    handleCreateSubmit();
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setCreatingInFolder(null);
+                    setInlineInputValue('');
+                  }
+                }}
+                className="w-full bg-white border border-indigo-400 rounded px-1.5 py-0.5 text-xs outline-none ring-1 ring-indigo-400/30 shadow-2xs font-sans"
+              />
+            </form>
+          </div>
+        )}
 
+        {/* Children (subfolders and tasks) */}
+        {!isCollapsed && (
+          <div className="flex flex-col">
             {/* Subfolders */}
             {Array.from(node.subfolders.values())
               .sort((a, b) => a.name.localeCompare(b.name))
-              .map(sub => renderFolder(sub, depth + 1))}
+              .map(subNode => renderFolder(subNode, depth + 1))}
 
             {/* Tasks in this folder */}
-            {node.tasks
-              .sort((a, b) => {
-                if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
-                if (a.category !== b.category) return a.category === 'Urgent' ? -1 : 1;
-                if (a.isStarred !== b.isStarred) return a.isStarred ? -1 : 1;
-                if (a.deadline && b.deadline) return a.deadline - b.deadline;
-                if (a.deadline) return -1;
-                if (b.deadline) return 1;
-                return (b.updatedAt || 0) - (a.updatedAt || 0);
-              })
-              .map(task => renderTaskItem(task, depth + 1))}
+            {node.tasks.map(task => renderTaskItem(task, depth + 1))}
           </div>
         )}
       </div>
     );
   };
 
-  // Render a task file item in the tree
-  const renderTaskItem = (task: Task, depth: number) => {
-    const isSelected = activeTaskId === task.id;
-    const isOpenInTabs = openTaskIds.includes(task.id);
-    const now = Date.now();
+  // Render a task file item in tree
+  const renderTaskItem = (task: Task, depth = 1) => {
+    const isSelected = activeTaskId === task.id || selectedKey === `task:${task.id}`;
     const isUrgent = task.category === 'Urgent';
+    const isRenamingHere = renamingItem?.type === 'task' && renamingItem.idOrPath === task.id;
 
-    // Deadline indicators
-    let deadlineStatus: 'expired' | 'approaching' | 'normal' | null = null;
-    let deadlineText = '';
-    if (task.deadline) {
-      const diffMs = task.deadline - now;
-      const diffDays = Math.ceil(diffMs / 86400000);
-      if (diffMs < 0) {
-        deadlineStatus = 'expired';
-        deadlineText = '期限切';
-      } else if (diffMs <= deadlineThresholdDays * 86400000) {
-        deadlineStatus = 'approaching';
-        deadlineText = diffDays <= 0 ? '本日' : `${diffDays}日後`;
-      } else {
-        deadlineStatus = 'normal';
-        deadlineText = format(task.deadline, 'M/d');
-      }
-    }
+    const deadlineInfo = task.deadline && !task.isDone ? formatDeadlineBadge(task.deadline) : null;
 
     return (
       <div
         key={task.id}
         draggable={true}
         onDragStart={(e) => handleTaskDragStart(e, task)}
-        onClick={() => onSelectTask(task.id)}
-        style={{ paddingLeft: `${depth * 14 + 6}px` }}
+        onClick={(e) => {
+          e.stopPropagation();
+          setSelectedKey(`task:${task.id}`);
+          onSelectTask(task.id);
+        }}
         className={cn(
-          "group relative flex items-center gap-1.5 py-1 px-2 rounded-md text-xs cursor-pointer transition-all select-none",
+          "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-pointer transition-all select-none",
           isSelected 
-            ? "bg-indigo-100/90 text-indigo-950 font-medium shadow-xs" 
-            : isOpenInTabs 
-              ? "bg-slate-100/80 text-slate-800 hover:bg-slate-200/70"
-              : "text-slate-600 hover:bg-slate-200/50 hover:text-slate-900",
+            ? "bg-indigo-100/90 text-indigo-950 font-semibold shadow-2xs" 
+            : isUrgent 
+              ? "text-slate-800 hover:bg-red-50/60" 
+              : "text-slate-700 hover:bg-slate-200/50",
           task.isDone && "opacity-50 line-through text-slate-400"
         )}
+        style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
-        {/* Done / Checkbox status */}
+        {/* Done / Toggle Checkbox */}
         <button
           type="button"
           onClick={(e) => {
@@ -641,45 +964,63 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             onToggleDone(task.id);
           }}
           className="text-slate-400 hover:text-indigo-600 transition-colors shrink-0"
-          title={task.isDone ? '未完了にする' : '完了にする'}
+          title={task.isDone ? (isJa ? "未完了に戻す" : "Mark undone") : (isJa ? "完了にする" : "Mark done")}
         >
           {task.isDone ? (
-            <CheckCircle2 size={13} className="text-emerald-500" />
+            <CheckCircle2 size={12} className="text-emerald-500" />
           ) : (
-            <Circle size={13} className={cn("hover:text-indigo-500", isUrgent ? "text-red-400" : "text-slate-300")} />
+            <Circle size={12} className={isUrgent ? "text-red-500" : "text-slate-300"} />
           )}
         </button>
 
-        {/* Urgent dot */}
+        {/* Priority dot */}
         {isUrgent && !task.isDone && (
-          <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0 shadow-xs" title="Focus / Urgent" />
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0 shadow-xs" title="Focus" />
         )}
 
-        {/* Task Title */}
-        <span className="truncate flex-1 text-[11.5px] leading-tight font-normal">
-          {task.title}
-        </span>
+        {/* Task title or inline rename input */}
+        {isRenamingHere ? (
+          <form onSubmit={handleRenameSubmit} onClick={(e) => e.stopPropagation()} className="flex-1 min-w-0">
+            <input
+              autoFocus
+              type="text"
+              value={renameInputValue}
+              onChange={(e) => setRenameInputValue(e.target.value)}
+              onBlur={handleRenameSubmit}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setRenamingItem(null);
+              }}
+              className="w-full bg-white border border-indigo-400 rounded px-1 py-0.5 text-xs outline-none shadow-2xs font-sans"
+            />
+          </form>
+        ) : (
+          <span className="truncate flex-1 text-[11.5px] leading-tight font-normal">
+            {task.title}
+          </span>
+        )}
 
         {/* Focus Move / Toggle Icon (Zap) */}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onMoveTask(task.id, isUrgent ? 'Focus' : 'Urgent');
-          }}
-          className={cn(
-            "shrink-0 p-0.5 rounded transition-all",
-            isUrgent
-              ? "text-red-500 hover:text-red-700 hover:bg-red-50"
-              : "text-slate-300 hover:text-amber-500 hover:bg-slate-100 opacity-0 group-hover:opacity-100"
-          )}
-          title={isUrgent ? "フォーカスを解除 (ToDoに戻す)" : "フォーカスに追加 (最優先スロットへ)"}
-        >
-          <Zap size={11} fill={isUrgent ? "currentColor" : "none"} />
-        </button>
+        {!isRenamingHere && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMoveTask(task.id, isUrgent ? 'Focus' : 'Urgent');
+            }}
+            className={cn(
+              "shrink-0 p-0.5 rounded transition-all",
+              isUrgent
+                ? "text-red-500 hover:text-red-700 hover:bg-red-50"
+                : "text-slate-300 hover:text-amber-500 hover:bg-slate-100 opacity-0 group-hover:opacity-100"
+            )}
+            title={isUrgent ? (isJa ? "フォーカスを解除 (ToDoへ)" : "Remove from Focus") : (isJa ? "フォーカスに追加" : "Move to Focus")}
+          >
+            <Zap size={11} fill={isUrgent ? "currentColor" : "none"} />
+          </button>
+        )}
 
         {/* Star icon */}
-        {task.isStarred ? (
+        {!isRenamingHere && (task.isStarred ? (
           <button
             type="button"
             onClick={(e) => {
@@ -687,7 +1028,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               onToggleStar(task.id);
             }}
             className="text-amber-400 hover:text-amber-500 shrink-0"
-            title="スター解除"
+            title={isJa ? "重要フラグ解除" : "Unstar"}
           >
             <Star size={11} fill="currentColor" />
           </button>
@@ -699,25 +1040,45 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               onToggleStar(task.id);
             }}
             className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-            title="スターを付ける"
+            title={isJa ? "重要フラグを付ける" : "Star"}
           >
             <Star size={11} />
           </button>
-        )}
+        ))}
 
         {/* Deadline Badge */}
-        {task.deadline && !task.isDone && (
+        {!isRenamingHere && deadlineInfo && (
           <span
             className={cn(
               "text-[9px] px-1 py-0.2 rounded font-mono font-bold shrink-0 leading-none",
-              deadlineStatus === 'expired' && "bg-red-100 text-red-700 border border-red-200",
-              deadlineStatus === 'approaching' && "bg-amber-100 text-amber-800 border border-amber-200",
-              deadlineStatus === 'normal' && "text-slate-400 font-normal"
+              deadlineInfo.status === 'expired' && "bg-red-100 text-red-700 border border-red-200",
+              deadlineInfo.status === 'approaching' && "bg-amber-100 text-amber-800 border border-amber-200",
+              deadlineInfo.status === 'normal' && "text-slate-400 font-normal"
             )}
-            title={format(task.deadline, 'yyyy/MM/dd HH:mm')}
           >
-            {deadlineText}
+            {deadlineInfo.label}
           </span>
+        )}
+
+        {/* 3-dots Menu Button */}
+        {!isRenamingHere && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              const rect = e.currentTarget.getBoundingClientRect();
+              setActiveMenu({
+                type: 'task',
+                idOrPath: task.id,
+                x: rect.right,
+                y: rect.bottom
+              });
+            }}
+            className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-300/40 rounded transition-colors opacity-0 group-hover:opacity-100 shrink-0 ml-0.5"
+            title={isJa ? "タスクオプション" : "Task options"}
+          >
+            <MoreHorizontal size={12} />
+          </button>
         )}
 
         {/* Active Indicator Bar on right */}
@@ -728,442 +1089,389 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     );
   };
 
-  const rootFolderList = useMemo(() => {
-    return (Array.from(treeRoot.subfolders.values()) as FolderNode[]).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRoot]);
-
   return (
     <aside 
       style={{ width: `${width}px` }}
-      className="relative flex flex-col h-full bg-slate-50/90 border-r border-slate-200/90 select-none shrink-0 overflow-hidden"
+      onKeyDown={handleTreeKeyDown}
+      tabIndex={0}
+      className="relative flex flex-col h-full bg-slate-50/90 border-r border-slate-200/90 select-none shrink-0 overflow-hidden outline-none focus:ring-1 focus:ring-indigo-400/30"
     >
       {/* VS Code-style Header / Toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white/70 shrink-0">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Layers size={14} className="text-indigo-600 shrink-0" />
-          <span className="text-[11px] font-black uppercase tracking-wider text-slate-700 truncate">
+      <div 
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+        }}
+        onDrop={(e) => handleFolderDrop(e, 'General')}
+        className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white/70 shrink-0"
+        title={isJa ? "サブフォルダをここにドロップすると最上位フォルダ化できます" : "Drop subfolder here to make it a root folder"}
+      >
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          className="flex items-center gap-1.5 min-w-0 hover:bg-slate-200/60 p-1 -ml-1 rounded transition-colors group cursor-pointer text-left"
+          title={isJa ? "Explorerを折りたたむ (タイムラインを拡大)" : "Collapse Explorer (Expand timeline)"}
+        >
+          <Layers size={14} className="text-indigo-600 shrink-0 group-hover:scale-105 transition-transform" />
+          <span className="text-[11px] font-black uppercase tracking-wider text-slate-700 truncate group-hover:text-indigo-600 transition-colors">
             Explorer
           </span>
-          <span className="text-[9px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
-            {activeSection}
-          </span>
-        </div>
+          <PanelLeftClose size={12} className="text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity ml-0.5" />
+        </button>
 
+        {/* Header Action Toolbar */}
         <div className="flex items-center gap-1">
+          {/* Search Toggle Button */}
+          <button
+            onClick={() => setIsSearchOpen(!isSearchOpen)}
+            className={cn(
+              "p-1 rounded transition-colors",
+              isSearchOpen || searchQuery ? "text-indigo-600 bg-indigo-50" : "text-slate-400 hover:text-slate-700 hover:bg-slate-200/60"
+            )}
+            title={isJa ? "検索" : "Search"}
+          >
+            <Search size={14} />
+          </button>
+
+          {/* Filter Toggle Button */}
+          <button
+            onClick={() => setIsFilterActiveOnly(!isFilterActiveOnly)}
+            className={cn(
+              "p-1 rounded transition-colors",
+              isFilterActiveOnly ? "text-indigo-600 bg-indigo-50" : "text-slate-400 hover:text-slate-700 hover:bg-slate-200/60"
+            )}
+            title={isFilterActiveOnly ? (isJa ? "未完了のみ表示中 (クリックで全表示)" : "Active only") : (isJa ? "全表示中 (クリックで未完了のみ)" : "All tasks")}
+          >
+            <Filter size={14} />
+          </button>
+
+          {/* Add Task Button (Targets selected folder or root) */}
           <button
             onClick={() => {
-              setCreatingInFolder({ path: '', type: 'task' });
+              const target = getTargetFolderForNewItem();
+              setCreatingInFolder({ path: target, type: 'task' });
               setInlineInputValue('');
             }}
             className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-200/60 rounded transition-colors"
-            title="新規タスク作成 (ルート)"
+            title={isJa ? "新規タスク作成" : "New task"}
           >
             <FilePlus size={14} />
           </button>
+
+          {/* Add Folder Button (Targets selected folder or root) */}
           <button
             onClick={() => {
-              setCreatingInFolder({ path: '', type: 'folder' });
+              const target = getTargetFolderForNewItem();
+              setCreatingInFolder({ path: target, type: 'folder' });
               setInlineInputValue('');
             }}
             className="p-1 text-slate-400 hover:text-amber-600 hover:bg-slate-200/60 rounded transition-colors"
-            title="新規プロジェクト / フォルダ作成"
+            title={isJa ? "新規フォルダ作成" : "New folder"}
           >
             <FolderPlus size={14} />
           </button>
+
+          {/* Expand All */}
           <button
             onClick={expandAll}
-            className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors text-[10px] font-bold"
-            title="すべて展開"
+            className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors"
+            title={isJa ? "すべて展開" : "Expand all"}
           >
             <ChevronDown size={14} />
           </button>
+
+          {/* Collapse All */}
           <button
             onClick={() => collapseAll(rootFolderList)}
-            className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors text-[10px] font-bold"
-            title="すべて折りたたむ"
+            className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors"
+            title={isJa ? "すべて折りたたむ" : "Collapse all"}
           >
             <ChevronRight size={14} />
           </button>
         </div>
       </div>
 
-      {/* Search & Filter Bar */}
-      <div className="p-2 border-b border-slate-200/70 bg-white/40 space-y-1.5 shrink-0">
-        <div className="relative flex items-center">
-          <Search size={12} className="absolute left-2.5 text-slate-400" />
-          <input
-            type="text"
-            placeholder="タスク・フォルダを検索..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-slate-100/80 border border-slate-200 rounded-md pl-7 pr-7 py-1 text-[11px] text-slate-700 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500"
-          />
-          {searchQuery && (
-            <button 
-              onClick={() => setSearchQuery('')}
-              className="absolute right-2 text-slate-400 hover:text-slate-600"
-            >
-              <X size={11} />
-            </button>
-          )}
-        </div>
-
-        <div className="flex items-center justify-between px-1 text-[10px]">
-          <button
-            onClick={() => setIsFilterActiveOnly(!isFilterActiveOnly)}
-            className={cn(
-              "flex items-center gap-1 font-semibold transition-colors",
-              isFilterActiveOnly ? "text-indigo-600" : "text-slate-400 hover:text-slate-600"
+      {/* Search Input Bar (Visible when search is open or query is not empty) */}
+      {isSearchOpen && (
+        <div className="p-2 border-b border-slate-200/70 bg-white/60 shrink-0">
+          <div className="relative flex items-center">
+            <Search size={12} className="absolute left-2.5 text-slate-400" />
+            <input
+              autoFocus
+              type="text"
+              placeholder={isJa ? "タスク・フォルダを検索..." : "Search tasks and folders..."}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-slate-100/80 border border-slate-200 rounded-md pl-7 pr-7 py-1 text-[11px] text-slate-700 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500"
+            />
+            {searchQuery && (
+              <button 
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 text-slate-400 hover:text-slate-600"
+              >
+                <X size={11} />
+              </button>
             )}
-          >
-            <Filter size={10} />
-            <span>{isFilterActiveOnly ? '未完了のみ表示中' : '全タスク表示'}</span>
-          </button>
-
-          <span className="text-slate-400 font-mono">
-            {tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus').length} tasks
-          </span>
-        </div>
-      </div>
-
-      {/* Scrollable Container containing: 1. FOCUS (Urgent), 2. PINNED, 3. EXPLORER TREE */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar flex flex-col">
-        
-        {/* --- 1. FOCUS SECTION (Pinned at top of explorer, drop target) --- */}
-        <div 
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'move';
-            setIsFocusDragOver(true);
-          }}
-          onDragLeave={() => setIsFocusDragOver(false)}
-          onDrop={handleFocusDrop}
-          className={cn(
-            "border-b border-red-100/80 bg-red-50/30 transition-all",
-            isFocusDragOver && "bg-red-100/80 border-red-400 ring-2 ring-red-400 ring-inset"
-          )}
-        >
-          {/* Focus Section Header */}
-          <div 
-            onClick={() => setIsFocusSectionCollapsed(!isFocusSectionCollapsed)}
-            className="flex items-center justify-between px-2.5 py-1.5 bg-red-100/40 hover:bg-red-100/70 cursor-pointer text-red-900 transition-colors"
-          >
-            <div className="flex items-center gap-1.5">
-              <span className="text-red-500">
-                {isFocusSectionCollapsed ? <ChevronRight size={12} strokeWidth={2.5} /> : <ChevronDown size={12} strokeWidth={2.5} />}
-              </span>
-              <span className="w-2 h-2 rounded-full bg-red-500 shadow-xs" />
-              <span className="text-[10px] font-black uppercase tracking-wider text-red-800">
-                FOCUS ({t('Urgent')})
-              </span>
-            </div>
-
-            <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-              <span className={cn(
-                "text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border",
-                urgentTasks.filter(t => !t.isDone).length >= urgentLimit
-                  ? "bg-red-500 text-white border-red-600"
-                  : "bg-white text-red-600 border-red-200"
-              )}>
-                {urgentTasks.filter(t => !t.isDone).length}/{urgentLimit}
-              </span>
-              {onOpenDailyPick && (
-                <button
-                  onClick={onOpenDailyPick}
-                  className="text-[9px] font-bold text-red-600 hover:underline px-1 py-0.5"
-                  title="未完了タスクからFocusを抽出"
-                >
-                  {t('Extract')}
-                </button>
-              )}
-            </div>
           </div>
+        </div>
+      )}
 
-          {/* Focus Task List (Compact format) */}
-          {!isFocusSectionCollapsed && (
-            <div className="p-1 space-y-0.5">
-              {urgentTasks.map(task => {
-                const isSelected = activeTaskId === task.id;
-                const isOpen = openTaskIds.includes(task.id);
-                return (
-                  <div
-                    key={task.id}
-                    draggable={true}
-                    onDragStart={(e) => handleTaskDragStart(e, task)}
-                    onClick={() => onSelectTask(task.id)}
-                    className={cn(
-                      "group relative flex items-center gap-1.5 py-1 px-2 rounded-md text-xs cursor-pointer transition-all",
-                      isSelected 
-                        ? "bg-red-100 text-red-950 font-medium shadow-xs" 
-                        : isOpen 
-                          ? "bg-white text-slate-800 shadow-2xs hover:bg-red-50/50" 
-                          : "text-slate-700 hover:bg-white/80 hover:shadow-2xs",
-                      task.isDone && "opacity-50 line-through text-slate-400"
-                    )}
-                  >
-                    {/* Checkbox */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleDone(task.id);
-                      }}
-                      className="text-red-400 hover:text-emerald-600 transition-colors shrink-0"
-                    >
-                      {task.isDone ? (
-                        <CheckCircle2 size={13} className="text-emerald-500" />
-                      ) : (
-                        <Circle size={13} className="text-red-400 hover:text-emerald-500" />
-                      )}
-                    </button>
-
-                    {/* Title */}
-                    <span className="truncate flex-1 text-[11.5px] leading-tight font-medium text-slate-800">
-                      {task.title}
-                    </span>
-
-                    {/* Unfocus button (Move back to normal ToDo) */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onMoveTask(task.id, 'Focus');
-                      }}
-                      className="text-red-400 hover:text-slate-600 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                      title="フォーカスから外す (通常ToDoへ)"
-                    >
-                      <Zap size={11} fill="currentColor" />
-                    </button>
-
-                    {/* Star */}
-                    {task.isStarred ? (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onToggleStar(task.id);
-                        }}
-                        className="text-amber-400 hover:text-amber-500 shrink-0"
-                      >
-                        <Star size={11} fill="currentColor" />
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onToggleStar(task.id);
-                        }}
-                        className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover:opacity-100"
-                      >
-                        <Star size={11} />
-                      </button>
-                    )}
-
-                    {/* Project pill */}
-                    <span className="text-[9px] text-slate-400 max-w-[60px] truncate shrink-0 font-mono">
-                      {task.project.split('/').pop()}
-                    </span>
-
-                    {isSelected && (
-                      <div className="absolute right-0 top-1 bottom-1 w-1 bg-red-500 rounded-l" />
-                    )}
-                  </div>
-                );
-              })}
-
-              {urgentTasks.length === 0 && (
-                <div className="py-2.5 px-3 text-center text-[10px] text-red-500/70 border border-dashed border-red-200 rounded-md bg-white/40">
-                  下のツリーからタスクをドラッグ＆ドロップ、または⚡をクリックしてFocusに追加
-                </div>
-              )}
-            </div>
-          )}
+      {/* --- STICKY FOCUS (URGENT) SECTION AT TOP (Never scrolls away!) --- */}
+      <div 
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          setIsFocusDragOver(true);
+        }}
+        onDragLeave={() => setIsFocusDragOver(false)}
+        onDrop={handleFocusDrop}
+        className={cn(
+          "shrink-0 z-10 border-b border-red-100/80 bg-red-50/40 transition-all",
+          isFocusDragOver && "bg-red-100/90 border-red-400 ring-2 ring-red-400 ring-inset"
+        )}
+      >
+        {/* Focus Section Header */}
+        <div 
+          onClick={() => setIsFocusSectionCollapsed(!isFocusSectionCollapsed)}
+          className="flex items-center justify-between px-2.5 py-1.5 bg-red-100/50 hover:bg-red-100/80 cursor-pointer text-red-900 transition-colors select-none"
+        >
+          <div className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wider">
+            {isFocusSectionCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+            <Zap size={12} className="text-red-500 fill-red-500" />
+            <span>FOCUS</span>
+            <span className="text-[10px] font-mono px-1.5 py-0.2 bg-white/80 rounded-full border border-red-200 text-red-700 font-bold ml-1">
+              {urgentTasks.length}/{urgentLimit}
+            </span>
+          </div>
         </div>
 
-        {/* --- 2. PINNED SECTION (Displayed below Focus area) --- */}
-        {pinnedTasks.length > 0 && (
-          <div className="border-b border-indigo-100/80 bg-indigo-50/30 transition-all">
-            {/* Pinned Section Header */}
-            <div 
-              onClick={() => setIsPinnedSectionCollapsed(!isPinnedSectionCollapsed)}
-              className="flex items-center justify-between px-2.5 py-1.5 bg-indigo-100/40 hover:bg-indigo-100/70 cursor-pointer text-indigo-900 transition-colors"
-            >
-              <div className="flex items-center gap-1.5">
-                <span className="text-indigo-500">
-                  {isPinnedSectionCollapsed ? <ChevronRight size={12} strokeWidth={2.5} /> : <ChevronDown size={12} strokeWidth={2.5} />}
-                </span>
-                <Pin size={11} className="text-indigo-600 rotate-45" />
-                <span className="text-[10px] font-black uppercase tracking-wider text-indigo-800">
-                  PINNED ({pinnedTasks.length})
-                </span>
+        {/* Focus Task List (Compact) */}
+        {!isFocusSectionCollapsed && (
+          <div className="max-h-48 overflow-y-auto custom-scrollbar p-1 space-y-0.5">
+            {urgentTasks.length === 0 ? (
+              <div className="px-3 py-2 text-center text-[10px] text-red-500/70 italic">
+                {isJa ? "⚡ タスクをドラッグまたは⚡をクリックして追加" : "⚡ Drag tasks here or click ⚡ to focus"}
               </div>
-            </div>
-
-            {/* Pinned Task List (Compact format) */}
-            {!isPinnedSectionCollapsed && (
-              <div className="p-1 space-y-0.5">
-                {pinnedTasks.map(task => {
-                  const isSelected = activeTaskId === task.id;
-                  const isOpen = openTaskIds.includes(task.id);
-                  return (
-                    <div
-                      key={task.id}
-                      draggable={true}
-                      onDragStart={(e) => handleTaskDragStart(e, task)}
-                      onClick={() => onSelectTask(task.id)}
-                      className={cn(
-                        "group relative flex items-center gap-1.5 py-1 px-2 rounded-md text-xs cursor-pointer transition-all",
-                        isSelected 
-                          ? "bg-indigo-100 text-indigo-950 font-medium shadow-xs" 
-                          : isOpen 
-                            ? "bg-white text-slate-800 shadow-2xs hover:bg-indigo-50/50" 
-                            : "text-slate-700 hover:bg-white/80 hover:shadow-2xs",
-                        task.isDone && "opacity-50 line-through text-slate-400"
-                      )}
-                    >
-                      {/* Checkbox */}
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onToggleDone(task.id);
-                        }}
-                        className="text-indigo-400 hover:text-emerald-600 transition-colors shrink-0"
-                      >
-                        {task.isDone ? (
-                          <CheckCircle2 size={13} className="text-emerald-500" />
-                        ) : (
-                          <Circle size={13} className="text-indigo-300 hover:text-emerald-500" />
-                        )}
-                      </button>
-
-                      {/* Title */}
-                      <span className="truncate flex-1 text-[11.5px] leading-tight font-medium text-slate-800">
-                        {task.title}
-                      </span>
-
-                      {/* Unpin button */}
-                      {onTogglePin && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onTogglePin(task.id);
-                          }}
-                          className="text-indigo-500 hover:text-slate-600 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                          title="ピン留めを解除"
-                        >
-                          <PinOff size={11} />
-                        </button>
-                      )}
-
-                      {/* Star */}
-                      {task.isStarred && (
-                        <Star size={11} fill="currentColor" className="text-amber-400 shrink-0" />
-                      )}
-
-                      {/* Project pill */}
-                      <span className="text-[9px] text-slate-400 max-w-[60px] truncate shrink-0 font-mono">
-                        {task.project.split('/').pop()}
-                      </span>
-
-                      {isSelected && (
-                        <div className="absolute right-0 top-1 bottom-1 w-1 bg-indigo-600 rounded-l" />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+            ) : (
+              urgentTasks.map(task => renderTaskItem(task, 0.5))
             )}
           </div>
         )}
+      </div>
 
-        {/* --- 3. EXPLORER PROJECT TREE SECTION --- */}
-        <div className="flex-1 p-1 space-y-0.5 min-h-[200px]">
-          <div className="px-2 py-1 flex items-center justify-between text-[9px] font-black uppercase tracking-wider text-slate-400">
-            <span>{activeSection} PROJECTS & TASKS</span>
-            <span className="font-mono lowercase text-[8px] text-slate-400">d&d to move folder</span>
+      {/* --- PINNED SECTION (Excludes Done tasks) --- */}
+      {pinnedTasks.length > 0 && (
+        <div className="shrink-0 border-b border-indigo-100/70 bg-indigo-50/20">
+          <div 
+            onClick={() => setIsPinnedSectionCollapsed(!isPinnedSectionCollapsed)}
+            className="flex items-center justify-between px-2.5 py-1 bg-indigo-100/40 hover:bg-indigo-100/60 cursor-pointer text-indigo-900 transition-colors select-none"
+          >
+            <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider">
+              {isPinnedSectionCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+              <Pin size={11} className="text-indigo-600 fill-indigo-600" />
+              <span>PINNED</span>
+              <span className="text-[9px] font-mono px-1 py-0.2 bg-white rounded-full text-indigo-700 font-bold ml-0.5">
+                {pinnedTasks.length}
+              </span>
+            </div>
           </div>
 
-          {/* Root level creation input if active */}
-          {creatingInFolder?.path === '' && (
-            <form 
-              onSubmit={handleCreateSubmit}
-              className="flex items-center gap-1.5 py-1 px-2 my-1 bg-indigo-50 border border-indigo-200 rounded-md shadow-xs"
-            >
-              {creatingInFolder.type === 'folder' ? (
-                <Folder size={14} className="text-amber-500 shrink-0" />
-              ) : (
-                <FileText size={14} className="text-indigo-500 shrink-0" />
-              )}
+          {!isPinnedSectionCollapsed && (
+            <div className="max-h-36 overflow-y-auto custom-scrollbar p-1 space-y-0.5">
+              {pinnedTasks.map(task => renderTaskItem(task, 0.5))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* --- SCROLLABLE PROJECT / FOLDER TREE AREA --- */}
+      <div 
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+        }}
+        onDrop={(e) => handleFolderDrop(e, 'General')}
+        className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar p-1 flex flex-col"
+      >
+        {/* Inline Create Input at Root level */}
+        {creatingInFolder?.path === '' && (
+          <div className="px-2 py-1 flex items-center gap-1.5">
+            <span className="text-slate-400">
+              {creatingInFolder.type === 'folder' ? <Folder size={13} className="text-amber-500" /> : <FileText size={13} className="text-indigo-600" />}
+            </span>
+            <form onSubmit={handleCreateSubmit} className="flex-1 flex items-center gap-1">
               <input
                 autoFocus
                 type="text"
-                placeholder={creatingInFolder.type === 'folder' ? 'プロジェクト名 (例: ERG/Phase1)...' : 'タスク名...'}
+                placeholder={
+                  creatingInFolder.type === 'folder' 
+                    ? (isJa ? "フォルダ名..." : "Folder name...") 
+                    : (isJa ? "タスク名..." : "Task name...")
+                }
                 value={inlineInputValue}
                 onChange={(e) => setInlineInputValue(e.target.value)}
+                onBlur={() => {
+                  if (!inlineInputValue.trim()) {
+                    setCreatingInFolder(null);
+                    setInlineInputValue('');
+                  } else {
+                    handleCreateSubmit();
+                  }
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') {
                     setCreatingInFolder(null);
                     setInlineInputValue('');
                   }
                 }}
-                className="w-full bg-white border border-indigo-200 rounded px-1.5 py-0.5 text-xs outline-none focus:ring-1 focus:ring-indigo-500 font-normal"
+                className="w-full bg-white border border-indigo-400 rounded px-1.5 py-0.5 text-xs outline-none ring-1 ring-indigo-400/30 shadow-2xs font-sans"
               />
-              <button 
-                type="submit" 
-                disabled={!inlineInputValue.trim()}
-                className="px-2 py-0.5 bg-indigo-600 text-white rounded text-[11px] font-bold disabled:opacity-40"
-              >
-                追加
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setCreatingInFolder(null);
-                  setInlineInputValue('');
-                }}
-                className="p-0.5 text-slate-400 hover:text-slate-600"
-              >
-                <X size={12} />
-              </button>
             </form>
-          )}
+          </div>
+        )}
 
-          {/* Folders & Tasks Tree */}
-          {rootFolderList.map(node => renderFolder(node, 0))}
+        {/* Render all folders in the workspace */}
+        {rootFolderList.map(rootNode => renderFolder(rootNode, 0))}
 
-          {/* Empty state if no projects / tasks */}
-          {rootFolderList.length === 0 && (
-            <div className="flex flex-col items-center justify-center p-8 text-center text-slate-400">
-              <FolderPlus size={32} strokeWidth={1.5} className="mb-2 opacity-40 text-slate-400" />
-              <p className="text-xs font-semibold text-slate-600 mb-1">フォルダ・タスクがありません</p>
-              <p className="text-[10px] text-slate-400 leading-relaxed mb-3">
-                上の「+」ボタンから現在のワークスペース（{activeSection}）に新規フォルダやタスクを作成できます。
-              </p>
-              <button
-                onClick={() => {
-                  setCreatingInFolder({ path: '', type: 'folder' });
-                  setInlineInputValue('ProjectA');
-                }}
-                className="px-3 py-1 bg-indigo-600 text-white rounded text-[11px] font-bold hover:bg-indigo-700 transition-all shadow-xs"
-              >
-                + 最初のプロジェクトを作成
-              </button>
-            </div>
-          )}
-        </div>
+        {rootFolderList.length === 0 && (
+          <div className="p-4 text-center text-xs text-slate-400 italic">
+            {isJa ? "フォルダやタスクがありません" : "No folders or tasks"}
+          </div>
+        )}
       </div>
 
-      {/* Resizer Handle for Width Dragging */}
+      {/* 3-dots Context Menu Popover */}
+      {activeMenu && (
+        <div 
+          style={{ top: `${Math.min(activeMenu.y, window.innerHeight - 180)}px`, left: `${Math.min(activeMenu.x, window.innerWidth - 180)}px` }}
+          className="fixed z-50 bg-white border border-slate-200 rounded-lg shadow-xl py-1 min-w-[150px] text-xs font-medium text-slate-700 animate-fade-in"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {activeMenu.type === 'folder' ? (
+            <>
+              <button
+                onClick={() => {
+                  const parts = activeMenu.idOrPath.split('/');
+                  startRenaming('folder', activeMenu.idOrPath, parts[parts.length - 1]);
+                }}
+                className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+              >
+                <Edit2 size={13} className="text-slate-400" />
+                <span>{isJa ? "名前を変更" : "Rename"}</span>
+              </button>
+              <button
+                onClick={() => {
+                  setCreatingInFolder({ path: activeMenu.idOrPath, type: 'task' });
+                  setInlineInputValue('');
+                  setActiveMenu(null);
+                }}
+                className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+              >
+                <FilePlus size={13} className="text-indigo-600" />
+                <span>{isJa ? "新規タスク作成" : "New Task"}</span>
+              </button>
+              <button
+                onClick={() => {
+                  setCreatingInFolder({ path: activeMenu.idOrPath, type: 'folder' });
+                  setInlineInputValue('');
+                  setActiveMenu(null);
+                }}
+                className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+              >
+                <FolderPlus size={13} className="text-amber-500" />
+                <span>{isJa ? "サブフォルダ作成" : "New Subfolder"}</span>
+              </button>
+              <div className="h-px bg-slate-100 my-1" />
+              <button
+                onClick={() => handleDeleteFolderAction(activeMenu.idOrPath)}
+                className="w-full px-3 py-1.5 text-left hover:bg-red-50 text-red-600 flex items-center gap-2"
+              >
+                <Trash2 size={13} />
+                <span>{isJa ? "フォルダ削除" : "Delete Folder"}</span>
+              </button>
+            </>
+          ) : (
+            // Task options
+            (() => {
+              const task = tasks.find(t => t.id === activeMenu.idOrPath);
+              if (!task) return null;
+              const isUrgent = task.category === 'Urgent';
+              return (
+                <>
+                  <button
+                    onClick={() => startRenaming('task', task.id, task.title)}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <Edit2 size={13} className="text-slate-400" />
+                    <span>{isJa ? "名前を変更" : "Rename"}</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      onMoveTask(task.id, isUrgent ? 'Focus' : 'Urgent');
+                      setActiveMenu(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <Zap size={13} className={isUrgent ? "text-slate-400" : "text-red-500"} />
+                    <span>{isUrgent ? (isJa ? "Focus解除" : "Remove Focus") : (isJa ? "Focusへ移動" : "Move to Focus")}</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      onToggleStar(task.id);
+                      setActiveMenu(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <Star size={13} className={task.isStarred ? "text-amber-500" : "text-slate-400"} />
+                    <span>{task.isStarred ? (isJa ? "重要解除" : "Unstar") : (isJa ? "重要フラグ" : "Star")}</span>
+                  </button>
+                  {onTogglePin && (
+                    <button
+                      onClick={() => {
+                        onTogglePin(task.id);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Pin size={13} className={task.isPinned ? "text-indigo-600" : "text-slate-400"} />
+                      <span>{task.isPinned ? (isJa ? "ピン解除" : "Unpin") : (isJa ? "ピン留め" : "Pin")}</span>
+                    </button>
+                  )}
+                  {onDuplicateTask && (
+                    <button
+                      onClick={() => {
+                        onDuplicateTask(task);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2 text-slate-700"
+                    >
+                      <Copy size={13} className="text-slate-400" />
+                      <span>{isJa ? "コピー・複製" : "Duplicate / Copy"}</span>
+                    </button>
+                  )}
+                  <div className="h-px bg-slate-100 my-1" />
+                  <button
+                    onClick={() => handleDeleteTaskAction(task.id)}
+                    className="w-full px-3 py-1.5 text-left hover:bg-red-50 text-red-600 flex items-center gap-2"
+                  >
+                    <Trash2 size={13} />
+                    <span>{isJa ? "ゴミ箱へ移動" : "Delete"}</span>
+                  </button>
+                </>
+              );
+            })()
+          )}
+        </div>
+      )}
+
+      {/* Resize Handle on Right Border */}
       <div
         onMouseDown={handleMouseDown}
         onDoubleClick={handleDoubleClickResizer}
-        className="absolute top-0 right-0 bottom-0 w-1.5 hover:w-2 hover:bg-indigo-400 active:bg-indigo-600 cursor-col-resize transition-all z-20 group"
-        title="ドラッグして幅を調整 (ダブルクリックで初期化)"
+        className="absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 transition-colors z-20 group"
+        title={isJa ? "ドラッグして幅を変更 (ダブルクリックでリセット)" : "Drag to resize (Double click to reset)"}
       >
-        <div className="w-full h-full opacity-0 group-hover:opacity-100 bg-indigo-400/50" />
+        <div className="w-full h-full group-hover:bg-indigo-500" />
       </div>
     </aside>
   );

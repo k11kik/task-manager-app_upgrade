@@ -83,6 +83,8 @@ import { auth, db, signIn, logOut } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { AuthModal } from './components/AuthModal';
 import { TaskExplorerTree } from './components/TaskExplorerTree';
+import { ProjectTimelineView } from './components/ProjectTimelineView';
+import { TaskDetailPane } from './components/TaskDetailPane';
 import { TaskTabsDetail } from './components/TaskTabsDetail';
 import { FocusHeaderSection } from './components/FocusHeaderSection';
 import Papa from 'papaparse';
@@ -98,7 +100,8 @@ import {
   addDoc,
   getDocs,
   getDoc,
-  writeBatch
+  writeBatch,
+  deleteField
 } from 'firebase/firestore';
 
 // Add types for File System Access API
@@ -178,6 +181,42 @@ export default function App() {
       return 310;
     }
   });
+  const [detailPaneWidth, setDetailPaneWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_detail_width');
+      return saved ? Number(saved) : 360;
+    } catch {
+      return 360;
+    }
+  });
+  const [isExplorerCollapsed, setIsExplorerCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('navfor_explorer_collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleExplorerCollapse = () => {
+    setIsExplorerCollapsed(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('navfor_explorer_collapsed', String(next));
+      } catch (e) {
+        console.error(e);
+      }
+      return next;
+    });
+  };
+
+  const handleDetailPaneWidthChange = (w: number) => {
+    setDetailPaneWidth(w);
+    try {
+      localStorage.setItem('navfor_detail_width', String(w));
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   useEffect(() => {
     try {
@@ -279,10 +318,11 @@ export default function App() {
     }
   };
 
-  const handleDuplicateTask = async (task: Task) => {
+  const handleDuplicateTask = async (task: Task, targetProject?: string) => {
+    const copySuffix = settings.language === 'ja' ? ' (コピー)' : ' (Copy)';
     await handleCreateTaskDirect({
-      title: `${task.title} (コピー)`,
-      project: task.project,
+      title: `${task.title}${copySuffix}`,
+      project: targetProject || task.project,
       notes: task.notes,
       deadline: task.deadline,
       isAllDay: task.isAllDay
@@ -313,7 +353,7 @@ export default function App() {
       if (direction === 'right' && currentIndex > 0) setViewMode(modes[currentIndex - 1]);
       if (direction === 'left' && currentIndex < modes.length - 1) setViewMode(modes[currentIndex + 1]);
     } else {
-      if (mobileView === 'calendar' || viewMode === 'calendar') return;
+      if (mobileView === 'calendar' || viewMode === 'calendar' || viewMode === 'dashboard') return;
       if (direction === 'right' && currentMobileIndex > 0) setMobileView(mobileViews[currentMobileIndex - 1] as any);
       if (direction === 'left' && currentMobileIndex < mobileViews.length - 1) setMobileView(mobileViews[currentMobileIndex + 1] as any);
       
@@ -331,8 +371,8 @@ export default function App() {
 
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
-      // モバイル版のカレンダー表示中のみ、独自のスワイプ処理を行わずにブラウザに任せる（重さを解消）
-      if (window.innerWidth < 1024 && (viewMode === 'calendar' || mobileView === 'calendar')) return;
+      // Dashboard表示中またはカレンダー表示中は、タイムラインやカレンダーの横スクロールが必要なため、タブ切り替えスワイプを無効化
+      if (viewMode === 'dashboard' || viewMode === 'calendar' || (window.innerWidth < 1024 && mobileView === 'calendar')) return;
 
       // 垂直スクロールが支配的な場合は無視
       if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -389,6 +429,7 @@ export default function App() {
     };
 
     const handleTouchEnd = (e: TouchEvent) => {
+      if (viewMode === 'dashboard' || viewMode === 'calendar') return;
       const touchEndX = e.changedTouches[0].clientX;
       const touchEndY = e.changedTouches[0].clientY;
       const diffX = touchEndX - touchStart.current.x;
@@ -1810,15 +1851,31 @@ export default function App() {
     pushToHistory();
     if (user) {
       try {
-        await updateDoc(doc(db, 'tasks', id), { 
-          ...updates, 
-          updatedAt: Date.now() 
-        });
+        const firestoreUpdates: Record<string, any> = { updatedAt: Date.now() };
+        for (const [k, v] of Object.entries(updates)) {
+          if (v === undefined) {
+            firestoreUpdates[k] = deleteField();
+          } else {
+            firestoreUpdates[k] = v;
+          }
+        }
+        await updateDoc(doc(db, 'tasks', id), firestoreUpdates);
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
       }
     } else {
-      syncLocalTasks(tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t));
+      syncLocalTasks(tasks.map(t => {
+        if (t.id === id) {
+          const updated = { ...t, ...updates, updatedAt: Date.now() };
+          for (const k of Object.keys(updates)) {
+            if ((updates as any)[k] === undefined) {
+              delete (updated as any)[k];
+            }
+          }
+          return updated;
+        }
+        return t;
+      }));
     }
   };
 
@@ -2047,6 +2104,100 @@ export default function App() {
       const visibleIds = new Set(trashTasksVisible.map(t => t.id));
       syncLocalTasks(tasks.filter(t => !visibleIds.has(t.id)));
       setMessage({ text: `${trashTasksVisible.length} 件のアイテムを完全に削除しました。`, type: 'info' });
+    }
+  };
+
+  const handleRenameFolder = async (oldFolderPath: string, newFolderPath: string) => {
+    if (!oldFolderPath || !newFolderPath || oldFolderPath === newFolderPath) return;
+    pushToHistory();
+
+    const affectedTasks = tasks.filter(t => 
+      t.project === oldFolderPath || t.project.startsWith(oldFolderPath + '/')
+    );
+
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        affectedTasks.forEach(t => {
+          const updatedProject = t.project === oldFolderPath 
+            ? newFolderPath 
+            : newFolderPath + t.project.slice(oldFolderPath.length);
+          batch.update(doc(db, 'tasks', t.id), { project: updatedProject, updatedAt: Date.now() });
+        });
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `folders/${oldFolderPath}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => {
+        if (t.project === oldFolderPath) {
+          return { ...t, project: newFolderPath, updatedAt: Date.now() };
+        }
+        if (t.project.startsWith(oldFolderPath + '/')) {
+          return { ...t, project: newFolderPath + t.project.slice(oldFolderPath.length), updatedAt: Date.now() };
+        }
+        return t;
+      }));
+    }
+  };
+
+  const handleMoveFolder = async (sourceFolderPath: string, targetFolderPath: string) => {
+    if (!sourceFolderPath || sourceFolderPath === targetFolderPath) return;
+    if (targetFolderPath && targetFolderPath !== 'General' && targetFolderPath.startsWith(sourceFolderPath + '/')) {
+      setMessage({ 
+        text: settings.language === 'ja' 
+          ? "親フォルダを自身の子フォルダ内に移動することはできません。" 
+          : "Cannot move a parent folder inside its own subfolder.", 
+        type: 'error' 
+      });
+      return;
+    }
+    const folderName = sourceFolderPath.split('/').pop() || sourceFolderPath;
+    const newPath = targetFolderPath === 'General' || !targetFolderPath ? folderName : `${targetFolderPath}/${folderName}`;
+    if (newPath === sourceFolderPath) return;
+    await handleRenameFolder(sourceFolderPath, newPath);
+
+    // Also sync localStorage customFolders
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const folders: string[] = JSON.parse(saved);
+        const updated = folders.map(f => {
+          if (f === sourceFolderPath) return newPath;
+          if (f.startsWith(sourceFolderPath + '/')) return newPath + f.slice(sourceFolderPath.length);
+          return f;
+        });
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+        window.dispatchEvent(new Event('navfor_folders_updated'));
+      }
+    } catch {}
+  };
+
+  const handleDeleteFolder = async (folderPath: string) => {
+    if (!folderPath) return;
+    pushToHistory();
+    const affectedTasks = tasks.filter(t => 
+      t.project === folderPath || t.project.startsWith(folderPath + '/')
+    );
+
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        affectedTasks.forEach(t => {
+          batch.update(doc(db, 'tasks', t.id), { category: 'Trash', updatedAt: Date.now() });
+        });
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => {
+        if (t.project === folderPath || t.project.startsWith(folderPath + '/')) {
+          return { ...t, category: 'Trash', updatedAt: Date.now() };
+        }
+        return t;
+      }));
     }
   };
 
@@ -3250,21 +3401,14 @@ export default function App() {
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'summary' ? "text-indigo-600" : "text-slate-400")}
           >
             <Layers size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">ツリー</span>
-          </button>
-          <button 
-            onClick={() => { setViewMode('dashboard'); setMobileView('urgent'); }}
-            className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'urgent' ? "text-red-500" : "text-slate-400")}
-          >
-            <Zap size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">{t('Urgent')}</span>
+            <span className="text-[9px] font-bold uppercase tracking-tighter">{settings.language === 'ja' ? 'ツリー' : 'Tree'}</span>
           </button>
           <button 
             onClick={() => { setViewMode('dashboard'); setMobileView('focus'); }}
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'focus' ? "text-indigo-600" : "text-slate-400")}
           >
             <FileText size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">詳細</span>
+            <span className="text-[9px] font-bold uppercase tracking-tighter">{settings.language === 'ja' ? '詳細' : 'Detail'}</span>
           </button>
           <button 
             onClick={() => { setViewMode('calendar'); setMobileView('calendar'); }}
@@ -3298,33 +3442,65 @@ export default function App() {
 
         {/* VS Code-Style Explorer Tree */}
         {viewMode === 'dashboard' && (
-          <div className={cn(
-            "h-full min-h-0 shrink-0",
-            mobileView !== 'summary' && mobileView !== 'urgent' && "hidden lg:flex"
-          )}>
-            <TaskExplorerTree
-              tasks={filteredTasks}
-              activeTaskId={activeTabTaskId}
-              openTaskIds={openTaskIds}
-              onSelectTask={handleOpenTaskInTab}
-              onAddTask={handleCreateTaskDirect}
-              onToggleDone={toggleDone}
-              onToggleStar={toggleStar}
-              onTogglePin={togglePin}
-              onMoveTask={moveTask}
-              onMoveTaskFolder={(taskId, newProject) => updateTask(taskId, { project: newProject })}
-              activeSection={activeSection}
-              width={explorerWidth}
-              onWidthChange={handleExplorerWidthChange}
-              urgentLimit={settings.urgentLimit}
-              onOpenDailyPick={() => setIsPickingDaily(true)}
-              deadlineThresholdDays={settings.deadlineThreshold}
-              t={t}
-            />
-          </div>
+          isExplorerCollapsed ? (
+            <div className={cn(
+              "h-full shrink-0 flex flex-col items-center py-2 px-1 bg-slate-50/90 border-r border-slate-200 select-none w-10 transition-all",
+              mobileView !== 'summary' && "hidden lg:flex"
+            )}>
+              <button
+                onClick={handleToggleExplorerCollapse}
+                className="p-1.5 hover:bg-slate-200 text-slate-600 hover:text-indigo-600 rounded-md transition-colors"
+                title={settings.language === 'ja' ? 'Explorerを展開 (タイムラインを縮小)' : 'Expand Explorer'}
+              >
+                <Layers size={16} />
+              </button>
+              <div 
+                onClick={handleToggleExplorerCollapse}
+                className="mt-6 flex-1 cursor-pointer flex flex-col items-center justify-start text-slate-400 hover:text-slate-700 transition-colors w-full"
+                title={settings.language === 'ja' ? 'Explorerを展開' : 'Expand Explorer'}
+              >
+                <span className="text-[10px] font-black tracking-widest uppercase [writing-mode:vertical-lr] rotate-180 select-none">
+                  Explorer
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className={cn(
+              "h-full min-h-0 shrink-0",
+              mobileView !== 'summary' && "hidden lg:flex"
+            )}>
+              <TaskExplorerTree
+                tasks={filteredTasks}
+                activeTaskId={activeTabTaskId}
+                openTaskIds={openTaskIds}
+                onSelectTask={handleOpenTaskInTab}
+                onAddTask={handleCreateTaskDirect}
+                onToggleDone={toggleDone}
+                onToggleStar={toggleStar}
+                onTogglePin={togglePin}
+                onMoveTask={moveTask}
+                onMoveTaskFolder={(taskId, newProject) => updateTask(taskId, { project: newProject })}
+                onMoveFolder={handleMoveFolder}
+                onRenameFolder={handleRenameFolder}
+                onDeleteFolder={handleDeleteFolder}
+                onRenameTask={(taskId, newTitle) => updateTask(taskId, { title: newTitle })}
+                onDeleteTask={deleteTask}
+                onDuplicateTask={handleDuplicateTask}
+                onToggleCollapse={handleToggleExplorerCollapse}
+                activeSection={activeSection}
+                width={explorerWidth}
+                onWidthChange={handleExplorerWidthChange}
+                urgentLimit={settings.urgentLimit}
+                onOpenDailyPick={() => setIsPickingDaily(true)}
+                deadlineThresholdDays={settings.deadlineThreshold}
+                language={settings.language}
+                t={t}
+              />
+            </div>
+          )
         )}
 
-        {/* Task Columns / Editor Area */}
+        {/* Task Columns / Timeline & Detail Area */}
         <div className={cn("h-full min-h-0 overflow-hidden relative", viewMode === 'dashboard' ? "flex-1 min-w-0" : "col-span-12")}>
           <AnimatePresence mode="wait">
             <motion.div
@@ -3337,27 +3513,48 @@ export default function App() {
             >
               {viewMode === 'dashboard' ? (
                 <div className={cn(
-                  "flex-1 h-full min-w-0 flex flex-col min-h-0 overflow-hidden",
-                  (mobileView === 'summary' || mobileView === 'urgent') && "hidden lg:flex"
+                  "flex-1 h-full min-w-0 flex flex-row min-h-0 overflow-hidden",
+                  mobileView === 'summary' && "hidden lg:flex"
                 )}>
-                  {/* VS Code Multi-Tab Split Task Editor View */}
-                  <TaskTabsDetail
-                    tasks={tasks}
-                    openTaskIds={openTaskIds}
-                    activeTaskId={activeTabTaskId}
-                    onSelectTab={(id) => setActiveTabTaskId(id)}
-                    onCloseTab={handleCloseTaskTab}
-                    onCloseAllTabs={handleCloseAllTabs}
-                    onUpdateTask={updateTask}
-                    onMoveTask={moveTask}
-                    onDeleteTask={deleteTask}
-                    onToggleDone={toggleDone}
-                    onToggleStar={toggleStar}
-                    onTogglePin={togglePin}
-                    onDuplicateTask={handleDuplicateTask}
-                    deadlineThresholdDays={settings.deadlineThreshold}
-                    t={t}
-                  />
+                  {/* Project Timeline View */}
+                  <div className="flex-1 h-full min-w-0 flex flex-col min-h-0 overflow-hidden">
+                    <ProjectTimelineView
+                      tasks={filteredTasks}
+                      activeTaskId={activeTabTaskId}
+                      onSelectTask={handleOpenTaskInTab}
+                      onUpdateTask={updateTask}
+                      onScheduleTask={(taskId, deadline) => updateTask(taskId, { deadline })}
+                      onToggleDone={toggleDone}
+                      onToggleStar={toggleStar}
+                      onTogglePin={togglePin}
+                      onMoveTaskFolder={(taskId, newProject) => updateTask(taskId, { project: newProject })}
+                      onMoveFolder={handleMoveFolder}
+                      onAddTask={handleCreateTaskDirect}
+                      activeSection={activeSection}
+                      language={settings.language}
+                      t={t}
+                    />
+                  </div>
+
+                  {/* Task Detail Pane (Right side, resizable, appears when task selected) */}
+                  {activeTabTaskId && (
+                    <TaskDetailPane
+                      task={tasks.find(t => t.id === activeTabTaskId) || null}
+                      onClose={() => setActiveTabTaskId(null)}
+                      onUpdateTask={updateTask}
+                      onMoveTask={moveTask}
+                      onDeleteTask={deleteTask}
+                      onToggleDone={toggleDone}
+                      onToggleStar={toggleStar}
+                      onTogglePin={togglePin}
+                      onDuplicateTask={handleDuplicateTask}
+                      deadlineThresholdDays={settings.deadlineThreshold}
+                      language={settings.language}
+                      width={detailPaneWidth}
+                      onWidthChange={handleDetailPaneWidthChange}
+                      t={t}
+                    />
+                  )}
                 </div>
               ) : viewMode === 'calendar' ? (
             /* Calendar Mode */

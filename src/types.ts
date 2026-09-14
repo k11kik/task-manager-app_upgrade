@@ -16,6 +16,8 @@ export interface Task {
   section?: string;
   deadline?: number; // timestamp
   isAllDay?: boolean;
+  order?: number; // custom execution order
+  timelineColumn?: string; // custom abstract timeline column/stage
 }
 
 export interface TaskHistory {
