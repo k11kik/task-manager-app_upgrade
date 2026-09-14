@@ -833,7 +833,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               }
             }}
             className={cn(
-              "w-48 sm:w-56 lg:w-64 shrink-0 px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 transition-colors",
+              "w-28 sm:w-56 lg:w-64 shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sm:sticky sm:left-0 z-30 transition-colors",
               isDragOverRootHeader && "bg-indigo-100 ring-2 ring-indigo-500 ring-inset"
             )}
             title={isJa ? "サブプロジェクトをここにドロップすると最上位プロジェクト化できます" : "Drop subproject here to make it a top-level project"}
@@ -842,17 +842,6 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <span className="truncate">{isJa ? 'プロジェクト / レーン' : 'Projects / Lanes'}</span>
               <span className="text-[10px] text-slate-400 font-mono">({projectTree.length})</span>
             </div>
-            <button
-              onClick={handleToggleCollapseAllProjects}
-              className="p-1 hover:bg-slate-200 rounded text-slate-500 hover:text-slate-800 transition-colors flex items-center gap-0.5 text-[10px] normal-case font-bold"
-              title={isAllProjectsCollapsed 
-                ? (isJa ? "すべてのプロジェクトフォルダを展開" : "Expand all project folders") 
-                : (isJa ? "すべてのプロジェクトフォルダを折りたたむ" : "Collapse all project folders")
-              }
-            >
-              {isAllProjectsCollapsed ? <ChevronsUpDown size={12} /> : <ChevronsDownUp size={12} />}
-              <span className="hidden sm:inline">{isAllProjectsCollapsed ? (isJa ? "全展開" : "Expand") : (isJa ? "全折畳" : "Collapse")}</span>
-            </button>
           </div>
 
           {/* ToDo List Column Header */}
@@ -1012,7 +1001,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   }}
                   onDrop={(e) => handleProjectHeaderDrop(e, project.fullPath)}
                   className={cn(
-                    "w-48 sm:w-56 lg:w-64 shrink-0 px-2 py-2 border-r border-slate-200 flex items-start justify-between bg-white sticky left-0 z-10 select-none transition-colors cursor-grab active:cursor-grabbing group/lane",
+                    "w-28 sm:w-56 lg:w-64 shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-start justify-between bg-white sm:sticky sm:left-0 sm:z-10 select-none transition-colors cursor-grab active:cursor-grabbing group/lane",
                     project.level === 0 ? "font-bold text-slate-800" : "font-medium text-slate-600",
                     dragOverProjectHeader === project.fullPath && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset"
                   )}

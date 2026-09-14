@@ -1094,7 +1094,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       style={{ width: `${width}px` }}
       onKeyDown={handleTreeKeyDown}
       tabIndex={0}
-      className="relative flex flex-col h-full bg-slate-50/90 border-r border-slate-200/90 select-none shrink-0 overflow-hidden outline-none focus:ring-1 focus:ring-indigo-400/30"
+      className="relative flex flex-col h-full w-full lg:w-auto max-lg:!w-full bg-slate-50/90 border-r border-slate-200/90 select-none shrink-0 overflow-hidden outline-none focus:ring-1 focus:ring-indigo-400/30"
     >
       {/* VS Code-style Header / Toolbar */}
       <div 
@@ -1446,7 +1446,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                       className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2 text-slate-700"
                     >
                       <Copy size={13} className="text-slate-400" />
-                      <span>{isJa ? "コピー・複製" : "Duplicate / Copy"}</span>
+                      <span>{isJa ? "複製" : "Duplicate"}</span>
                     </button>
                   )}
                   <div className="h-px bg-slate-100 my-1" />
@@ -1464,11 +1464,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         </div>
       )}
 
-      {/* Resize Handle on Right Border */}
+      {/* Resize Handle on Right Border (Desktop only) */}
       <div
         onMouseDown={handleMouseDown}
         onDoubleClick={handleDoubleClickResizer}
-        className="absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 transition-colors z-20 group"
+        className="hidden lg:block absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 transition-colors z-20 group"
         title={isJa ? "ドラッグして幅を変更 (ダブルクリックでリセット)" : "Drag to resize (Double click to reset)"}
       >
         <div className="w-full h-full group-hover:bg-indigo-500" />

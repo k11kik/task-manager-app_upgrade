@@ -16,7 +16,9 @@ import {
   Sparkles,
   Layers,
   Folder,
-  Zap
+  Zap,
+  Maximize2,
+  FileText
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
@@ -66,6 +68,19 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
   const [urls, setUrls] = useState<string[]>([]);
   const [newUrlInput, setNewUrlInput] = useState('');
   const [isSavedNotice, setIsSavedNotice] = useState(false);
+  const [isExpandedNotesOpen, setIsExpandedNotesOpen] = useState(false);
+
+  // Close expanded notes modal on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isExpandedNotesOpen) {
+        saveNotes(notes);
+        setIsExpandedNotesOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isExpandedNotesOpen, notes]);
 
   // Resize handler for right panel
   const isResizingRef = useRef(false);
@@ -175,13 +190,13 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
 
   return (
     <div 
-      className="h-full min-h-0 flex shrink-0 relative bg-white border-l border-slate-200/90 z-20 shadow-lg select-text"
-      style={{ width: `${width}px` }}
+      className="fixed inset-0 z-50 w-full h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-xl lg:shadow-lg select-text lg:w-[var(--detail-pane-width)]"
+      style={{ '--detail-pane-width': `${width}px` } as React.CSSProperties}
     >
-      {/* Left resize handle */}
+      {/* Left resize handle (Desktop only) */}
       <div 
         onMouseDown={handleResizeMouseDown}
-        className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-indigo-500/40 active:bg-indigo-600 transition-colors z-30"
+        className="hidden lg:block absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-indigo-500/40 active:bg-indigo-600 transition-colors z-30"
         title={isJa ? "ドラッグして幅を調整" : "Drag to resize detail pane"}
       />
 
@@ -369,21 +384,27 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
             </div>
           </div>
 
-          {/* Memo / Context / Subtasks (Resizable vertically!) */}
+          {/* Notes (Resizable vertically + expandable to full window modal) */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                {isJa ? 'メモ・コンテキスト・サブタスク' : 'Notes & Subtasks'}
+                {isJa ? 'ノート' : 'NOTES'}
               </label>
-              <span className="text-[10px] text-slate-400">
-                {isJa ? 'フォーカスを外すと自動保存' : 'Auto-saves on blur'}
-              </span>
+              <button
+                type="button"
+                onClick={() => setIsExpandedNotesOpen(true)}
+                className="flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 px-2 py-0.5 rounded transition-colors"
+                title={isJa ? "大画面ウィンドウで開いて編集" : "Open in large window"}
+              >
+                <Maximize2 size={12} />
+                <span>{isJa ? "拡大表示" : "Expand"}</span>
+              </button>
             </div>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               onBlur={() => saveNotes(notes)}
-              placeholder={isJa ? "詳細なメモ、コンテキスト、サブタスクを箇条書きで記入..." : "Context, subtasks, notes..."}
+              placeholder={isJa ? "ノート、メモ、コンテキストを記入..." : "Notes, context, thoughts..."}
               className="w-full min-h-[160px] resize-y bg-slate-50/70 border border-slate-200 rounded-lg p-3 text-xs text-slate-800 leading-relaxed outline-none focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-sans"
               style={{ resize: 'vertical' }}
             />
@@ -482,6 +503,98 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Expanded Notes Window Modal (Closes on click outside or Escape) */}
+      {isExpandedNotesOpen && (
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center pt-16 sm:pt-20 pb-8 px-4 sm:px-8 animate-in fade-in duration-150"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="notes-modal-title"
+        >
+          {/* Backdrop overlay (click outside to save & close) */}
+          <div 
+            onClick={() => {
+              saveNotes(notes);
+              setIsExpandedNotesOpen(false);
+            }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity"
+            title={isJa ? "クリックして閉じる" : "Click outside to close"}
+          />
+
+          {/* Window Container - Floating with ample margin from top bar */}
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-4xl h-[72vh] sm:h-[76vh] max-h-[720px] bg-white rounded-2xl shadow-2xl flex flex-col z-10 border border-slate-200 overflow-hidden my-auto"
+          >
+            {/* Window Header */}
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 bg-slate-50/80 shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="p-1.5 bg-indigo-100 text-indigo-700 rounded-lg shrink-0">
+                  <FileText size={16} />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span id="notes-modal-title" className="text-xs font-black uppercase tracking-wider text-indigo-600">
+                      {isJa ? 'ノート編集' : 'Notes'}
+                    </span>
+                    <span className="text-slate-300 text-xs">•</span>
+                    <span className="text-xs font-semibold text-slate-500 truncate max-w-sm">
+                      {task.title}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] text-slate-400 font-mono hidden sm:inline">
+                  {notes.length} {isJa ? '文字' : 'chars'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    saveNotes(notes);
+                    setIsExpandedNotesOpen(false);
+                  }}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/80 rounded-lg transition-colors"
+                  title={isJa ? "閉じる (Esc)" : "Close (Esc)"}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Large Text Area */}
+            <div className="flex-1 p-5 bg-white flex flex-col min-h-0">
+              <textarea
+                autoFocus
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder={isJa ? "詳細なノート、手順、議事録、コンテキストを広々と記入..." : "Write detailed notes, documentation, context, subtasks..."}
+                className="w-full flex-1 p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm sm:text-base text-slate-800 leading-relaxed outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white transition-all font-sans resize-none overflow-y-auto custom-scrollbar"
+              />
+            </div>
+
+            {/* Window Footer */}
+            <div className="flex items-center justify-between px-5 py-3 bg-slate-50 border-t border-slate-200 text-xs shrink-0">
+              <span className="text-slate-400 text-[11px]">
+                {isJa ? "外側をクリックするかEscキーを押すと自動保存して閉じます" : "Click outside or press Esc to auto-save and close"}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  saveNotes(notes);
+                  setIsExpandedNotesOpen(false);
+                }}
+                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-xs shadow-sm transition-all flex items-center gap-1.5"
+              >
+                <X size={13} />
+                <span>{isJa ? "閉じる" : "Close"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

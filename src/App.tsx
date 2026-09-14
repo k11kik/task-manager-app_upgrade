@@ -87,6 +87,7 @@ import { ProjectTimelineView } from './components/ProjectTimelineView';
 import { TaskDetailPane } from './components/TaskDetailPane';
 import { TaskTabsDetail } from './components/TaskTabsDetail';
 import { FocusHeaderSection } from './components/FocusHeaderSection';
+import { ArchiveTrashExplorerView } from './components/ArchiveTrashExplorerView';
 import Papa from 'papaparse';
 import { 
   collection, 
@@ -126,7 +127,7 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "2.5.12";
+  const APP_VERSION = "3.1.1";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -2925,7 +2926,7 @@ export default function App() {
               </div>
               <div className="flex flex-col items-start leading-none">
                 <h1 className="text-sm font-black tracking-tighter text-slate-800 uppercase">
-                  NavFOR-upgrade <span className="text-indigo-600">v{APP_VERSION}</span>
+                  NavFOR <span className="text-indigo-600">v{APP_VERSION}</span>
                 </h1>
                 <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-0.5">
                   <span className="truncate max-w-[80px]">{activeSection}</span> <ChevronDown size={10} className={cn("transition-transform", showSectionMenu && "rotate-180")} />
@@ -3466,7 +3467,7 @@ export default function App() {
             </div>
           ) : (
             <div className={cn(
-              "h-full min-h-0 shrink-0",
+              "h-full min-h-0 w-full lg:w-auto shrink-0",
               mobileView !== 'summary' && "hidden lg:flex"
             )}>
               <TaskExplorerTree
@@ -3565,384 +3566,37 @@ export default function App() {
               locale={dateLocale}
             />
           ) : viewMode === 'archive' ? (
-            /* Archive Mode */
-            <section className="flex flex-col rounded-2xl border p-4 min-h-0 bg-slate-50/50 border-slate-200 h-full overflow-hidden">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 px-2 gap-4">
-                <div className="flex items-center gap-3">
-                  <h3 className="font-bold flex items-center gap-2 text-slate-700 text-lg">
-                    <ArchiveIcon size={22} className="text-slate-400" />
-                    {t('Archive')}
-                  </h3>
-                  {/* Filter controls */}
-                  <div className="flex items-center gap-1.5">
-                    <div className="relative">
-                      <button 
-                        onClick={() => setShowCleanupMenu(!showCleanupMenu)}
-                        className={cn(
-                          "flex items-center gap-1 px-2 py-1 rounded-lg border transition-all text-[9px] font-black uppercase tracking-tighter",
-                          archiveFilter !== 'all' ? "bg-rose-100 border-rose-200 text-rose-700" : "bg-white border-slate-200 text-slate-400"
-                        )}
-                      >
-                        <Clock size={10} />
-                        {archiveFilter === 'all' 
-                          ? t('TimeFilter') 
-                          : archiveFilter === '1m' 
-                          ? t('Older1m') 
-                          : archiveFilter === '3m' 
-                          ? t('Older3m') 
-                          : archiveFilter === '6m' 
-                          ? t('Older6m') 
-                          : t('Older1y')}
-                      </button>
-                      {showCleanupMenu && (
-                        <>
-                          <div className="fixed inset-0 z-[80]" onClick={() => setShowCleanupMenu(false)} />
-                          <div className="absolute top-full left-0 mt-1 w-40 bg-white border border-slate-200 rounded-xl shadow-[0_10px_30px_rgba(0,0,0,0.15)] z-[81] py-1.5 overflow-hidden">
-                            {[
-                              { id: 'all', label: t('AllItems') },
-                              { id: '1m', label: t('Older1m') },
-                              { id: '3m', label: t('Older3m') },
-                              { id: '6m', label: t('Older6m') },
-                              { id: '1y', label: t('Older1y') }
-                            ].map(f => (
-                              <button
-                                key={f.id}
-                                onClick={() => {
-                                  setArchiveFilter(f.id as any);
-                                  setShowCleanupMenu(false);
-                                }}
-                                className={cn(
-                                  "w-full text-left px-3 py-2 text-[10px] font-bold transition-all flex items-center justify-between",
-                                  archiveFilter === f.id ? "bg-rose-50 text-rose-600" : "text-slate-600 hover:bg-slate-50"
-                                )}
-                              >
-                                {f.label}
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="hidden sm:block text-right">
-                  <p className="text-[10px] uppercase font-black tracking-widest text-slate-400">
-                    {settings.archiveThresholdDays === 99999 
-                      ? "Archive is permanent" 
-                      : `${t('InactiveMoveToTrash')} ${settings.archiveThresholdDays} ${t('Days')}`}
-                  </p>
-                </div>
-                
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => cleanupArchive()}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-600 hover:border-red-200 hover:text-red-500 transition-all shadow-sm"
-                  >
-                    <Trash2 size={12} />
-                    Trash All
-                  </button>
-                </div>
-              </div>
-              
-              <div className="flex-1 space-y-6 overflow-y-auto overflow-x-visible pr-1 custom-scrollbar pb-24">
-                {groupedArchiveTasks.nearingPurge.length > 0 && (
-                   <div className="space-y-3 mb-8">
-                      <div className="flex items-center gap-4 px-2">
-                        <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-orange-500 bg-orange-50 px-2 py-0.5 rounded border border-orange-100 flex items-center gap-1.5">
-                          <AlertTriangle size={10} />
-                          {t('MovingToTrashSoon')} {"(< 3 days)"}
-                        </h4>
-                        <div className="h-px flex-1 bg-orange-100"></div>
-                      </div>
-                      <div className={cn(
-                        "grid grid-cols-1 gap-2.5",
-                        !isListMode && (settings.displayMode === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                      )}>
-                        <AnimatePresence mode="popLayout">
-                          {groupedArchiveTasks.nearingPurge.map(task => (
-                            <TaskCard 
-                              key={task.id} 
-                              task={task} 
-                              onToggle={() => toggleDone(task.id)}
-                              onMove={(newCat) => moveTask(task.id, newCat)}
-                              onDelete={() => deleteTask(task.id)}
-                              onEdit={() => setEditingTask(task)}
-                              onStar={() => toggleStar(task.id)}
-                              onPin={() => togglePin(task.id)}
-                              t={t}
-                              variant="Archive"
-                              displayMode={settings.displayMode}
-                              deadlineThreshold={settings.deadlineThreshold}
-                            />
-                          ))}
-                        </AnimatePresence>
-                      </div>
-                    </div>
-                )}
-
-                {groupedArchiveTasks.pinned.length > 0 && (
-                  <div className="space-y-3 mb-8">
-                    <div className="flex items-center gap-4 px-2">
-                      <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100 flex items-center gap-1.5">
-                        <Pin size={10} strokeWidth={3} className="rotate-45" />
-                        {t('PinnedGlobal')}
-                      </h4>
-                      <div className="h-px flex-1 bg-indigo-100"></div>
-                    </div>
-                    <div className={cn(
-                      "grid grid-cols-1 gap-2.5",
-                      !isListMode && (settings.displayMode === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                    )}>
-                      <AnimatePresence mode="popLayout">
-                        {groupedArchiveTasks.pinned.map(task => (
-                          <TaskCard 
-                            key={task.id} 
-                            task={task} 
-                            onToggle={() => toggleDone(task.id)}
-                            onMove={(newCat) => moveTask(task.id, newCat)}
-                            onDelete={() => deleteTask(task.id)}
-                            onEdit={() => setEditingTask(task)}
-                            onStar={() => toggleStar(task.id)}
-                            onPin={() => togglePin(task.id)}
-                            t={t}
-                            variant="Archive"
-                            displayMode={settings.displayMode}
-                            deadlineThreshold={settings.deadlineThreshold}
-                          />
-                        ))}
-                      </AnimatePresence>
-                    </div>
-                  </div>
-                )}
-
-                {Object.keys(groupedArchiveTasks.grouped).length > 0 ? (
-                  (Object.entries(groupedArchiveTasks.grouped) as [string, Task[]][]).map(([project, tasks]) => {
-                    const isCollapsed = collapsedProjects.has(`archive-${project}`);
-                    return (
-                      <div key={project} className="space-y-3">
-                          <button 
-                            onClick={() => {
-                              const next = new Set(collapsedProjects);
-                              if (next.has(`archive-${project}`)) next.delete(`archive-${project}`);
-                              else next.add(`archive-${project}`);
-                              setCollapsedProjects(next);
-                            }}
-                            className="sticky top-0 z-20 w-full flex items-center gap-4 px-2 py-2.5 hover:opacity-90 transition-opacity bg-slate-50/90 backdrop-blur-md border-b border-slate-200/50"
-                          >
-                          <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 bg-white shadow-sm px-2.5 py-1 rounded-lg border border-slate-200 flex items-center gap-1.5">
-                            {isCollapsed ? <ChevronRight size={10} /> : <ChevronDown size={10} />}
-                            {project}
-                          </h4>
-                          <div className="h-px flex-1 bg-slate-300/50"></div>
-                          <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full uppercase tracking-tighter">
-                            {tasks.length} item{tasks.length > 1 ? 's' : ''}
-                          </span>
-                        </button>
-
-                        {!isCollapsed && (
-                          <div className={cn(
-                            "grid grid-cols-1 gap-2.5",
-                            !isListMode && (settings.displayMode === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                          )}>
-                            <AnimatePresence mode="popLayout">
-                              {tasks.map(task => (
-                                <TaskCard 
-                                  key={task.id} 
-                                  task={task} 
-                                  onToggle={() => toggleDone(task.id)}
-                                  onMove={(newCat) => moveTask(task.id, newCat)}
-                                  onDelete={() => deleteTask(task.id)}
-                                  onEdit={() => setEditingTask(task)}
-                                  onStar={() => toggleStar(task.id)}
-                                  onPin={() => togglePin(task.id)}
-                                  t={t}
-                                  variant="Archive"
-                                  displayMode={settings.displayMode}
-                                  deadlineThreshold={settings.deadlineThreshold}
-                                />
-                              ))}
-                            </AnimatePresence>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })
-                ) : (
-                  groupedArchiveTasks.pinned.length === 0 && groupedArchiveTasks.nearingPurge.length === 0 && (
-                    <div className="py-20 flex flex-col items-center justify-center text-slate-300 opacity-40">
-                      <ArchiveIcon size={48} strokeWidth={1} />
-                      <span className="text-[10px] font-bold mt-2 uppercase tracking-tighter italic">{t('ArchiveEmpty')}</span>
-                    </div>
-                  )
-                )}
-              </div>
+            /* Archive Mode (Explorer Style) */
+            <section className="flex flex-col rounded-2xl border p-4 md:p-6 min-h-0 bg-white border-slate-200 shadow-sm h-full overflow-hidden">
+              <ArchiveTrashExplorerView
+                mode="archive"
+                tasks={filteredTasks.filter(t => t.category === 'Archive')}
+                onRestore={(taskId, cat) => moveTask(taskId, cat || 'Focus')}
+                onPermanentDelete={(taskId) => deleteTask(taskId)}
+                onMoveToTrash={(taskId) => moveTask(taskId, 'Trash')}
+                onSelectTask={(task) => setEditingTask(task)}
+                onToggleStar={(taskId) => toggleStar(taskId)}
+                onTogglePin={(taskId) => togglePin(taskId)}
+                archiveThresholdDays={settings.archiveThresholdDays}
+                onCleanupArchive={() => cleanupArchive()}
+                language={settings.language}
+                t={t}
+              />
             </section>
           ) : viewMode === 'trash' ? (
-            /* Trash Mode */
-            <section className="flex flex-col rounded-2xl border p-4 min-h-0 bg-red-50/30 border-red-100 h-full overflow-hidden">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 px-2 gap-4">
-                <div className="flex items-center gap-3">
-                  <h3 className="font-bold flex items-center gap-2 text-red-700 text-lg whitespace-nowrap">
-                    <Trash2 size={22} className="text-red-400 shrink-0" />
-                    {t('Trash')}
-                  </h3>
-                  {/* Filter controls */}
-                  <div className="flex items-center gap-1.5">
-                    <div className="relative">
-                      <button 
-                        onClick={() => setShowTrashMenu(!showTrashMenu)}
-                        className={cn(
-                          "flex items-center gap-1 px-2 py-1 rounded-lg border transition-all text-[9px] font-black uppercase tracking-tighter",
-                          trashFilter !== 'all' ? "bg-red-200 border-red-300 text-red-800" : "bg-white border-red-100 text-red-300"
-                        )}
-                      >
-                        <Clock size={10} />
-                        {trashFilter === 'all' ? 'Time Filter' : trashFilter}
-                      </button>
-                      {showTrashMenu && (
-                        <>
-                          <div className="fixed inset-0 z-[80]" onClick={() => setShowTrashMenu(false)} />
-                          <div className="absolute top-full left-0 mt-1 w-40 bg-white border border-slate-200 rounded-xl shadow-[0_10px_30px_rgba(0,0,0,0.15)] z-[81] py-1.5 overflow-hidden">
-                            {[
-                              { id: 'all', label: 'All Items' },
-                              { id: '1w', label: 'Older 1w' },
-                              { id: '2w', label: 'Older 2w' }
-                            ].map(f => (
-                              <button
-                                key={f.id}
-                                onClick={() => {
-                                  setTrashFilter(f.id as any);
-                                  setShowTrashMenu(false);
-                                }}
-                                className={cn(
-                                  "w-full text-left px-3 py-2 text-[10px] font-bold transition-all flex items-center justify-between",
-                                  trashFilter === f.id ? "bg-red-50 text-red-600" : "text-slate-600 hover:bg-slate-50"
-                                )}
-                              >
-                                {f.label}
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <div className="hidden sm:block text-right">
-                  <p className="text-[10px] uppercase font-black tracking-widest text-red-400">
-                    {settings.trashCleanupThresholdDays === 99999 
-                      ? "Trash is permanent" 
-                      : `${t('PermanentDeleteAfter')} ${settings.trashCleanupThresholdDays} ${t('Days')}`}
-                  </p>
-                </div>
-                
-                <button 
-                  onClick={emptyTrash}
-                  className="flex items-center gap-2 px-4 py-2 bg-white border border-red-200 rounded-xl text-[10px] font-black text-red-600 hover:bg-red-600 hover:text-white transition-all shadow-sm uppercase tracking-wider"
-                >
-                  <Zap size={12} />
-                  {t('EmptyTrash')}
-                </button>
-              </div>
-              
-              <div className="flex-1 space-y-6 overflow-y-auto overflow-x-visible pr-2 custom-scrollbar pb-24">
-                {groupedTrashTasks.nearingPurge.length > 0 && (
-                   <div className="space-y-3 mb-8">
-                      <div className="flex items-center gap-4 px-2">
-                        <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-red-500 bg-red-50 px-2 py-0.5 rounded border border-red-100 flex items-center gap-1.5">
-                          <AlertTriangle size={10} />
-                          {t('DeletingSoon')} {"(< 3 days)"}
-                        </h4>
-                        <div className="h-px flex-1 bg-red-100"></div>
-                      </div>
-                      <div className={cn(
-                        "grid grid-cols-1 gap-2.5",
-                        !isListMode && (settings.displayMode === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                      )}>
-                        <AnimatePresence mode="popLayout">
-                          {groupedTrashTasks.nearingPurge.map(task => (
-                            <TaskCard 
-                              key={task.id} 
-                              task={task} 
-                              onToggle={() => toggleDone(task.id)}
-                              onMove={(newCat) => moveTask(task.id, newCat)}
-                              onDelete={() => deleteTask(task.id)}
-                              onEdit={() => setEditingTask(task)}
-                              onStar={() => toggleStar(task.id)}
-                              onPin={() => togglePin(task.id)}
-                              t={t}
-                              variant="Trash"
-                              displayMode={settings.displayMode}
-                              deadlineThreshold={settings.deadlineThreshold}
-                            />
-                          ))}
-                        </AnimatePresence>
-                      </div>
-                    </div>
-                )}
-
-                {Object.keys(groupedTrashTasks.grouped).length > 0 ? (
-                  (Object.entries(groupedTrashTasks.grouped) as [string, Task[]][]).map(([project, tasks]) => {
-                    const isCollapsed = collapsedProjects.has(`trash-${project}`);
-                    return (
-                      <div key={project} className="space-y-3">
-                        <button 
-                          onClick={() => {
-                            const next = new Set(collapsedProjects);
-                            if (next.has(`trash-${project}`)) next.delete(`trash-${project}`);
-                            else next.add(`trash-${project}`);
-                            setCollapsedProjects(next);
-                          }}
-                          className="sticky top-0 z-20 w-full flex items-center gap-4 px-2 py-2.5 hover:opacity-90 transition-opacity bg-red-50/90 backdrop-blur-md border-b border-red-200/50"
-                        >
-                          <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-red-500 bg-white shadow-sm px-2.5 py-1 rounded-lg border border-red-200 flex items-center gap-1.5">
-                            {isCollapsed ? <ChevronRight size={10} /> : <ChevronDown size={10} />}
-                            {project}
-                          </h4>
-                          <div className="h-px flex-1 bg-red-300/30"></div>
-                          <span className="text-[9px] font-bold text-red-400 bg-red-100 px-2 py-0.5 rounded-full uppercase tracking-tighter">
-                            {tasks.length} item{tasks.length > 1 ? 's' : ''}
-                          </span>
-                        </button>
-                        
-                        {!isCollapsed && (
-                          <div className={cn(
-                            "grid grid-cols-1 gap-2.5",
-                            !isListMode && (settings.displayMode === 'large' ? "md:grid-cols-2" : "md:grid-cols-4")
-                          )}>
-                            <AnimatePresence mode="popLayout">
-                              {tasks.map(task => (
-                                <TaskCard 
-                                  key={task.id} 
-                                  task={task} 
-                                  onToggle={() => toggleDone(task.id)}
-                                  onMove={(newCat) => moveTask(task.id, newCat)}
-                                  onDelete={() => deleteTask(task.id)}
-                                  onEdit={() => setEditingTask(task)}
-                                  onStar={() => toggleStar(task.id)}
-                                  onPin={() => togglePin(task.id)}
-                                  t={t}
-                                  variant="Trash"
-                                  displayMode={settings.displayMode}
-                                  deadlineThreshold={settings.deadlineThreshold}
-                                />
-                              ))}
-                            </AnimatePresence>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })
-                ) : (
-                  groupedTrashTasks.nearingPurge.length === 0 && (
-                    <div className="py-20 flex flex-col items-center justify-center text-slate-300 opacity-40">
-                      <Trash2 size={48} strokeWidth={1} />
-                      <span className="text-[10px] font-bold mt-2 uppercase tracking-tighter italic">{t('TrashEmpty')}</span>
-                    </div>
-                  )
-                )}
-              </div>
+            /* Trash Mode (Explorer Style with nearing purge indicators) */
+            <section className="flex flex-col rounded-2xl border p-4 md:p-6 min-h-0 bg-white border-red-200/70 shadow-sm h-full overflow-hidden">
+              <ArchiveTrashExplorerView
+                mode="trash"
+                tasks={filteredTasks.filter(t => t.category === 'Trash')}
+                onRestore={(taskId, cat) => moveTask(taskId, cat || 'Backlog')}
+                onPermanentDelete={(taskId) => deleteTask(taskId)}
+                onSelectTask={(task) => setEditingTask(task)}
+                trashCleanupThresholdDays={settings.trashCleanupThresholdDays}
+                onEmptyTrash={() => emptyTrash()}
+                language={settings.language}
+                t={t}
+              />
             </section>
           ) : (
             /* Settings Mode */
