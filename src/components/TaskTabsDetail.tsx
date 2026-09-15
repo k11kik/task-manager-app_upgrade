@@ -37,6 +37,8 @@ interface TaskTabsDetailProps {
   tasks: Task[];
   openTaskIds: string[];
   activeTaskId: string | null;
+  previewTaskId?: string | null;
+  onPinPreviewTab?: (taskId: string) => void;
   onSelectTab: (taskId: string) => void;
   onCloseTab: (taskId: string) => void;
   onCloseAllTabs: () => void;
@@ -48,6 +50,10 @@ interface TaskTabsDetailProps {
   onTogglePin: (taskId: string) => void;
   onDuplicateTask?: (task: Task) => void;
   deadlineThresholdDays?: number;
+  language?: string;
+  width?: number;
+  onWidthChange?: (newWidth: number) => void;
+  onClose?: () => void;
   t: (key: string) => string;
 }
 
@@ -56,16 +62,20 @@ interface SinglePaneViewProps {
   paneIndex: 0 | 1;
   isActivePane: boolean;
   isSplit: boolean;
+  splitDirection: 'horizontal' | 'vertical';
   openTaskIds: string[];
   activeTaskId: string | null;
+  previewTaskId?: string | null;
   tasks: Task[];
   onFocusPane: () => void;
   onSelectTab: (taskId: string) => void;
   onCloseTab: (taskId: string) => void;
   onCloseAllTabs: () => void;
+  onPinPreviewTab?: (taskId: string) => void;
   onMoveTabToOtherPane?: (taskId: string) => void;
-  onToggleSplit: () => void;
+  onToggleSplit: (direction?: 'horizontal' | 'vertical') => void;
   onCloseSplit?: () => void;
+  onClosePane?: () => void;
   onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   onMoveTask: (taskId: string, category: Category) => void;
   onDeleteTask: (taskId: string) => void;
@@ -74,6 +84,7 @@ interface SinglePaneViewProps {
   onTogglePin: (taskId: string) => void;
   onDuplicateTask?: (task: Task) => void;
   deadlineThresholdDays?: number;
+  language?: string;
   t: (key: string) => string;
 }
 
@@ -81,16 +92,20 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
   paneIndex,
   isActivePane,
   isSplit,
+  splitDirection,
   openTaskIds,
   activeTaskId,
+  previewTaskId,
   tasks,
   onFocusPane,
   onSelectTab,
   onCloseTab,
   onCloseAllTabs,
+  onPinPreviewTab,
   onMoveTabToOtherPane,
   onToggleSplit,
   onCloseSplit,
+  onClosePane,
   onUpdateTask,
   onMoveTask,
   onDeleteTask,
@@ -99,8 +114,10 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
   onTogglePin,
   onDuplicateTask,
   deadlineThresholdDays = 3,
+  language = 'en',
   t
 }) => {
+  const isJa = language === 'ja';
   const activeTask = useMemo(() => {
     return tasks.find(t => t.id === activeTaskId) || null;
   }, [tasks, activeTaskId]);
@@ -131,6 +148,7 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
 
   const handleSaveField = (updates: Partial<Task>) => {
     if (!activeTask) return;
+    onPinPreviewTab?.(activeTask.id);
     onUpdateTask(activeTask.id, updates);
     setSavedIndicator(true);
     setTimeout(() => setSavedIndicator(false), 2000);
@@ -199,6 +217,7 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
         <div className="flex items-center h-full flex-1 overflow-x-auto min-w-0">
           {openTasks.map(task => {
             const isActive = task.id === activeTaskId;
+            const isPreview = task.id === previewTaskId;
             return (
               <div
                 key={task.id}
@@ -207,13 +226,17 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
                   onFocusPane();
                   onSelectTab(task.id);
                 }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  onPinPreviewTab?.(task.id);
+                }}
                 className={cn(
                   "group relative flex items-center gap-1.5 px-3 h-full border-r border-slate-200 text-xs font-medium cursor-pointer transition-colors max-w-[180px] shrink-0",
                   isActive
                     ? "bg-white text-slate-900 border-t-2 border-t-indigo-600 font-semibold shadow-xs"
                     : "text-slate-500 hover:bg-slate-200/60 hover:text-slate-800"
                 )}
-                title={`${task.project} > ${task.title}`}
+                title={isPreview ? `${task.project} > ${task.title} (${isJa ? 'プレビュー - ダブルクリックで固定' : 'Preview - double click to pin'})` : `${task.project} > ${task.title}`}
               >
                 {/* Status Dot */}
                 {task.isDone ? (
@@ -225,7 +248,11 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
                 )}
 
                 {/* Tab Title */}
-                <span className={cn("truncate text-[11px]", task.isDone && "line-through opacity-60")}>
+                <span className={cn(
+                  "truncate text-[11px]",
+                  task.isDone && "line-through opacity-60",
+                  isPreview && "italic text-slate-700"
+                )}>
                   {task.title}
                 </span>
 
@@ -243,7 +270,7 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
                       onMoveTabToOtherPane(task.id);
                     }}
                     className="p-0.5 rounded hover:bg-indigo-100 text-slate-400 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                    title={paneIndex === 0 ? "右のペインへ移動" : "左のペインへ移動"}
+                    title={paneIndex === 0 ? (isJa ? "右のペインへ移動" : "Move to right pane") : (isJa ? "左のペインへ移動" : "Move to left pane")}
                   >
                     {paneIndex === 0 ? <MoveRight size={10} /> : <MoveLeft size={10} />}
                   </button>
@@ -257,7 +284,7 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
                     onCloseTab(task.id);
                   }}
                   className="p-0.5 rounded hover:bg-slate-300/80 text-slate-400 hover:text-slate-700 opacity-60 group-hover:opacity-100 transition-opacity ml-0.5 shrink-0"
-                  title="タブを閉じる"
+                  title={isJa ? "タブを閉じる" : "Close tab"}
                 >
                   <X size={11} />
                 </button>
@@ -267,7 +294,7 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
 
           {openTasks.length === 0 && (
             <div className="px-3 text-xs text-slate-400 italic">
-              開いているタブはありません
+              {isJa ? "開いているタブはありません" : "No open tabs"}
             </div>
           )}
         </div>
@@ -276,27 +303,43 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
         <div className="flex items-center gap-1 px-2 shrink-0">
           {savedIndicator && (
             <span className="text-[10px] text-emerald-600 font-medium animate-pulse flex items-center gap-1">
-              <Save size={10} /> 保存済
+              <Save size={10} /> {isJa ? "保存済" : "Saved"}
             </span>
           )}
 
-          {/* Split Editor Button */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleSplit();
-            }}
-            className={cn(
-              "p-1 rounded transition-colors flex items-center gap-1 text-[10px] font-semibold",
-              isSplit 
-                ? "bg-indigo-100 text-indigo-700 hover:bg-indigo-200" 
-                : "text-slate-500 hover:bg-slate-200 hover:text-slate-800"
-            )}
-            title={isSplit ? "分割を解除" : "エディタを左右に分割 (Split Editor)"}
-          >
-            <Columns2 size={13} />
-            <span className="hidden xl:inline">{isSplit ? '分割解除' : '分割'}</span>
-          </button>
+          {/* Split Buttons */}
+          <div className="flex items-center bg-slate-200/70 rounded p-0.5 gap-0.5">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleSplit('horizontal');
+              }}
+              className={cn(
+                "p-1 rounded transition-colors flex items-center gap-1 text-[10px]",
+                isSplit && splitDirection === 'horizontal' 
+                  ? "bg-white text-indigo-600 shadow-2xs font-bold" 
+                  : "text-slate-500 hover:bg-white/80 hover:text-slate-800"
+              )}
+              title={isSplit && splitDirection === 'horizontal' ? (isJa ? "分割を解除" : "Close Split") : (isJa ? "左右に分割 (Side-by-Side)" : "Split Side-by-Side")}
+            >
+              <Columns2 size={13} />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleSplit('vertical');
+              }}
+              className={cn(
+                "p-1 rounded transition-colors flex items-center gap-1 text-[10px]",
+                isSplit && splitDirection === 'vertical' 
+                  ? "bg-white text-indigo-600 shadow-2xs font-bold" 
+                  : "text-slate-500 hover:bg-white/80 hover:text-slate-800"
+              )}
+              title={isSplit && splitDirection === 'vertical' ? (isJa ? "分割を解除" : "Close Split") : (isJa ? "上下に分割 (Top/Bottom)" : "Split Top/Bottom")}
+            >
+              <Split size={13} className="rotate-90" />
+            </button>
+          </div>
 
           {/* Close split pane button (for secondary pane) */}
           {isSplit && paneIndex === 1 && onCloseSplit && (
@@ -306,7 +349,7 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
                 onCloseSplit();
               }}
               className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
-              title="このエディタペインを閉じる"
+              title={isJa ? "このエディタペインを閉じる" : "Close this editor pane"}
             >
               <X size={13} />
             </button>
@@ -319,9 +362,23 @@ const SinglePaneView: React.FC<SinglePaneViewProps> = ({
                 onCloseAllTabs();
               }}
               className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded transition-colors"
-              title="このペインの全タブを閉じる"
+              title={isJa ? "このペインの全タブを閉じる" : "Close all tabs"}
             >
-              すべて閉じる
+              {isJa ? "すべて閉じる" : "Close All"}
+            </button>
+          )}
+
+          {/* Close detail pane button */}
+          {onClosePane && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onClosePane();
+              }}
+              className="p-1 text-slate-400 hover:text-slate-800 hover:bg-slate-200 rounded transition-colors ml-0.5"
+              title={isJa ? "詳細パネルを閉じる" : "Close detail panel"}
+            >
+              <X size={14} />
             </button>
           )}
         </div>

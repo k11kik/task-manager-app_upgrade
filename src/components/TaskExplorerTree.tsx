@@ -320,16 +320,98 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   }, [tasks, customFolders, searchQuery, isFilterActiveOnly]);
 
   const rootFolderList = useMemo(() => {
-    return (Array.from(treeRoot.subfolders.values()) as FolderNode[]).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRoot]);
+    const list = Array.from(treeRoot.subfolders.values()) as FolderNode[];
+    try {
+      const savedOrder = localStorage.getItem(`navfor_project_order_${activeSection}`) || localStorage.getItem('navfor_project_order');
+      if (savedOrder) {
+        const orderArr: string[] = JSON.parse(savedOrder);
+        return list.sort((a, b) => {
+          const aIdx = orderArr.indexOf(a.name);
+          const bIdx = orderArr.indexOf(b.name);
+          if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+          if (aIdx !== -1) return -1;
+          if (bIdx !== -1) return 1;
+          return a.name.localeCompare(b.name);
+        });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return list.sort((a, b) => a.name.localeCompare(b.name));
+  }, [treeRoot, activeSection]);
+
+  // Urgent (Focus) tasks list
+  const urgentTasks = useMemo(() => {
+    return tasks
+      .filter(t => t.category === 'Urgent')
+      .filter(t => {
+        if (isFilterActiveOnly && t.isDone) return false;
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          return t.title.toLowerCase().includes(q) || t.project.toLowerCase().includes(q);
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+        if (a.deadline && b.deadline) return a.deadline - b.deadline;
+        if (a.deadline) return -1;
+        if (b.deadline) return 1;
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+  }, [tasks, isFilterActiveOnly, searchQuery]);
+
+  // Pinned tasks list: EXCLUDE DONE tasks as explicitly requested!
+  const pinnedTasks = useMemo(() => {
+    return tasks
+      .filter(t => t.isPinned && !t.isDone && (t.category === 'Urgent' || t.category === 'Focus'))
+      .filter(t => {
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          return t.title.toLowerCase().includes(q) || t.project.toLowerCase().includes(q);
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+  }, [tasks, searchQuery]);
+
+  // Ref for keyboard focus retention
+  const treeRef = useRef<HTMLElement>(null);
+  const isSubmittingCreateRef = useRef(false);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
+  const [selectedFolderPaths, setSelectedFolderPaths] = useState<Set<string>>(new Set());
+  const [lastSelectedKey, setLastSelectedKey] = useState<string | null>(null);
+
+  // Helper to generate a unique key for every visible item (preventing Focus silos)
+  const getItemKey = (item: { type: 'folder'; path: string } | { type: 'task'; task: Task; parentPath: string }): string => {
+    if (item.type === 'folder') return `folder:${item.path}`;
+    return `task:${item.parentPath}:${item.task.id}`;
+  };
 
   // Flatten currently visible items for VS Code keyboard navigation
   const visibleItems = useMemo(() => {
     const list: Array<
-      | { type: 'folder'; path: string; node: FolderNode; parentPath: string }
+      | { type: 'folder'; path: string; node?: FolderNode; parentPath: string }
       | { type: 'task'; task: Task; parentPath: string }
     > = [];
 
+    // 1. Focus Section tasks (if expanded)
+    if (!isFocusSectionCollapsed) {
+      urgentTasks.forEach(task => {
+        list.push({ type: 'task', task, parentPath: '__focus__' });
+      });
+    }
+
+    // 2. Pinned Section tasks (if expanded)
+    if (!isPinnedSectionCollapsed && pinnedTasks.length > 0) {
+      pinnedTasks.forEach(task => {
+        list.push({ type: 'task', task, parentPath: '__pinned__' });
+      });
+    }
+
+    // 3. Project Folders and Tasks
     const traverse = (node: FolderNode, parentPath: string) => {
       // Subfolders first
       const subs = Array.from(node.subfolders.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -339,8 +421,17 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           traverse(sub, sub.fullPath);
         }
       });
-      // Tasks
-      node.tasks.forEach(task => {
+      // Tasks: sorted by execution sequence (non-done prioritized first, then deadline/order)
+      const sortedNodeTasks = [...node.tasks].sort((a, b) => {
+        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+        const aHas = typeof a.deadline === 'number';
+        const bHas = typeof b.deadline === 'number';
+        if (aHas && !bHas) return -1;
+        if (!aHas && bHas) return 1;
+        if (aHas && bHas && a.deadline !== b.deadline) return (a.deadline || 0) - (b.deadline || 0);
+        return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
+      });
+      sortedNodeTasks.forEach(task => {
         list.push({ type: 'task', task, parentPath: node.fullPath });
       });
     };
@@ -353,7 +444,29 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     });
 
     return list;
-  }, [rootFolderList, collapsedFolders]);
+  }, [rootFolderList, collapsedFolders, urgentTasks, isFocusSectionCollapsed, pinnedTasks, isPinnedSectionCollapsed]);
+
+  // Range select between two keys across visibleItems
+  const rangeSelectItems = (startKey: string, endKey: string) => {
+    const startIdx = visibleItems.findIndex(it => getItemKey(it) === startKey);
+    const endIdx = visibleItems.findIndex(it => getItemKey(it) === endKey);
+    if (startIdx === -1 || endIdx === -1) return;
+
+    const [low, high] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+    const newTasks = new Set<string>();
+    const newFolders = new Set<string>();
+
+    for (let i = low; i <= high; i++) {
+      const item = visibleItems[i];
+      if (item.type === 'task') {
+        newTasks.add(item.task.id);
+      } else {
+        newFolders.add(item.path);
+      }
+    }
+    setSelectedTaskIds(newTasks);
+    setSelectedFolderPaths(newFolders);
+  };
 
   // Keyboard navigation handler (ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Enter)
   const handleTreeKeyDown = (e: React.KeyboardEvent) => {
@@ -363,26 +476,70 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       e.preventDefault();
       if (!selectedKey && visibleItems.length > 0) {
         const first = visibleItems[0];
-        const key = first.type === 'folder' ? `folder:${first.path}` : `task:${first.task.id}`;
+        const key = getItemKey(first);
         setSelectedKey(key);
-        if (first.type === 'task') onSelectTask(first.task.id);
+        setLastSelectedKey(key);
+        if (first.type === 'task') {
+          onSelectTask(first.task.id);
+          setSelectedTaskIds(new Set([first.task.id]));
+          setSelectedFolderPaths(new Set());
+        } else {
+          setSelectedFolderPaths(new Set([first.path]));
+          setSelectedTaskIds(new Set());
+        }
         return;
       }
-      const idx = visibleItems.findIndex(it => (it.type === 'folder' ? `folder:${it.path}` : `task:${it.task.id}`) === selectedKey);
+      const idx = visibleItems.findIndex(it => getItemKey(it) === selectedKey);
       if (idx !== -1 && idx < visibleItems.length - 1) {
         const next = visibleItems[idx + 1];
-        const key = next.type === 'folder' ? `folder:${next.path}` : `task:${next.task.id}`;
+        const key = getItemKey(next);
         setSelectedKey(key);
-        if (next.type === 'task') onSelectTask(next.task.id);
+
+        if (e.shiftKey) {
+          if (lastSelectedKey) {
+            rangeSelectItems(lastSelectedKey, key);
+          } else {
+            setLastSelectedKey(selectedKey);
+            rangeSelectItems(selectedKey, key);
+          }
+        } else {
+          setLastSelectedKey(key);
+          if (next.type === 'task') {
+            onSelectTask(next.task.id);
+            setSelectedTaskIds(new Set([next.task.id]));
+            setSelectedFolderPaths(new Set());
+          } else {
+            setSelectedFolderPaths(new Set([next.path]));
+            setSelectedTaskIds(new Set());
+          }
+        }
       }
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      const idx = visibleItems.findIndex(it => (it.type === 'folder' ? `folder:${it.path}` : `task:${it.task.id}`) === selectedKey);
+      const idx = visibleItems.findIndex(it => getItemKey(it) === selectedKey);
       if (idx > 0) {
         const prev = visibleItems[idx - 1];
-        const key = prev.type === 'folder' ? `folder:${prev.path}` : `task:${prev.task.id}`;
+        const key = getItemKey(prev);
         setSelectedKey(key);
-        if (prev.type === 'task') onSelectTask(prev.task.id);
+
+        if (e.shiftKey) {
+          if (lastSelectedKey) {
+            rangeSelectItems(lastSelectedKey, key);
+          } else {
+            setLastSelectedKey(selectedKey);
+            rangeSelectItems(selectedKey, key);
+          }
+        } else {
+          setLastSelectedKey(key);
+          if (prev.type === 'task') {
+            onSelectTask(prev.task.id);
+            setSelectedTaskIds(new Set([prev.task.id]));
+            setSelectedFolderPaths(new Set());
+          } else {
+            setSelectedFolderPaths(new Set([prev.path]));
+            setSelectedTaskIds(new Set());
+          }
+        }
       }
     } else if (e.key === 'ArrowRight') {
       // If folder and collapsed, expand it
@@ -409,21 +566,27 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           const parts = path.split('/');
           if (parts.length > 1) {
             parts.pop();
-            setSelectedKey(`folder:${parts.join('/')}`);
+            const parentKey = `folder:${parts.join('/')}`;
+            setSelectedKey(parentKey);
+            setLastSelectedKey(parentKey);
           }
         }
       } else if (selectedKey?.startsWith('task:')) {
-        const taskId = selectedKey.replace('task:', '');
+        const parts = selectedKey.split(':');
+        const taskId = parts[parts.length - 1];
         const task = tasks.find(t => t.id === taskId);
         if (task && task.project) {
           e.preventDefault();
-          setSelectedKey(`folder:${task.project}`);
+          const parentKey = `folder:${task.project}`;
+          setSelectedKey(parentKey);
+          setLastSelectedKey(parentKey);
         }
       }
     } else if (e.key === 'Enter') {
-      // Trigger inline rename!
+      // Trigger inline rename! Works for normal files, folders, and Focus tasks!
       if (selectedKey?.startsWith('task:')) {
-        const taskId = selectedKey.replace('task:', '');
+        const parts = selectedKey.split(':');
+        const taskId = parts[parts.length - 1];
         const task = tasks.find(t => t.id === taskId);
         if (task) {
           e.preventDefault();
@@ -487,6 +650,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   // Handle creating new folder or task
   const handleCreateSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isSubmittingCreateRef.current) return;
     if (!creatingInFolder || !inlineInputValue.trim()) {
       setCreatingInFolder(null);
       setInlineInputValue('');
@@ -496,33 +660,40 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const { path, type } = creatingInFolder;
     const value = inlineInputValue.trim();
 
-    if (type === 'folder') {
-      const newFolderPath = path ? `${path}/${value}` : value;
-      if (!customFolders.includes(newFolderPath)) {
-        const next = [...customFolders, newFolderPath];
-        saveCustomFolders(next);
-      }
-      if (path && collapsedFolders.has(path)) {
-        const next = new Set<string>(collapsedFolders);
-        next.delete(path);
-        saveCollapsed(next);
-      }
-      setSelectedKey(`folder:${newFolderPath}`);
-    } else {
-      const targetProject = path || 'General';
-      await onAddTask({
-        title: value,
-        project: targetProject
-      });
-      if (path && collapsedFolders.has(path)) {
-        const next = new Set<string>(collapsedFolders);
-        next.delete(path);
-        saveCollapsed(next);
-      }
-    }
-
+    // Immediately clear inline creation input so no ghost file flashes
     setCreatingInFolder(null);
     setInlineInputValue('');
+    isSubmittingCreateRef.current = true;
+
+    try {
+      if (type === 'folder') {
+        const newFolderPath = path ? `${path}/${value}` : value;
+        if (!customFolders.includes(newFolderPath)) {
+          const next = [...customFolders, newFolderPath];
+          saveCustomFolders(next);
+        }
+        if (path && collapsedFolders.has(path)) {
+          const next = new Set<string>(collapsedFolders);
+          next.delete(path);
+          saveCollapsed(next);
+        }
+        setSelectedKey(`folder:${newFolderPath}`);
+      } else {
+        const targetProject = path || 'General';
+        await onAddTask({
+          title: value,
+          project: targetProject
+        });
+        if (path && collapsedFolders.has(path)) {
+          const next = new Set<string>(collapsedFolders);
+          next.delete(path);
+          saveCollapsed(next);
+        }
+      }
+    } finally {
+      isSubmittingCreateRef.current = false;
+      setTimeout(() => treeRef.current?.focus(), 50);
+    }
   };
 
   // Inline rename handlers
@@ -560,8 +731,10 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         }
       }
     }
+
     setRenamingItem(null);
     setRenameInputValue('');
+    setTimeout(() => treeRef.current?.focus(), 50);
   };
 
   // Folder deletion
@@ -587,43 +760,6 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     setActiveMenu(null);
   };
 
-  // Urgent (Focus) tasks list
-  const urgentTasks = useMemo(() => {
-    return tasks
-      .filter(t => t.category === 'Urgent')
-      .filter(t => {
-        if (isFilterActiveOnly && t.isDone) return false;
-        if (searchQuery.trim()) {
-          const q = searchQuery.toLowerCase();
-          return t.title.toLowerCase().includes(q) || t.project.toLowerCase().includes(q);
-        }
-        return true;
-      })
-      .sort((a, b) => {
-        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
-        if (a.deadline && b.deadline) return a.deadline - b.deadline;
-        if (a.deadline) return -1;
-        if (b.deadline) return 1;
-        return (b.updatedAt || 0) - (a.updatedAt || 0);
-      });
-  }, [tasks, isFilterActiveOnly, searchQuery]);
-
-  // Pinned tasks list: EXCLUDE DONE tasks as explicitly requested!
-  const pinnedTasks = useMemo(() => {
-    return tasks
-      .filter(t => t.isPinned && !t.isDone && (t.category === 'Urgent' || t.category === 'Focus'))
-      .filter(t => {
-        if (searchQuery.trim()) {
-          const q = searchQuery.toLowerCase();
-          return t.title.toLowerCase().includes(q) || t.project.toLowerCase().includes(q);
-        }
-        return true;
-      })
-      .sort((a, b) => {
-        return (b.updatedAt || 0) - (a.updatedAt || 0);
-      });
-  }, [tasks, searchQuery]);
-
   // Recursive counts helper
   const countFolderTasks = (node: FolderNode): { total: number; done: number; urgent: number } => {
     let total = node.tasks.length;
@@ -641,9 +777,14 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
   // Drag handlers
   const handleTaskDragStart = (e: React.DragEvent, task: Task) => {
+    let ids = [task.id];
+    if (selectedTaskIds.has(task.id) && selectedTaskIds.size > 1) {
+      ids = Array.from(selectedTaskIds);
+    }
     const payload = {
       type: 'task',
       taskId: task.id,
+      taskIds: ids,
       currentCategory: task.category,
       currentProject: task.project,
       fromProject: task.project,
@@ -682,8 +823,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       const dataStr = e.dataTransfer.getData('text/plain');
       if (!dataStr) return;
       const data = JSON.parse(dataStr);
-      if (data.type === 'task' && data.taskId) {
-        onMoveTask(data.taskId, 'Urgent');
+      if (data.type === 'task') {
+        const ids: string[] = data.taskIds?.length ? data.taskIds : (data.taskId ? [data.taskId] : []);
+        ids.forEach(id => onMoveTask(id, 'Urgent'));
       }
     } catch (err) {
       console.error(err);
@@ -697,29 +839,23 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     try {
       let data: any = null;
       const raw = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain');
-      if (raw) {
-        try { data = JSON.parse(raw); } catch (e) {}
-      }
+      if (raw) data = JSON.parse(raw);
       if (!data && (window as any).__navforDraggingTask) {
         data = (window as any).__navforDraggingTask;
       }
       if (!data && (window as any).__navforDraggingFolder) {
         data = (window as any).__navforDraggingFolder;
       }
-      if (!data) return;
-      
-      if (data.type === 'task' && data.taskId) {
-        if (data.currentProject !== targetFolderPath) {
-          onMoveTaskFolder(data.taskId, targetFolderPath);
+
+      if (data?.type === 'task') {
+        const ids: string[] = data.taskIds?.length ? data.taskIds : (data.taskId ? [data.taskId] : []);
+        ids.forEach(id => onMoveTaskFolder(id, targetFolderPath));
+        (window as any).__navforDraggingTask = null;
+      } else if (data?.type === 'folder' && data.folderPath) {
+        if (data.folderPath !== targetFolderPath && !targetFolderPath.startsWith(data.folderPath + '/')) {
+          onMoveFolder(data.folderPath, targetFolderPath);
         }
-      } else if (data.type === 'folder' && data.folderPath) {
-        // Dragging folder onto another folder!
-        const sourcePath = data.folderPath;
-        if (sourcePath !== targetFolderPath && !targetFolderPath.startsWith(sourcePath + '/')) {
-          if (onMoveFolder) {
-            onMoveFolder(sourcePath, targetFolderPath);
-          }
-        }
+        (window as any).__navforDraggingFolder = null;
       }
     } catch (err) {
       console.error(err);
@@ -755,7 +891,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const isCreatingHere = creatingInFolder?.path === node.fullPath;
     const isRenamingHere = renamingItem?.type === 'folder' && renamingItem.idOrPath === node.fullPath;
     const isDragOver = dragOverFolderPath === node.fullPath;
-    const isSelected = selectedKey === `folder:${node.fullPath}`;
+    const isFolderSelected = selectedKey === `folder:${node.fullPath}` || selectedFolderPaths.has(node.fullPath);
+
+    const folderItemKey = `folder:${node.fullPath}`;
 
     return (
       <div 
@@ -783,15 +921,33 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           onDragStart={(e) => handleFolderDragStart(e, node.fullPath)}
           onClick={(e) => {
             e.stopPropagation();
-            setSelectedKey(`folder:${node.fullPath}`);
-            toggleFolder(node.fullPath);
+            treeRef.current?.focus();
+            if (e.ctrlKey || e.metaKey) {
+              setSelectedFolderPaths(prev => {
+                const next = new Set(prev);
+                if (next.has(node.fullPath)) next.delete(node.fullPath);
+                else next.add(node.fullPath);
+                return next;
+              });
+              setSelectedKey(folderItemKey);
+              setLastSelectedKey(folderItemKey);
+            } else if (e.shiftKey && lastSelectedKey) {
+              rangeSelectItems(lastSelectedKey, folderItemKey);
+              setSelectedKey(folderItemKey);
+            } else {
+              setSelectedFolderPaths(new Set([node.fullPath]));
+              setSelectedTaskIds(new Set());
+              setSelectedKey(folderItemKey);
+              setLastSelectedKey(folderItemKey);
+              toggleFolder(node.fullPath);
+            }
           }}
           className={cn(
             "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-semibold cursor-pointer transition-all",
             isDragOver 
               ? "bg-indigo-100/90 border border-indigo-500 shadow-xs" 
-              : isSelected 
-                ? "bg-indigo-50/90 text-indigo-950 font-bold" 
+              : isFolderSelected 
+                ? "bg-indigo-100/90 text-indigo-950 font-bold ring-1 ring-indigo-400/40 shadow-2xs" 
                 : "text-slate-700 hover:bg-slate-200/50"
           )}
           style={{ paddingLeft: `${Math.max(6, depth * 14 + 6)}px` }}
@@ -834,15 +990,10 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           )}
 
           {/* Task count badges */}
-          {!isRenamingHere && (
+          {!isRenamingHere && counts.urgent > 0 && (
             <div className="flex items-center gap-1 opacity-70 group-hover:opacity-100 transition-opacity">
-              {counts.urgent > 0 && (
-                <span className="text-[9px] font-mono px-1 py-0.2 bg-red-100 text-red-700 font-bold rounded-full">
-                  {counts.urgent}
-                </span>
-              )}
-              <span className="text-[10px] font-mono text-slate-400">
-                {counts.done}/{counts.total}
+              <span className="text-[9px] font-mono px-1 py-0.2 bg-red-100 text-red-700 font-bold rounded-full">
+                {counts.urgent}
               </span>
             </div>
           )}
@@ -920,7 +1071,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               .map(subNode => renderFolder(subNode, depth + 1))}
 
             {/* Tasks in this folder */}
-            {node.tasks.map(task => renderTaskItem(task, depth + 1))}
+            {node.tasks.map(task => renderTaskItem(task, depth + 1, node.fullPath))}
           </div>
         )}
       </div>
@@ -928,8 +1079,10 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   };
 
   // Render a task file item in tree
-  const renderTaskItem = (task: Task, depth = 1) => {
-    const isSelected = activeTaskId === task.id || selectedKey === `task:${task.id}`;
+  const renderTaskItem = (task: Task, depth = 1, parentPath = '') => {
+    const itemKey = parentPath ? `task:${parentPath}:${task.id}` : `task:${task.id}`;
+    const isMultiSelected = selectedTaskIds.has(task.id);
+    const isSelected = activeTaskId === task.id || selectedKey === itemKey || isMultiSelected;
     const isUrgent = task.category === 'Urgent';
     const isRenamingHere = renamingItem?.type === 'task' && renamingItem.idOrPath === task.id;
 
@@ -937,18 +1090,38 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
     return (
       <div
-        key={task.id}
+        key={itemKey}
         draggable={true}
         onDragStart={(e) => handleTaskDragStart(e, task)}
         onClick={(e) => {
           e.stopPropagation();
-          setSelectedKey(`task:${task.id}`);
-          onSelectTask(task.id);
+          treeRef.current?.focus();
+          if (e.ctrlKey || e.metaKey) {
+            setSelectedTaskIds(prev => {
+              const next = new Set(prev);
+              if (next.has(task.id)) next.delete(task.id);
+              else next.add(task.id);
+              return next;
+            });
+            setSelectedKey(itemKey);
+            setLastSelectedKey(itemKey);
+            onSelectTask(task.id);
+          } else if (e.shiftKey && lastSelectedKey) {
+            rangeSelectItems(lastSelectedKey, itemKey);
+            setSelectedKey(itemKey);
+            onSelectTask(task.id);
+          } else {
+            setSelectedTaskIds(new Set([task.id]));
+            setSelectedFolderPaths(new Set());
+            setSelectedKey(itemKey);
+            setLastSelectedKey(itemKey);
+            onSelectTask(task.id);
+          }
         }}
         className={cn(
           "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-pointer transition-all select-none",
           isSelected 
-            ? "bg-indigo-100/90 text-indigo-950 font-semibold shadow-2xs" 
+            ? "bg-indigo-100/90 text-indigo-950 font-semibold shadow-2xs ring-1 ring-indigo-400/40" 
             : isUrgent 
               ? "text-slate-800 hover:bg-red-50/60" 
               : "text-slate-700 hover:bg-slate-200/50",
@@ -1091,6 +1264,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
   return (
     <aside 
+      ref={treeRef}
       style={{ width: `${width}px` }}
       onKeyDown={handleTreeKeyDown}
       tabIndex={0}
@@ -1253,7 +1427,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 {isJa ? "⚡ タスクをドラッグまたは⚡をクリックして追加" : "⚡ Drag tasks here or click ⚡ to focus"}
               </div>
             ) : (
-              urgentTasks.map(task => renderTaskItem(task, 0.5))
+              urgentTasks.map(task => renderTaskItem(task, 0.5, '__focus__'))
             )}
           </div>
         )}
@@ -1278,7 +1452,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
           {!isPinnedSectionCollapsed && (
             <div className="max-h-36 overflow-y-auto custom-scrollbar p-1 space-y-0.5">
-              {pinnedTasks.map(task => renderTaskItem(task, 0.5))}
+              {pinnedTasks.map(task => renderTaskItem(task, 0.5, '__pinned__'))}
             </div>
           )}
         </div>

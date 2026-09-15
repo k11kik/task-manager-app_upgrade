@@ -78,13 +78,15 @@ const PRESETS: Record<string, { labelJa: string; labelEn: string; cols: CustomTi
     ]
   },
   phases: {
-    labelJa: 'フェーズ (計画・実行・レビュー・完了)',
-    labelEn: 'Phases (Plan, Build, Review, Done)',
+    labelJa: 'フェーズ (Planning, Ready, In Progress, Waiting, Review, Ongoing)',
+    labelEn: 'Phases (Planning, Ready, In Progress, Waiting, Review, Ongoing)',
     cols: [
       { id: 'phase-plan', label: 'Planning' },
+      { id: 'phase-ready', label: 'Ready' },
       { id: 'phase-dev', label: 'In Progress' },
+      { id: 'phase-waiting', label: 'Waiting' },
       { id: 'phase-review', label: 'Review' },
-      { id: 'phase-done', label: 'Done' }
+      { id: 'phase-ongoing', label: 'Ongoing' }
     ]
   }
 };
@@ -285,19 +287,22 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   };
 
   // Chronological execution sequence for each task within its project lane (#1, #2, ...)
+  // Timeline tasks have higher priority than ToDo list tasks. Done tasks do not receive sequence numbers.
   const projectTaskSequenceMap = useMemo(() => {
     const map = new Map<string, number>();
 
     projectTree.forEach(project => {
-      const sorted = [...project.tasks].sort((a, b) => {
+      const nonDoneTasks = project.tasks.filter(t => !t.isDone);
+      const sorted = [...nonDoneTasks].sort((a, b) => {
         if (timelineMode === 'calendar') {
           const aHas = typeof a.deadline === 'number';
           const bHas = typeof b.deadline === 'number';
           if (!aHas && !bHas) {
             return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
           }
-          if (!aHas && bHas) return -1; // ToDo List tasks come first
-          if (aHas && !bHas) return 1;
+          // Timeline tasks (> ToDo tasks) come first!
+          if (aHas && !bHas) return -1;
+          if (!aHas && bHas) return 1;
           const aD = startOfDay(new Date(a.deadline!)).getTime();
           const bD = startOfDay(new Date(b.deadline!)).getTime();
           if (aD !== bD) return aD - bD;
@@ -308,8 +313,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (aIdx === -1 && bIdx === -1) {
             return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
           }
-          if (aIdx === -1 && bIdx !== -1) return -1; // ToDo List tasks come first
-          if (aIdx !== -1 && bIdx === -1) return 1;
+          // Timeline tasks (> ToDo tasks) come first!
+          if (aIdx !== -1 && bIdx === -1) return -1;
+          if (aIdx === -1 && bIdx !== -1) return 1;
           if (aIdx !== bIdx) return aIdx - bIdx;
           return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
         }
@@ -489,19 +495,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           updates.isAllDay = true;
           updates.timelineColumn = undefined;
         } else {
-          // Returning to ToDo List (backlog)
-          updates.deadline = undefined;
+          // In ToDo List column: do NOT clear deadline, original deadline is preserved
           updates.timelineColumn = undefined;
-          updates.isAllDay = undefined;
         }
       } else {
         if (slot.columnId) {
           updates.timelineColumn = slot.columnId;
-          updates.deadline = undefined;
+          // In custom columns: do NOT clear deadline, original deadline is preserved
         } else {
-          // Returning to ToDo List (backlog)
+          // In ToDo List (backlog): clear column, preserve original deadline
           updates.timelineColumn = undefined;
-          updates.deadline = undefined;
         }
       }
 
@@ -554,9 +557,14 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       const updates: Partial<Task> = {
         project: targetTask.project,
         timelineColumn: isTargetBacklog ? undefined : targetTask.timelineColumn,
-        deadline: isTargetBacklog ? undefined : targetTask.deadline,
-        isAllDay: isTargetBacklog ? undefined : targetTask.isAllDay
       };
+
+      // Only adjust deadline if explicitly scheduling onto a calendar date slot
+      if (timelineMode === 'calendar' && targetTask.deadline) {
+        updates.deadline = targetTask.deadline;
+        updates.isAllDay = targetTask.isAllDay;
+      }
+      // If moving in custom columns or between ToDo items, do NOT touch or reset deadline!
 
       // Find all sibling tasks in target slot (including ToDo List / backlog)
       const siblings = activeTasks.filter(t => {

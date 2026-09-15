@@ -487,7 +487,7 @@ export default function App() {
   const [settings, setSettings] = useState({
     urgentLimit: 3,
     deadlineThreshold: 3,
-    archiveThresholdDays: 30,
+    archiveThresholdDays: 99999,
     doneToTrashThresholdDays: 7,
     trashCleanupThresholdDays: 30,
     archiveDoneToTrashDays: 7,
@@ -505,6 +505,7 @@ export default function App() {
   const t = (key: string, data?: Record<string, string | number>) => {
     const translations: Record<string, Record<string, string>> = {
       en: {
+        'Default': 'Default',
         'Done': 'Done',
         'TotalLabel': 'Total',
         'Urgent': 'Focus',
@@ -669,6 +670,7 @@ export default function App() {
         'MarkUndone': 'Mark as ToDo',
       },
       ja: {
+        'Default': 'デフォルト',
         'TotalLabel': '計',
         'Urgent': 'フォーカス',
         'Focus': 'ToDo',
@@ -850,6 +852,7 @@ export default function App() {
         'MarkUndone': '未完了に戻す',
       },
       fr: {
+        'Default': 'Par défaut',
         'TotalLabel': 'Total',
         'Urgent': 'Focus',
         'Focus': 'ToDo',
@@ -1125,7 +1128,7 @@ export default function App() {
         setSettings({
           urgentLimit: data.urgentLimit || 3,
           deadlineThreshold: data.deadlineThreshold || 3,
-          archiveThresholdDays: data.archiveThresholdDays || 30,
+          archiveThresholdDays: data.archiveThresholdDays !== undefined ? data.archiveThresholdDays : 99999,
           doneToTrashThresholdDays: data.doneToTrashThresholdDays || 7,
           trashCleanupThresholdDays: data.trashCleanupThresholdDays || 30,
           archiveDoneToTrashDays: data.archiveDoneToTrashDays !== undefined ? data.archiveDoneToTrashDays : 7,
@@ -1153,7 +1156,7 @@ export default function App() {
           userId: user.uid,
           urgentLimit: 3,
           deadlineThreshold: 3,
-          archiveThresholdDays: 30,
+          archiveThresholdDays: 99999,
           doneToTrashThresholdDays: 7,
           trashCleanupThresholdDays: 30,
           archiveDoneToTrashDays: 7,
@@ -2821,7 +2824,7 @@ export default function App() {
       const defaultThresholds = {
         urgentLimit: 3,
         deadlineThreshold: 3,
-        archiveThresholdDays: 30,
+        archiveThresholdDays: 99999,
         doneToTrashThresholdDays: 7,
         trashCleanupThresholdDays: 30,
         archiveDoneToTrashDays: 7,
@@ -3104,41 +3107,7 @@ export default function App() {
 
                 {/* Other Desktop-only tools */}
                 <div className="hidden md:flex items-center gap-1">
-                  {/* Display Mode Toggle */}
-                  <div className="flex bg-slate-50 border border-slate-100 rounded-xl p-0.5 whitespace-nowrap">
-                  <button 
-                    onClick={() => saveSettings({ displayMode: 'large', displayModeFocus: 'large', displayModeTodo: 'large' })}
-                    className={cn(
-                      "p-1.5 rounded-lg transition-all",
-                      settings.displayMode === 'large' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
-                    )}
-                    title={t('LargeView')}
-                  >
-                    <Grid2X2 size={14} />
-                  </button>
-                  <button 
-                    onClick={() => saveSettings({ displayMode: 'standard', displayModeFocus: 'standard', displayModeTodo: 'standard' })}
-                    className={cn(
-                      "p-1.5 rounded-lg transition-all",
-                      settings.displayMode === 'standard' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
-                    )}
-                    title={t('StandardView')}
-                  >
-                    <LayoutGrid size={14} />
-                  </button>
-                  <button 
-                    onClick={() => saveSettings({ displayMode: 'compact', displayModeFocus: 'compact', displayModeTodo: 'compact' })}
-                    className={cn(
-                      "p-1.5 rounded-lg transition-all",
-                      settings.displayMode === 'compact' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
-                    )}
-                    title={t('CompactView')}
-                  >
-                    <LayoutList size={14} />
-                  </button>
-                </div>
-
-                {/* Project Filter */}
+                  {/* Project Filter */}
                 <div className="relative">
                   <button 
                     onClick={() => setShowProjectFilter(!showProjectFilter)}
