@@ -2,11 +2,14 @@ import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
   GoogleAuthProvider, 
-  signInWithPopup, 
+  signInWithRedirect, 
+  getRedirectResult, 
   signOut,
-  signInAnonymously,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword
+  setPersistence,
+  browserLocalPersistence,
+  UserCredential,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword
 } from 'firebase/auth';
 import { 
   initializeFirestore, 
@@ -14,13 +17,9 @@ import {
   persistentMultipleTabManager, 
   getFirestore, 
   terminate, 
-  clearIndexedDbPersistence,
-  doc,
-  getDocFromServer
+  clearIndexedDbPersistence 
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-
-export { firebaseConfig };
 
 const app = initializeApp(firebaseConfig);
 
@@ -33,15 +32,20 @@ try {
   firestoreDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 }
 
-export const db = firestoreDb; // CRITICAL: The app will break without this line
+export const db = firestoreDb;
 export const auth = getAuth(app);
+
+// 認証の永続化を IndexedDB / LocalStorage に明示的に設定
+setPersistence(auth, browserLocalPersistence).catch((err) => {
+  console.error("Auth persistence setup failed:", err);
+});
+
 export const googleProvider = new GoogleAuthProvider();
 
 export const clearFirestoreCache = async () => {
   try {
     await terminate(db);
     await clearIndexedDbPersistence(db);
-    // Note: The app will need to reload or re-initialize db after this
     return true;
   } catch (err) {
     console.error("Failed to clear Firestore cache:", err);
@@ -49,122 +53,92 @@ export const clearFirestoreCache = async () => {
   }
 };
 
-export const signIn = async (forceConsent = false) => {
+/**
+ * Google ログインを開始（リダイレクト方式）
+ */
+export const signInWithGoogle = async (forceConsent = false): Promise<void> => {
   if (forceConsent) {
     googleProvider.setCustomParameters({ prompt: 'consent select_account' });
   } else {
-    googleProvider.setCustomParameters({});
+    googleProvider.setCustomParameters({ prompt: 'select_account' });
   }
-  const result = await signInWithPopup(auth, googleProvider);
-  return {
-    user: result.user,
-    credential: GoogleAuthProvider.credentialFromResult(result)
-  };
+  await signInWithRedirect(auth, googleProvider);
 };
 
-export const signInGuest = async () => {
-  const result = await signInAnonymously(auth);
-  return result.user;
+/**
+ * メールアドレス＆パスワードで新規アカウント登録
+ */
+export const signUpWithEmail = (email: string, pass: string): Promise<UserCredential> => {
+  return createUserWithEmailAndPassword(auth, email, pass);
 };
 
-export const signInWithEmail = async (email: string, pass: string) => {
-  const result = await signInWithEmailAndPassword(auth, email, pass);
-  return result.user;
+/**
+ * メールアドレス＆パスワードでログイン
+ */
+export const signInWithEmail = (email: string, pass: string): Promise<UserCredential> => {
+  return signInWithEmailAndPassword(auth, email, pass);
 };
 
-export const signUpWithEmail = async (email: string, pass: string) => {
-  const result = await createUserWithEmailAndPassword(auth, email, pass);
-  return result.user;
+/**
+ * リダイレクト後にアプリに戻ってきた際、ログイン結果を取得
+ */
+export const checkRedirectResult = async (): Promise<UserCredential | null> => {
+  try {
+    const result = await getRedirectResult(auth);
+    return result;
+  } catch (error) {
+    console.error("Redirect login error:", error);
+    throw error;
+  }
 };
 
 export const logOut = () => signOut(auth);
-
-export const testFirestoreConnection = async (): Promise<{ ok: boolean; message: string }> => {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    return { ok: true, message: "Firestore サーバーと正常に通信できました。" };
-  } catch (err: any) {
-    if (err?.code === 'permission-denied' || err?.message?.includes('Missing or insufficient permissions')) {
-      // 権限エラーが出るということは、Firestoreサーバー自体との通信は確立されており、セキュリティルールが正しく動作している証拠
-      return { ok: true, message: "Firestore サーバーと正常に通信できています (セキュリティルール稼働中)。" };
-    }
-    if (err instanceof Error && err.message.includes('the client is offline')) {
-      return { ok: false, message: "Firestore クライアントがオフラインです。ネットワーク接続をご確認ください。" };
-    }
-    return { ok: false, message: err?.message || String(err) };
-  }
-};
 
 export interface AuthErrorInfo {
   code: string;
   title: string;
   message: string;
   suggestion: string;
-  actionType: 'authorized_domain' | 'provider_enable' | 'popup_block' | 'network' | 'general';
 }
 
 export function parseAuthError(err: any): AuthErrorInfo {
-  const code = err?.code || (err instanceof Error && 'code' in err ? (err as any).code : 'auth/unknown');
+  const code = err?.code || 'auth/unknown';
   const rawMessage = err?.message || String(err);
 
   if (code === 'auth/unauthorized-domain') {
     const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
     return {
       code,
-      title: '承認されていないドメインです (auth/unauthorized-domain)',
-      message: `現在アクセスしているドメイン「${currentHost}」がFirebase Authenticationの承認済みドメインに登録されていません。`,
-      suggestion: `Firebase Console > Authentication > Settings > 承認済みドメイン (Authorized domains) に「${currentHost}」を追加してください。`,
-      actionType: 'authorized_domain'
+      title: '承認されていないドメインです',
+      message: `現在アクセスしているドメイン「${currentHost}」がFirebaseの承認済みドメインに登録されていません。`,
+      suggestion: `Firebase Console > Authentication > Settings > 承認済みドメイン に「${currentHost}」を追加してください。`
     };
   }
 
-  if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
+  if (code === 'auth/email-already-in-use') {
     return {
       code,
-      title: 'Googleログインプロバイダが無効です (auth/operation-not-allowed)',
-      message: 'Firebaseプロジェクト側でGoogle認証プロバイダが有効化されていません。',
-      suggestion: 'Firebase Console > Authentication > Sign-in method で「Google」プロバイダを有効化（Enable）してください。',
-      actionType: 'provider_enable'
+      title: '登録済みのメールアドレスです',
+      message: 'このメールアドレスは既に登録されています。',
+      suggestion: '「ログイン」タブに切り替えてログインをお試しください。'
     };
   }
 
-  if (code === 'auth/popup-blocked') {
+  if (code === 'auth/wrong-password' || code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
     return {
       code,
-      title: 'ポップアップがブロックされました (auth/popup-blocked)',
-      message: 'ブラウザのポップアップブロックまたはiframeのセキュリティ制限により、ログイン画面を開けませんでした。',
-      suggestion: 'ブラウザのアドレスバーでポップアップを許可するか、画面右上の「新しいタブで開く」からアプリを別タブで開いて再度お試しください。',
-      actionType: 'popup_block'
+      title: 'ログイン失敗',
+      message: 'メールアドレスまたはパスワードが正しくありません。',
+      suggestion: '入力内容を再度ご確認のうえお試しください。'
     };
   }
 
-  if (code === 'auth/popup-closed-by-user') {
+  if (code === 'auth/weak-password') {
     return {
       code,
-      title: 'ログインがキャンセルされました (auth/popup-closed-by-user)',
-      message: '認証完了前にログイン用ポップアップウィンドウが閉じられました。',
-      suggestion: '再度「Googleでログイン」ボタンをクリックしてログインを完了してください。',
-      actionType: 'general'
-    };
-  }
-
-  if (code === 'auth/cancelled-popup-request') {
-    return {
-      code,
-      title: 'ログインリクエストが重複しました',
-      message: '複数のログインポップアップが同時にリクエストされました。',
-      suggestion: '少し待ってから再度1回クリックしてください。',
-      actionType: 'general'
-    };
-  }
-
-  if (code === 'auth/network-request-failed') {
-    return {
-      code,
-      title: 'ネットワーク通信エラー (auth/network-request-failed)',
-      message: 'Firebaseサーバーへの認証リクエストがタイムアウトまたは遮断されました。',
-      suggestion: 'インターネット接続やセキュリティソフト、ブラウザの広告ブロック拡張機能の設定をご確認ください。',
-      actionType: 'network'
+      title: 'パスワードが短すぎます',
+      message: 'パスワードは6文字以上で設定してください。',
+      suggestion: '6文字以上の英数字や記号を組み合わせたパスワードを入力してください。'
     };
   }
 
@@ -172,8 +146,6 @@ export function parseAuthError(err: any): AuthErrorInfo {
     code,
     title: `認証エラー (${code})`,
     message: rawMessage,
-    suggestion: 'Firebase ConsoleのAuthentication設定、またはブラウザのコンソールログをご確認ください。',
-    actionType: 'general'
+    suggestion: 'ネットワーク接続や入力内容をご確認ください。'
   };
 }
-
