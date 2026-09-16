@@ -18,6 +18,7 @@ export interface Task {
   isAllDay?: boolean;
   order?: number; // custom execution order
   timelineColumn?: string; // custom abstract timeline column/stage
+  timelinePresetColumns?: Record<string, string>; // presetKey -> columnId mapping
 }
 
 export interface TaskHistory {

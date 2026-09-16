@@ -128,7 +128,7 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "3.1.3";
+  const APP_VERSION = "3.1.2";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -279,6 +279,9 @@ export default function App() {
     deadline?: number;
     isAllDay?: boolean;
     notes?: string;
+    timelineColumn?: string;
+    timelinePresetColumns?: Record<string, string>;
+    order?: number;
   }) => {
     if (!user && !isLocalMode) {
       setIsAuthModalOpen(true);
@@ -297,7 +300,10 @@ export default function App() {
       isDone: false,
       isStarred: false,
       isAllDay: taskData.isAllDay ?? true,
-      ...(taskData.deadline ? { deadline: taskData.deadline } : {})
+      ...(taskData.deadline ? { deadline: taskData.deadline } : {}),
+      ...(taskData.timelineColumn ? { timelineColumn: taskData.timelineColumn } : {}),
+      ...(taskData.timelinePresetColumns ? { timelinePresetColumns: taskData.timelinePresetColumns } : {}),
+      ...(taskData.order !== undefined ? { order: taskData.order } : {})
     };
 
     try {
