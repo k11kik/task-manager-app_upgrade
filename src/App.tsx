@@ -128,7 +128,7 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "3.1.1";
+  const APP_VERSION = "3.1.3";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
