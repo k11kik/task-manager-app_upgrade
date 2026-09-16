@@ -49,7 +49,8 @@ import {
   Pin,
   PinOff,
   GripVertical,
-  Layers
+  Layers,
+  CalendarDays
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DragDropContext, Droppable, Draggable as DraggableDnd } from '@hello-pangea/dnd';
@@ -3377,8 +3378,8 @@ export default function App() {
             onClick={() => { setViewMode('dashboard'); setMobileView('focus'); }}
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'focus' ? "text-indigo-600" : "text-slate-400")}
           >
-            <FileText size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">{settings.language === 'ja' ? '詳細' : 'Detail'}</span>
+            <CalendarDays size={20} />
+            <span className="text-[9px] font-bold uppercase tracking-tighter">{settings.language === 'ja' ? 'タイムライン' : 'Timeline'}</span>
           </button>
           <button 
             onClick={() => { setViewMode('calendar'); setMobileView('calendar'); }}

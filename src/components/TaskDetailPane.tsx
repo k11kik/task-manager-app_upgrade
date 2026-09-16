@@ -190,7 +190,7 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 z-50 w-full h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-xl lg:shadow-lg select-text lg:w-[var(--detail-pane-width)]"
+      className="fixed inset-0 z-[150] w-full h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-2xl lg:shadow-lg select-text lg:w-[var(--detail-pane-width)]"
       style={{ '--detail-pane-width': `${width}px` } as React.CSSProperties}
     >
       {/* Left resize handle (Desktop only) */}
@@ -203,27 +203,28 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
       {/* Pane Content Container */}
       <div className="flex-1 h-full min-h-0 flex flex-col overflow-hidden bg-white">
         {/* Header toolbar */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50/80 shrink-0">
+        <div className="flex items-center justify-between px-3 sm:px-4 py-2.5 sm:py-3 border-b border-slate-200 bg-slate-50/90 shrink-0 sticky top-0 z-30">
           {/* Breadcrumb project path */}
           <div className="flex items-center gap-1.5 text-xs text-slate-500 min-w-0 font-mono">
-            <Folder size={13} className="text-indigo-600 shrink-0" />
+            <Folder size={14} className="text-indigo-600 shrink-0" />
             <span className="truncate font-semibold text-slate-700">{task.project || 'General'}</span>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             {isSavedNotice && (
               <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 animate-fade-in">
                 {isJa ? '保存済' : 'Saved'}
               </span>
             )}
             
-            {/* Close button */}
+            {/* Close button with high visibility on mobile */}
             <button
               onClick={onClose}
-              className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-md transition-colors"
+              className="px-2.5 py-1 sm:p-1.5 text-slate-600 hover:text-slate-900 bg-slate-200/80 hover:bg-slate-300 rounded-lg transition-colors flex items-center gap-1 text-xs font-bold shadow-2xs"
               title={isJa ? '閉じる' : 'Close detail pane'}
             >
-              <X size={16} />
+              <X size={16} className="text-slate-700 shrink-0" />
+              <span className="sm:hidden">{isJa ? '閉じる' : 'Close'}</span>
             </button>
           </div>
         </div>

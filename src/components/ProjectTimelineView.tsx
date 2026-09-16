@@ -27,7 +27,8 @@ import {
   X,
   RefreshCw,
   Sparkles,
-  ListTodo
+  ListTodo,
+  RotateCcw
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
@@ -185,6 +186,65 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [daysCount, setDaysCount] = useState<number>(14); // 7, 14, 21, 30
   const [showUnscheduledColumn, setShowUnscheduledColumn] = useState(true);
   const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(new Set());
+
+  // User adjustable project column width
+  const [projectColWidth, setProjectColWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_project_col_width');
+      if (saved) return parseInt(saved, 10);
+    } catch {}
+    return typeof window !== 'undefined' && window.innerWidth < 640 ? 210 : 256;
+  });
+
+  const isResizingProject = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
+
+  const handleStartProjectResize = (clientX: number) => {
+    isResizingProject.current = true;
+    startXRef.current = clientX;
+    startWidthRef.current = projectColWidth;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const handleMove = (e: MouseEvent | TouchEvent) => {
+      if (!isResizingProject.current) return;
+      const currentX = 'touches' in e ? e.touches[0].clientX : (e as MouseEvent).clientX;
+      const delta = currentX - startXRef.current;
+      const newWidth = Math.max(140, Math.min(500, startWidthRef.current + delta));
+      setProjectColWidth(newWidth);
+    };
+
+    const handleEnd = () => {
+      if (!isResizingProject.current) return;
+      isResizingProject.current = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleEnd);
+      window.removeEventListener('touchmove', handleMove);
+      window.removeEventListener('touchend', handleEnd);
+      try {
+        setProjectColWidth(w => {
+          localStorage.setItem('navfor_timeline_project_col_width', String(w));
+          return w;
+        });
+      } catch {}
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('touchmove', handleMove, { passive: false });
+    window.addEventListener('touchend', handleEnd);
+  };
+
+  const handleResetColumnWidths = () => {
+    const defaultProj = typeof window !== 'undefined' && window.innerWidth < 640 ? 210 : 256;
+    setProjectColWidth(defaultProj);
+    try {
+      localStorage.removeItem('navfor_timeline_project_col_width');
+    } catch {}
+  };
 
   // Drag over target cell state
   const [dragOverCell, setDragOverCell] = useState<{ 
@@ -775,6 +835,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </span>
           </button>
 
+          {/* Reset Column Widths Button */}
+          <button
+            onClick={handleResetColumnWidths}
+            className="px-2.5 py-1 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
+            title={isJa ? "列幅を初期設定にリセット" : "Reset column widths to default"}
+          >
+            <RotateCcw size={12} className="text-slate-500 shrink-0" />
+            <span>{isJa ? "リセット" : "Reset"}</span>
+          </button>
+
           {/* ToDo List (Unscheduled) Column Toggle */}
           <button
             onClick={() => setShowUnscheduledColumn(!showUnscheduledColumn)}
@@ -840,15 +910,33 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 (window as any).__navforDraggingFolder = null;
               }
             }}
+            style={{ width: `${projectColWidth}px` }}
             className={cn(
-              "w-28 sm:w-56 lg:w-64 shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sm:sticky sm:left-0 z-30 transition-colors",
+              "shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sm:sticky sm:left-0 z-30 transition-colors relative group/projcol",
               isDragOverRootHeader && "bg-indigo-100 ring-2 ring-indigo-500 ring-inset"
             )}
             title={isJa ? "サブプロジェクトをここにドロップすると最上位プロジェクト化できます" : "Drop subproject here to make it a top-level project"}
           >
-            <div className="flex items-center gap-1.5 min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0 flex-1">
               <span className="truncate">{isJa ? 'プロジェクト / レーン' : 'Projects / Lanes'}</span>
               <span className="text-[10px] text-slate-400 font-mono">({projectTree.length})</span>
+            </div>
+
+            {/* Draggable resize handle on right edge */}
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleStartProjectResize(e.clientX);
+              }}
+              onTouchStart={(e) => {
+                e.stopPropagation();
+                handleStartProjectResize(e.touches[0].clientX);
+              }}
+              className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-40 flex items-center justify-center group-hover/projcol:bg-slate-300/60"
+              title={isJa ? "ドラッグしてプロジェクト列幅を調整" : "Drag to resize project column width"}
+            >
+              <div className="w-0.5 h-3.5 bg-slate-400 rounded-full" />
             </div>
           </div>
 
@@ -1008,26 +1096,26 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     }
                   }}
                   onDrop={(e) => handleProjectHeaderDrop(e, project.fullPath)}
+                  style={{ width: `${projectColWidth}px`, paddingLeft: `${Math.max(4, indentPx + 4)}px` }}
                   className={cn(
-                    "w-28 sm:w-56 lg:w-64 shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-start justify-between bg-white sm:sticky sm:left-0 sm:z-10 select-none transition-colors cursor-grab active:cursor-grabbing group/lane",
+                    "shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-center justify-between bg-white sm:sticky sm:left-0 sm:z-10 select-none transition-colors cursor-grab active:cursor-grabbing group/lane",
                     project.level === 0 ? "font-bold text-slate-800" : "font-medium text-slate-600",
                     dragOverProjectHeader === project.fullPath && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset"
                   )}
-                  style={{ paddingLeft: `${Math.max(8, indentPx + 8)}px` }}
                   title={isJa ? "ドラッグして他のプロジェクトに移動・サブプロジェクト化" : "Drag to move or nest under another project"}
                 >
-                  <div className="flex items-center gap-1 min-w-0 flex-1">
-                    <GripVertical size={11} className="text-slate-300 group-hover/lane:text-slate-500 shrink-0 mr-0.5" />
+                  <div className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
+                    <GripVertical size={11} className="hidden sm:block text-slate-300 group-hover/lane:text-slate-500 shrink-0 mr-0.5" />
                     <button
                       onClick={() => toggleProjectCollapse(project.fullPath)}
-                      className="p-0.5 text-slate-400 hover:text-slate-700 rounded transition-transform"
+                      className="p-0.5 text-slate-400 hover:text-slate-700 rounded transition-transform shrink-0"
                     >
                       {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
                     </button>
 
-                    <Folder size={13} className={cn(project.level === 0 ? "text-indigo-600" : "text-amber-500")} />
+                    <Folder size={13} className={cn("shrink-0", project.level === 0 ? "text-indigo-600" : "text-amber-500")} />
 
-                    <span className="text-xs truncate font-mono tracking-tight" title={project.fullPath}>
+                    <span className="text-xs truncate font-mono tracking-tight flex-1 min-w-0" title={project.fullPath}>
                       {project.name}
                     </span>
                   </div>
@@ -1046,7 +1134,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         });
                         setQuickAddTitle('');
                       }}
-                      className="p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                      className="hidden sm:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
                       title={isJa ? 'このプロジェクトにタスク追加' : 'Add task in project'}
                     >
                       <Plus size={12} />
