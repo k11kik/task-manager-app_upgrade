@@ -433,55 +433,84 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     return tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus');
   }, [tasks]);
 
-  // Group tasks by project and subproject paths (including custom empty folders)
+  // Group tasks by project matching TaskExplorerTree hierarchy and ordering
   const projectTree = useMemo(() => {
-    const projectMap = new Map<string, { fullPath: string; name: string; level: number; tasks: Task[] }>();
+    interface Node {
+      name: string;
+      fullPath: string;
+      level: number;
+      subfolders: Map<string, Node>;
+      tasks: Task[];
+    }
 
-    // 1. Include custom empty folders
+    const root: Node = {
+      name: 'root',
+      fullPath: '',
+      level: -1,
+      subfolders: new Map(),
+      tasks: []
+    };
+
+    const getOrCreateFolder = (pathParts: string[]): Node => {
+      let current = root;
+      let accPath = '';
+      pathParts.forEach((part, idx) => {
+        accPath = accPath ? `${accPath}/${part}` : part;
+        if (!current.subfolders.has(part)) {
+          current.subfolders.set(part, {
+            name: part,
+            fullPath: accPath,
+            level: idx,
+            subfolders: new Map(),
+            tasks: []
+          });
+        }
+        current = current.subfolders.get(part)!;
+      });
+      return current;
+    };
+
+    // 1. Include custom empty folders (matching Explorer)
     customFolders.forEach(folderPath => {
       if (!folderPath) return;
       const parts = folderPath.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
-      let acc = '';
-      parts.forEach((part, idx) => {
-        acc = acc ? `${acc}/${part}` : part;
-        if (!projectMap.has(acc)) {
-          projectMap.set(acc, {
-            fullPath: acc,
-            name: part,
-            level: idx,
-            tasks: []
-          });
-        }
-      });
-    });
-
-    // 2. Include all folders and distribute tasks
-    activeTasks.forEach(task => {
-      const proj = task.project?.trim() || 'General';
-      const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
-      
-      let acc = '';
-      parts.forEach((part, idx) => {
-        acc = acc ? `${acc}/${part}` : part;
-        if (!projectMap.has(acc)) {
-          projectMap.set(acc, {
-            fullPath: acc,
-            name: part,
-            level: idx,
-            tasks: []
-          });
-        }
-      });
-
-      const entry = projectMap.get(proj);
-      if (entry) {
-        entry.tasks.push(task);
+      if (parts.length > 0) {
+        getOrCreateFolder(parts);
       }
     });
 
-    // Ensure 'General' always exists if empty
-    if (projectMap.size === 0) {
-      projectMap.set('General', {
+    // 2. Include all active tasks (Urgent or Focus, matching Explorer)
+    activeTasks.forEach(task => {
+      const proj = task.project?.trim() || 'General';
+      const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+      const folder = getOrCreateFolder(parts.length > 0 ? parts : ['General']);
+      folder.tasks.push(task);
+    });
+
+    // Traverse recursively matching Explorer display order (depth-first, sorted alphabetically)
+    const result: { fullPath: string; name: string; level: number; tasks: Task[] }[] = [];
+
+    const traverse = (node: Node) => {
+      const sortedSubs = Array.from(node.subfolders.values()).sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
+
+      sortedSubs.forEach(sub => {
+        result.push({
+          fullPath: sub.fullPath,
+          name: sub.name,
+          level: sub.level,
+          tasks: sub.tasks
+        });
+        traverse(sub);
+      });
+    };
+
+    traverse(root);
+
+    // If completely empty, ensure General exists
+    if (result.length === 0) {
+      result.push({
         fullPath: 'General',
         name: 'General',
         level: 0,
@@ -489,7 +518,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       });
     }
 
-    return Array.from(projectMap.values()).sort((a, b) => a.fullPath.localeCompare(b.fullPath, undefined, { numeric: true, sensitivity: 'base' }));
+    return result;
   }, [activeTasks, customFolders]);
 
   const toggleProjectCollapse = (path: string) => {
@@ -725,45 +754,80 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
     const currentItem = visibleTimelineItems[currentIndex];
 
-    // RIGHT ARROW: Horizontal progression through items (Files <-> Folders <-> Cross-projects)
+    // ----------------------------------------------------
+    // RIGHT ARROW: Move rightward strictly within the same project row (no jumping to other rows)
+    // ----------------------------------------------------
     if (e.key === 'ArrowRight') {
       e.preventDefault();
-      if (currentItem.type === 'folder' && collapsedProjectPaths.has(currentItem.path)) {
-        // Expand collapsed folder
-        toggleProjectCollapse(currentItem.path);
+      if (currentItem.type === 'folder') {
+        if (collapsedProjectPaths.has(currentItem.path)) {
+          // If folder is collapsed, expand it
+          toggleProjectCollapse(currentItem.path);
+          return;
+        }
+        // If already expanded, move to the first task in this same row
+        const sameRowTasks = visibleTimelineItems.filter(
+          it => it.type === 'task' && it.projectIndex === currentItem.projectIndex
+        ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
+        if (sameRowTasks.length > 0) {
+          selectNavItem(sameRowTasks[0]);
+        }
       } else {
-        // Move to next sequential item in timeline (seamless cross-column and cross-project)
-        const nextIdx = (currentIndex + 1) % visibleTimelineItems.length;
-        selectNavItem(visibleTimelineItems[nextIdx]);
+        // If current item is a task, find next task to the right in the same row
+        const sameRowTasks = visibleTimelineItems.filter(
+          it => it.type === 'task' && it.projectIndex === currentItem.projectIndex
+        ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
+        const idxInRow = sameRowTasks.findIndex(it => it.taskId === currentItem.taskId);
+        if (idxInRow !== -1 && idxInRow < sameRowTasks.length - 1) {
+          selectNavItem(sameRowTasks[idxInRow + 1]);
+        }
+        // Do not jump to other project rows if at the rightmost item
       }
     } 
-    // LEFT ARROW: Horizontal progression backwards (Files <-> Folders <-> Cross-projects)
+    // ----------------------------------------------------
+    // LEFT ARROW: Move leftward strictly within the same project row
+    // ----------------------------------------------------
     else if (e.key === 'ArrowLeft') {
       e.preventDefault();
-      if (currentItem.type === 'folder' && !collapsedProjectPaths.has(currentItem.path)) {
-        // Collapse expanded folder
-        toggleProjectCollapse(currentItem.path);
-      } else {
-        // Move to previous sequential item in timeline
-        const prevIdx = (currentIndex - 1 + visibleTimelineItems.length) % visibleTimelineItems.length;
-        selectNavItem(visibleTimelineItems[prevIdx]);
+      if (currentItem.type === 'task') {
+        // Move to the task immediately to the left in the same row
+        const sameRowTasks = visibleTimelineItems.filter(
+          it => it.type === 'task' && it.projectIndex === currentItem.projectIndex
+        ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
+        const idxInRow = sameRowTasks.findIndex(it => it.taskId === currentItem.taskId);
+        if (idxInRow > 0) {
+          selectNavItem(sameRowTasks[idxInRow - 1]);
+        } else {
+          // If this is the leftmost task in the row, jump to its project folder
+          const curFolder = visibleTimelineItems.find(
+            it => it.type === 'folder' && it.projectIndex === currentItem.projectIndex
+          );
+          if (curFolder) {
+            selectNavItem(curFolder);
+          }
+        }
+      } else if (currentItem.type === 'folder') {
+        // If current item is folder and expanded, collapse it
+        if (!collapsedProjectPaths.has(currentItem.path)) {
+          toggleProjectCollapse(currentItem.path);
+        }
       }
     } 
-    // DOWN ARROW: Vertical progression across project lanes
+    // ----------------------------------------------------
+    // DOWN ARROW: Move downward strictly within the SAME column (no jumping across columns/folders)
+    // ----------------------------------------------------
     else if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (currentItem.type === 'folder') {
-        // Jump to next project folder header below
+        // Move to next project folder in folder column (col 0)
         const allFolders = visibleTimelineItems.filter(it => it.type === 'folder') as Array<Extract<TimelineNavItem, { type: 'folder' }>>;
         const fIdx = allFolders.findIndex(f => f.path === currentItem.path);
         if (fIdx !== -1 && fIdx < allFolders.length - 1) {
           selectNavItem(allFolders[fIdx + 1]);
-        } else if (allFolders.length > 0) {
-          selectNavItem(allFolders[0]); // Wrap to first folder
         }
       } else {
         // Current item is a task:
-        // 1. Check if there is another task in the same cell below
+        // 1. If multiple tasks exist in the exact same cell, move to the next task in this cell
         const sameCellTasks = visibleTimelineItems.filter(
           it => it.type === 'task' && it.projectIndex === currentItem.projectIndex && it.slotKey === currentItem.slotKey
         ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
@@ -772,56 +836,42 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         if (idxInCell !== -1 && idxInCell < sameCellTasks.length - 1) {
           selectNavItem(sameCellTasks[idxInCell + 1]);
         } else {
-          // Move down to the next project lane below
-          const nextRowTasks = visibleTimelineItems.filter(
-            it => it.type === 'task' && it.projectIndex === currentItem.projectIndex + 1
-          ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
+          // 2. Move down to the next row that has a task in the SAME column slot (slotKey)
+          // NEVER jump to a folder or across columns!
+          const maxProjectIndex = Math.max(...visibleTimelineItems.map(it => it.projectIndex));
+          let foundNextTask: Extract<TimelineNavItem, { type: 'task' }> | null = null;
 
-          if (nextRowTasks.length > 0) {
-            // Find task in matching column slot or closest column
-            const match = nextRowTasks.find(it => it.slotKey === currentItem.slotKey) ||
-              nextRowTasks.reduce((prev, curr) => 
-                Math.abs(curr.colIndex - currentItem.colIndex) < Math.abs(prev.colIndex - currentItem.colIndex) ? curr : prev
-              );
-            selectNavItem(match);
-          } else {
-            // If next lane has no tasks or is collapsed, find next folder
-            const nextFolder = visibleTimelineItems.find(
-              it => it.type === 'folder' && it.projectIndex === currentItem.projectIndex + 1
-            );
-            if (nextFolder) {
-              selectNavItem(nextFolder);
-            } else {
-              // Wrap to top project row
-              const firstRowTasks = visibleTimelineItems.filter(
-                it => it.type === 'task' && it.projectIndex === 0
-              ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
-              if (firstRowTasks.length > 0) {
-                const match = firstRowTasks.find(it => it.slotKey === currentItem.slotKey) || firstRowTasks[0];
-                selectNavItem(match);
-              } else {
-                selectNavItem(visibleTimelineItems[0]);
-              }
+          for (let pIdx = currentItem.projectIndex + 1; pIdx <= maxProjectIndex; pIdx++) {
+            const rowTasks = visibleTimelineItems.filter(
+              it => it.type === 'task' && it.projectIndex === pIdx && it.slotKey === currentItem.slotKey
+            ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
+            if (rowTasks.length > 0) {
+              foundNextTask = rowTasks[0];
+              break;
             }
+          }
+
+          if (foundNextTask) {
+            selectNavItem(foundNextTask);
           }
         }
       }
     } 
-    // UP ARROW: Vertical progression across project lanes
+    // ----------------------------------------------------
+    // UP ARROW: Move upward strictly within the SAME column
+    // ----------------------------------------------------
     else if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (currentItem.type === 'folder') {
-        // Jump to previous project folder header above
+        // Move to previous project folder in folder column (col 0)
         const allFolders = visibleTimelineItems.filter(it => it.type === 'folder') as Array<Extract<TimelineNavItem, { type: 'folder' }>>;
         const fIdx = allFolders.findIndex(f => f.path === currentItem.path);
         if (fIdx > 0) {
           selectNavItem(allFolders[fIdx - 1]);
-        } else if (allFolders.length > 0) {
-          selectNavItem(allFolders[allFolders.length - 1]); // Wrap to last folder
         }
       } else {
         // Current item is a task:
-        // 1. Check if there is another task in the same cell above
+        // 1. If multiple tasks exist in the exact same cell, move to the previous task in this cell
         const sameCellTasks = visibleTimelineItems.filter(
           it => it.type === 'task' && it.projectIndex === currentItem.projectIndex && it.slotKey === currentItem.slotKey
         ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
@@ -830,38 +880,22 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         if (idxInCell > 0) {
           selectNavItem(sameCellTasks[idxInCell - 1]);
         } else {
-          // Move up to the previous project lane above
-          if (currentItem.projectIndex > 0) {
-            const prevRowTasks = visibleTimelineItems.filter(
-              it => it.type === 'task' && it.projectIndex === currentItem.projectIndex - 1
-            ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
+          // 2. Move up to the previous row that has a task in the SAME column slot (slotKey)
+          // NEVER jump to a folder or across columns!
+          let foundPrevTask: Extract<TimelineNavItem, { type: 'task' }> | null = null;
 
-            if (prevRowTasks.length > 0) {
-              const match = prevRowTasks.find(it => it.slotKey === currentItem.slotKey) ||
-                prevRowTasks.reduce((prev, curr) => 
-                  Math.abs(curr.colIndex - currentItem.colIndex) < Math.abs(prev.colIndex - currentItem.colIndex) ? curr : prev
-                );
-              selectNavItem(match);
-            } else {
-              const prevFolder = visibleTimelineItems.find(
-                it => it.type === 'folder' && it.projectIndex === currentItem.projectIndex - 1
-              );
-              if (prevFolder) {
-                selectNavItem(prevFolder);
-              } else {
-                selectNavItem(visibleTimelineItems[0]);
-              }
+          for (let pIdx = currentItem.projectIndex - 1; pIdx >= 0; pIdx--) {
+            const rowTasks = visibleTimelineItems.filter(
+              it => it.type === 'task' && it.projectIndex === pIdx && it.slotKey === currentItem.slotKey
+            ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
+            if (rowTasks.length > 0) {
+              foundPrevTask = rowTasks[rowTasks.length - 1];
+              break;
             }
-          } else {
-            // At top-most project: move to this project's folder header
-            const curFolder = visibleTimelineItems.find(
-              it => it.type === 'folder' && it.projectIndex === currentItem.projectIndex
-            );
-            if (curFolder) {
-              selectNavItem(curFolder);
-            } else {
-              selectNavItem(visibleTimelineItems[visibleTimelineItems.length - 1]);
-            }
+          }
+
+          if (foundPrevTask) {
+            selectNavItem(foundPrevTask);
           }
         }
       }
@@ -891,8 +925,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         return;
       }
 
-      // Ignore if event target is inside Explorer aside
-      if (activeEl?.closest('aside') || (e.target as HTMLElement)?.closest('aside')) {
+      // Ignore if Explorer is active or target is inside Explorer
+      const isInsideExplorer =
+        Boolean(activeEl?.closest('#explorer-tree-root')) ||
+        Boolean((e.target as HTMLElement)?.closest('#explorer-tree-root')) ||
+        (window as any).__navforActivePane === 'explorer';
+
+      if (isInsideExplorer) {
         return;
       }
 
@@ -1284,7 +1323,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   return (
     <div className="flex-1 h-full min-h-0 flex flex-col bg-white border border-slate-200/90 rounded-xl overflow-hidden shadow-2xs">
       {/* Timeline Top Control Toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50/90 shrink-0 select-none flex-wrap gap-2">
+      <div className="relative z-40 flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50/90 shrink-0 select-none flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
             <CalendarDays size={16} className="text-indigo-600 shrink-0" />
@@ -1362,7 +1401,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 </button>
 
                 {isPresetOpen && (
-                  <div className="absolute left-0 mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-lg py-1 z-30 text-xs">
+                  <div className="absolute left-0 top-full mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-2xl py-1 z-50 text-xs">
                     {Object.entries(PRESETS).map(([key, preset]) => (
                       <button
                         key={key}
@@ -1489,6 +1528,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         ref={timelineGridRef}
         tabIndex={0}
         onKeyDown={handleNavKey}
+        onClick={() => {
+          (window as any).__navforActivePane = 'timeline';
+        }}
         className="flex-1 overflow-auto custom-scrollbar relative flex flex-col outline-none focus:ring-1 focus:ring-indigo-500/20"
       >
         {/* Table/Grid Header - Permanently sticky top & max-width bounds */}
@@ -1738,6 +1780,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 >
                   <div 
                     onClick={() => {
+                      (window as any).__navforActivePane = 'timeline';
                       toggleProjectCollapse(project.fullPath);
                       setSelectedKey(`folder:${project.fullPath}`);
                       setSelectedFolderPath(project.fullPath);
@@ -2147,6 +2190,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           handleTaskDropOnTask(e, task, pos);
         }}
         onClick={() => {
+          (window as any).__navforActivePane = 'timeline';
           setSelectedKey(`task:${task.id}`);
           setSelectedFolderPath(null);
           onSelectTask(task.id);

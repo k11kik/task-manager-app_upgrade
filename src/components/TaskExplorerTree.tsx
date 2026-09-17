@@ -230,6 +230,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     setCustomFolders(folders);
     try {
       localStorage.setItem(`navfor_folders_${activeSection}`, JSON.stringify(folders));
+      window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch (err) {
       console.error(err);
     }
@@ -487,7 +488,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   };
 
   // Keyboard navigation handler (ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Enter, F2)
-  const handleTreeKeyDown = (e: React.KeyboardEvent) => {
+  const handleTreeKeyDown = (e: React.KeyboardEvent | KeyboardEvent) => {
     if (renamingItem || creatingInFolder) return; // Let input handle keys
 
     if (e.key === 'ArrowDown') {
@@ -637,15 +638,37 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     }
   };
 
-  // Global window key listener for Ctrl+C / Ctrl+V when a task in tree or active task is focused
+  // Global window key listener for arrow navigation, Enter/F2, and Ctrl+C / Ctrl+V when Explorer is focused
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing in input / textarea
-      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
+      // Ignore if typing in input / textarea / contenteditable
+      const activeEl = document.activeElement as HTMLElement;
+      if (
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl?.tagName) ||
+        activeEl?.isContentEditable ||
+        renamingItem ||
+        creatingInFolder
+      ) {
+        return;
+      }
+
+      const isExplorerFocused = 
+        Boolean(activeEl?.closest('#explorer-tree-root')) ||
+        Boolean((e.target as HTMLElement)?.closest('#explorer-tree-root')) ||
+        (window as any).__navforActivePane === 'explorer';
+
+      // Arrow navigation & Enter/F2 for Explorer tree
+      if (isExplorerFocused) {
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'F2'].includes(e.key)) {
+          handleTreeKeyDown(e);
+          return;
+        }
+      }
 
       if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
         if (selectedKey?.startsWith('task:')) {
-          const taskId = selectedKey.replace('task:', '');
+          const parts = selectedKey.split(':');
+          const taskId = parts[parts.length - 1];
           copiedTaskIdRef.current = taskId;
         } else if (activeTaskId) {
           copiedTaskIdRef.current = activeTaskId;
@@ -667,16 +690,33 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [selectedKey, activeTaskId, tasks, onDuplicateTask]);
+  }, [selectedKey, activeTaskId, tasks, onDuplicateTask, renamingItem, creatingInFolder, visibleItems, lastSelectedKey, collapsedFolders]);
 
-  // Helper to determine where new item should be created from header button
+  // Helper to determine where new item should be created from header button (VS Code-style context aware)
   const getTargetFolderForNewItem = (): string => {
     if (selectedKey?.startsWith('folder:')) {
       return selectedKey.replace('folder:', '');
     }
     if (selectedKey?.startsWith('task:')) {
-      const taskId = selectedKey.replace('task:', '');
+      const parts = selectedKey.split(':');
+      const taskId = parts[parts.length - 1];
+      const parentPath = parts.length >= 3 ? parts[1] : undefined;
+      if (parentPath && parentPath !== '__focus__' && parentPath !== '__pinned__') {
+        return parentPath;
+      }
       const task = tasks.find(t => t.id === taskId);
+      if (task?.project) return task.project;
+    }
+    if (selectedFolderPaths.size === 1) {
+      return (Array.from(selectedFolderPaths)[0] as string) || '';
+    }
+    if (selectedTaskIds.size === 1) {
+      const taskId = (Array.from(selectedTaskIds)[0] as string) || '';
+      const task = tasks.find(t => t.id === taskId);
+      if (task?.project) return task.project;
+    }
+    if (activeTaskId) {
+      const task = tasks.find(t => t.id === activeTaskId);
       if (task?.project) return task.project;
     }
     return '';
@@ -743,15 +783,24 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     if (!renamingItem) return;
 
     const val = renameInputValue.trim();
-    if (val && val !== renamingItem.initialValue) {
-      if (renamingItem.type === 'task') {
+    const currentItem = renamingItem;
+    let targetKeyAfterRename = '';
+    let targetFolderAfterRename = '';
+    let targetTaskIdAfterRename = '';
+
+    if (val && val !== currentItem.initialValue) {
+      if (currentItem.type === 'task') {
         if (onRenameTask) {
-          onRenameTask(renamingItem.idOrPath, val);
+          onRenameTask(currentItem.idOrPath, val);
         }
+        targetTaskIdAfterRename = currentItem.idOrPath;
+        targetKeyAfterRename = currentItem.parentPath
+          ? `task:${currentItem.parentPath}:${currentItem.idOrPath}`
+          : `task:${currentItem.idOrPath}`;
       } else {
         // Folder rename
         if (onRenameFolder) {
-          const oldPath = renamingItem.idOrPath;
+          const oldPath = currentItem.idOrPath;
           const parts = oldPath.split('/');
           parts[parts.length - 1] = val;
           const newPath = parts.join('/');
@@ -763,12 +812,41 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             return f;
           });
           saveCustomFolders(updatedCustom);
+          targetFolderAfterRename = newPath;
+          targetKeyAfterRename = `folder:${newPath}`;
         }
+      }
+    } else {
+      // Unchanged value, preserve existing target key
+      if (currentItem.type === 'task') {
+        targetTaskIdAfterRename = currentItem.idOrPath;
+        targetKeyAfterRename = currentItem.parentPath
+          ? `task:${currentItem.parentPath}:${currentItem.idOrPath}`
+          : `task:${currentItem.idOrPath}`;
+      } else {
+        targetFolderAfterRename = currentItem.idOrPath;
+        targetKeyAfterRename = `folder:${currentItem.idOrPath}`;
       }
     }
 
     setRenamingItem(null);
     setRenameInputValue('');
+
+    // Restore selection to the renamed/unchanged item
+    if (targetKeyAfterRename) {
+      setSelectedKey(targetKeyAfterRename);
+      setLastSelectedKey(targetKeyAfterRename);
+      if (targetTaskIdAfterRename) {
+        setSelectedTaskIds(new Set([targetTaskIdAfterRename]));
+        setSelectedFolderPaths(new Set());
+        onSelectTask(targetTaskIdAfterRename);
+      } else if (targetFolderAfterRename) {
+        setSelectedFolderPaths(new Set([targetFolderAfterRename]));
+        setSelectedTaskIds(new Set());
+      }
+    }
+
+    (window as any).__navforActivePane = 'explorer';
     setTimeout(() => treeRef.current?.focus(), 50);
   };
 
@@ -964,6 +1042,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           }}
           onClick={(e) => {
             e.stopPropagation();
+            (window as any).__navforActivePane = 'explorer';
             treeRef.current?.focus();
             if (e.ctrlKey || e.metaKey) {
               setSelectedFolderPaths(prev => {
@@ -1160,6 +1239,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         }}
         onClick={(e) => {
           e.stopPropagation();
+          (window as any).__navforActivePane = 'explorer';
           treeRef.current?.focus();
           if (e.ctrlKey || e.metaKey) {
             setSelectedTaskIds(prev => {
@@ -1335,9 +1415,13 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
   return (
     <aside 
+      id="explorer-tree-root"
       ref={treeRef}
       style={{ width: `${width}px` }}
       onKeyDown={handleTreeKeyDown}
+      onClick={() => {
+        (window as any).__navforActivePane = 'explorer';
+      }}
       tabIndex={0}
       className="relative flex flex-col h-full w-full lg:w-auto max-lg:!w-full bg-slate-50/90 border-r border-slate-200/90 select-none shrink-0 overflow-hidden outline-none focus:ring-1 focus:ring-indigo-400/30"
     >
