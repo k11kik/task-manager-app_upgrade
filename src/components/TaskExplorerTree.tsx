@@ -652,6 +652,16 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         return;
       }
 
+      // Do NOT handle if user is inside Timeline or timeline is active pane
+      const isInsideTimeline =
+        Boolean(activeEl?.closest('#timeline-root')) ||
+        Boolean((e.target as HTMLElement)?.closest('#timeline-root')) ||
+        (window as any).__navforActivePane === 'timeline';
+
+      if (isInsideTimeline) {
+        return;
+      }
+
       const isExplorerFocused = 
         Boolean(activeEl?.closest('#explorer-tree-root')) ||
         Boolean((e.target as HTMLElement)?.closest('#explorer-tree-root')) ||

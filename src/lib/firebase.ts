@@ -6,7 +6,8 @@ import {
   signOut,
   signInAnonymously,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail
 } from 'firebase/auth';
 import { 
   initializeFirestore, 
@@ -68,13 +69,17 @@ export const signInGuest = async () => {
 };
 
 export const signInWithEmail = async (email: string, pass: string) => {
-  const result = await signInWithEmailAndPassword(auth, email, pass);
+  const result = await signInWithEmailAndPassword(auth, email.trim(), pass);
   return result.user;
 };
 
 export const signUpWithEmail = async (email: string, pass: string) => {
-  const result = await createUserWithEmailAndPassword(auth, email, pass);
+  const result = await createUserWithEmailAndPassword(auth, email.trim(), pass);
   return result.user;
+};
+
+export const resetPassword = async (email: string) => {
+  await sendPasswordResetEmail(auth, email.trim());
 };
 
 export const logOut = () => signOut(auth);
@@ -100,7 +105,7 @@ export interface AuthErrorInfo {
   title: string;
   message: string;
   suggestion: string;
-  actionType: 'authorized_domain' | 'provider_enable' | 'popup_block' | 'network' | 'general';
+  actionType: 'authorized_domain' | 'provider_enable' | 'popup_block' | 'network' | 'email_provider' | 'general';
 }
 
 export function parseAuthError(err: any): AuthErrorInfo {
@@ -119,12 +124,65 @@ export function parseAuthError(err: any): AuthErrorInfo {
   }
 
   if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
+    const isEmailError = rawMessage.toLowerCase().includes('password') || rawMessage.toLowerCase().includes('email');
     return {
       code,
-      title: 'Googleログインプロバイダが無効です (auth/operation-not-allowed)',
-      message: 'Firebaseプロジェクト側でGoogle認証プロバイダが有効化されていません。',
-      suggestion: 'Firebase Console > Authentication > Sign-in method で「Google」プロバイダを有効化（Enable）してください。',
+      title: isEmailError ? 'メール/パスワード認証が無効です' : '認証プロバイダが無効です',
+      message: isEmailError
+        ? 'Firebaseプロジェクトで「メール/パスワード」認証プロバイダが有効化されていません。'
+        : 'Firebaseプロジェクト側で該当の認証プロバイダ（Googleなど）が有効化されていません。',
+      suggestion: 'Firebase Console > Authentication > Sign-in method で該当プロバイダを有効化（Enable）してください。',
       actionType: 'provider_enable'
+    };
+  }
+
+  if (code === 'auth/user-not-found') {
+    return {
+      code,
+      title: 'アカウントが見つかりません',
+      message: '入力されたメールアドレスのアカウントは登録されていません。',
+      suggestion: 'メールアドレスをご確認いただくか、「新規登録」タブからアカウントを作成してください。',
+      actionType: 'general'
+    };
+  }
+
+  if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+    return {
+      code,
+      title: '認証に失敗しました',
+      message: 'メールアドレスまたはパスワードが正しくありません。',
+      suggestion: 'パスワードをご確認ください。お忘れの場合は「パスワード再設定」をお試しください。',
+      actionType: 'general'
+    };
+  }
+
+  if (code === 'auth/email-already-in-use') {
+    return {
+      code,
+      title: 'メールアドレスが既に使用されています',
+      message: 'このメールアドレスは既に登録されています。',
+      suggestion: '「ログイン」タブに切り替えてパスワードを入力してログインしてください。',
+      actionType: 'general'
+    };
+  }
+
+  if (code === 'auth/weak-password') {
+    return {
+      code,
+      title: 'パスワードの強度が不足しています',
+      message: 'パスワードが短すぎるか推測されやすい文字列です。',
+      suggestion: '6文字以上の安全なパスワードを設定してください。',
+      actionType: 'general'
+    };
+  }
+
+  if (code === 'auth/invalid-email') {
+    return {
+      code,
+      title: 'メールアドレスの形式が正しくありません',
+      message: '有効なメールアドレス（例: user@example.com）を入力してください。',
+      suggestion: '入力内容をご確認ください。',
+      actionType: 'general'
     };
   }
 
@@ -132,8 +190,8 @@ export function parseAuthError(err: any): AuthErrorInfo {
     return {
       code,
       title: 'ポップアップがブロックされました (auth/popup-blocked)',
-      message: 'ブラウザのポップアップブロックまたはiframeのセキュリティ制限により、ログイン画面を開けませんでした。',
-      suggestion: 'ブラウザのアドレスバーでポップアップを許可するか、画面右上の「新しいタブで開く」からアプリを別タブで開いて再度お試しください。',
+      message: 'ブラウザのポップアップブロックやネットワーク制限により、Googleログイン画面を開けませんでした。',
+      suggestion: '「メール認証」でログインするか、別タブでアプリを開いてお試しください。',
       actionType: 'popup_block'
     };
   }
@@ -141,9 +199,9 @@ export function parseAuthError(err: any): AuthErrorInfo {
   if (code === 'auth/popup-closed-by-user') {
     return {
       code,
-      title: 'ログインがキャンセルされました (auth/popup-closed-by-user)',
+      title: 'ログインがキャンセルされました',
       message: '認証完了前にログイン用ポップアップウィンドウが閉じられました。',
-      suggestion: '再度「Googleでログイン」ボタンをクリックしてログインを完了してください。',
+      suggestion: '再度ボタンをクリックするか、メール認証をご利用ください。',
       actionType: 'general'
     };
   }
@@ -151,9 +209,9 @@ export function parseAuthError(err: any): AuthErrorInfo {
   if (code === 'auth/cancelled-popup-request') {
     return {
       code,
-      title: 'ログインリクエストが重複しました',
+      title: 'リクエストが重複しました',
       message: '複数のログインポップアップが同時にリクエストされました。',
-      suggestion: '少し待ってから再度1回クリックしてください。',
+      suggestion: '少し待ってから再度お試しください。',
       actionType: 'general'
     };
   }
@@ -162,8 +220,8 @@ export function parseAuthError(err: any): AuthErrorInfo {
     return {
       code,
       title: 'ネットワーク通信エラー (auth/network-request-failed)',
-      message: 'Firebaseサーバーへの認証リクエストがタイムアウトまたは遮断されました。',
-      suggestion: 'インターネット接続やセキュリティソフト、ブラウザの広告ブロック拡張機能の設定をご確認ください。',
+      message: 'Firebaseサーバーへの接続に失敗しました。WiFiのセキュリティやプロキシにより接続が遮断されている可能性があります。',
+      suggestion: 'Googleログインのポップアップが遮断されるWiFi環境では、「メール認証」でのログインをお試しください。',
       actionType: 'network'
     };
   }
@@ -172,7 +230,7 @@ export function parseAuthError(err: any): AuthErrorInfo {
     code,
     title: `認証エラー (${code})`,
     message: rawMessage,
-    suggestion: 'Firebase ConsoleのAuthentication設定、またはブラウザのコンソールログをご確認ください。',
+    suggestion: 'Firebase ConsoleのAuthentication設定、またはネットワーク環境をご確認ください。',
     actionType: 'general'
   };
 }

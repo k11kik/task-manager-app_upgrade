@@ -50,7 +50,9 @@ import {
   PinOff,
   GripVertical,
   Layers,
-  CalendarDays
+  CalendarDays,
+  Lock,
+  ShieldAlert
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DragDropContext, Droppable, Draggable as DraggableDnd } from '@hello-pangea/dnd';
@@ -83,6 +85,7 @@ import { cn, formatDate } from './lib/utils';
 import { auth, db, signIn, logOut } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { AuthModal } from './components/AuthModal';
+import { SignInView } from './components/SignInView';
 import { TaskExplorerTree } from './components/TaskExplorerTree';
 import { ProjectTimelineView } from './components/ProjectTimelineView';
 import { TaskDetailPane } from './components/TaskDetailPane';
@@ -128,19 +131,23 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "3.1.3";
+  const APP_VERSION = "3.1.4";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalError, setAuthModalError] = useState<any>(null);
-  const [isLocalMode, setIsLocalMode] = useState<boolean>(() => {
+
+  // Ensure legacy local mock/storage keys are completely purged
+  useEffect(() => {
     try {
-      const mode = localStorage.getItem('navfor_mode');
-      return mode === 'local' || (!auth.currentUser && localStorage.getItem('navfor_local_tasks') !== null);
-    } catch {
-      return false;
-    }
-  });
+      localStorage.removeItem('navfor_mode');
+      localStorage.removeItem('navfor_local_tasks');
+      localStorage.removeItem('navfor_local_settings');
+      localStorage.removeItem('focusflow_tasks');
+      localStorage.removeItem('focusflow_settings');
+    } catch {}
+  }, []);
+
   const [tasks, setTasks] = useState<Task[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProject, setSelectedProject] = useState<string>('All');
@@ -283,12 +290,12 @@ export default function App() {
     timelinePresetColumns?: Record<string, string>;
     order?: number;
   }) => {
-    if (!user && !isLocalMode) {
+    if (!user) {
       setIsAuthModalOpen(true);
       return;
     }
     const newTask: any = {
-      userId: user ? user.uid : 'local-user',
+      userId: user.uid,
       title: taskData.title.trim(),
       project: taskData.project.trim() || 'General',
       notes: taskData.notes || '',
@@ -1103,29 +1110,13 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthLoading(false);
-      if (u) {
-        setIsLocalMode(false);
-      }
     });
     return () => unsubscribe();
   }, []);
 
   // Settings Sync
   useEffect(() => {
-    if (!user) {
-      if (isLocalMode) {
-        try {
-          const raw = localStorage.getItem('navfor_local_settings');
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            setSettings(prev => ({ ...prev, ...parsed }));
-          }
-        } catch (e) {
-          console.error("Local settings load error:", e);
-        }
-      }
-      return;
-    }
+    if (!user) return;
 
     const settingsRef = doc(db, 'settings', user.uid);
     const unsubscribe = onSnapshot(settingsRef, (docSnap) => {
@@ -1181,68 +1172,13 @@ export default function App() {
     }, (err) => handleFirestoreError(err, OperationType.GET, `settings/${user.uid}`));
 
     return () => unsubscribe();
-  }, [user, isLocalMode]);
+  }, [user]);
 
   // Tasks Sync
   useEffect(() => {
     if (!user) {
-      if (isLocalMode) {
-        try {
-          const raw = localStorage.getItem('navfor_local_tasks') || localStorage.getItem('focusflow_tasks');
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) {
-              setTasks(parsed);
-              return;
-            }
-          }
-          // Sample tasks for immediate local use
-          const sampleTasks: Task[] = [
-            {
-              id: 'local_sample_1',
-              userId: 'local-user',
-              title: 'ERG: 推進器パラメータ解析の完了',
-              project: 'ERG/Propulsion',
-              category: 'Urgent',
-              createdAt: Date.now() - 3600000,
-              updatedAt: Date.now(),
-              isDone: false,
-              isStarred: true,
-              section: 'General'
-            },
-            {
-              id: 'local_sample_2',
-              userId: 'local-user',
-              title: 'MESSENGER: 軌道補正データの確認',
-              project: 'MESSENGER/Trajectory',
-              category: 'Focus',
-              createdAt: Date.now() - 7200000,
-              updatedAt: Date.now(),
-              isDone: false,
-              isStarred: false,
-              section: 'General'
-            },
-            {
-              id: 'local_sample_3',
-              userId: 'local-user',
-              title: 'NavFOR: Firebase連携とドメイン認証設定',
-              project: 'NavFOR/Setup',
-              category: 'Focus',
-              createdAt: Date.now() - 1800000,
-              updatedAt: Date.now(),
-              isDone: false,
-              isStarred: true,
-              section: 'General'
-            }
-          ];
-          setTasks(sampleTasks);
-          localStorage.setItem('navfor_local_tasks', JSON.stringify(sampleTasks));
-        } catch (e) {
-          console.error("Local tasks load error:", e);
-        }
-      } else {
-        setTasks([]);
-      }
+      // When not signed in, ensure folders and tasks are completely empty
+      setTasks([]);
       return;
     }
 
@@ -1261,7 +1197,7 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [user, isLocalMode, settings.archiveThresholdDays]);
+  }, [user, settings.archiveThresholdDays]);
 
   // Migration Helper
   useEffect(() => {
@@ -1771,10 +1707,10 @@ export default function App() {
 
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTaskTitle.trim() || !newTaskProject.trim() || (!user && !isLocalMode)) return;
+    if (!newTaskTitle.trim() || !newTaskProject.trim() || !user) return;
     
     const newTask: any = {
-      userId: user ? user.uid : 'local-user',
+      userId: user.uid,
       title: newTaskTitle.trim(),
       project: newTaskProject.trim(),
       notes: newTaskNotes.trim(),
@@ -1826,7 +1762,7 @@ export default function App() {
   };
 
   const moveTask = async (id: string, newCategory: Category) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     if (newCategory === 'Urgent') {
       const isAlreadyUrgent = tasks.find(t => t.id === id)?.category === 'Urgent';
       if (!isAlreadyUrgent) {
@@ -1858,7 +1794,7 @@ export default function App() {
   };
 
   const updateTask = async (id: string, updates: Partial<Task>) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     pushToHistory();
     if (user) {
       try {
@@ -1891,7 +1827,7 @@ export default function App() {
   };
 
   const toggleDone = async (id: string) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
     pushToHistory();
@@ -1918,7 +1854,7 @@ export default function App() {
   };
 
   const deleteTask = async (id: string) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
 
@@ -1952,7 +1888,7 @@ export default function App() {
   };
 
   const toggleStar = async (id: string) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
     pushToHistory();
@@ -1971,7 +1907,7 @@ export default function App() {
   };
 
   const togglePin = async (id: string) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     const task = tasks.find(t => t.id === id);
     if (!task) return;
     pushToHistory();
@@ -2064,7 +2000,7 @@ export default function App() {
   };
 
   const permanentlyDeleteTask = async (id: string) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     if (user) {
       try {
         await deleteDoc(doc(db, 'tasks', id));
@@ -2077,7 +2013,7 @@ export default function App() {
   };
 
   const emptyTrash = async () => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     
     // Respect active filters (Project, Section, and Time Filter)
     const now = Date.now();
@@ -2186,7 +2122,7 @@ export default function App() {
   };
 
   const handleDeleteFolder = async (folderPath: string) => {
-    if (!folderPath) return;
+    if (!folderPath || !user) return;
     pushToHistory();
     const affectedTasks = tasks.filter(t => 
       t.project === folderPath || t.project.startsWith(folderPath + '/')
@@ -2202,18 +2138,23 @@ export default function App() {
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
       }
-    } else {
-      syncLocalTasks(tasks.map(t => {
-        if (t.project === folderPath || t.project.startsWith(folderPath + '/')) {
-          return { ...t, category: 'Trash', updatedAt: Date.now() };
-        }
-        return t;
-      }));
     }
+
+    // Also clean up any custom empty folders in localStorage
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const folders: string[] = JSON.parse(saved);
+        const updated = folders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+        window.dispatchEvent(new Event('navfor_folders_updated'));
+      }
+    } catch {}
   };
 
   const pickDailyTasks = async (selectedIds: string[]) => {
-    if (!user && !isLocalMode) return;
+    if (!user) return;
     const currentUrgentCount = tasks.filter(t => t.category === 'Urgent').length;
     if (currentUrgentCount + selectedIds.length > settings.urgentLimit) {
       setMessage({ 
@@ -2884,6 +2825,15 @@ export default function App() {
     });
   };
 
+  if (authLoading) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] text-slate-800 flex flex-col items-center justify-center font-sans">
+        <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4" />
+        <p className="text-xs font-bold uppercase tracking-widest text-slate-500">NavFOR 認証状態を確認中...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen w-full bg-[#f8fafc] text-slate-800 flex flex-col font-sans overflow-hidden">
       {/* Toast Messages */}
@@ -2927,23 +2877,39 @@ export default function App() {
         {/* Left Side: Logo & Workspace Menu */}
         <div className="flex items-center gap-4 md:gap-8">
           <div className="relative">
-            <button 
-              onClick={() => setShowSectionMenu(!showSectionMenu)}
-              className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer group"
-            >
-              <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center transition-transform shadow-lg shadow-indigo-100 group-active:scale-95 overflow-hidden border border-slate-100">
-                <img src={`${(import.meta as any).env?.BASE_URL || '/'}icon-192.png`} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+            {user ? (
+              <button 
+                onClick={() => setShowSectionMenu(!showSectionMenu)}
+                className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer group"
+              >
+                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center transition-transform shadow-lg shadow-indigo-100 group-active:scale-95 overflow-hidden border border-slate-100">
+                  <img src={`${(import.meta as any).env?.BASE_URL || '/'}icon-192.png`} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                </div>
+                <div className="flex flex-col items-start leading-none">
+                  <h1 className="text-sm font-black tracking-tighter text-slate-800 uppercase">
+                    NavFOR <span className="text-indigo-600">v{APP_VERSION}</span>
+                  </h1>
+                  <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-0.5">
+                    <span className="truncate max-w-[80px]">{activeSection}</span> <ChevronDown size={10} className={cn("transition-transform", showSectionMenu && "rotate-180")} />
+                  </p>
+                </div>
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center shadow-lg shadow-indigo-100 overflow-hidden border border-slate-100">
+                  <img src={`${(import.meta as any).env?.BASE_URL || '/'}icon-192.png`} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                </div>
+                <div className="flex flex-col items-start leading-none">
+                  <h1 className="text-sm font-black tracking-tighter text-slate-800 uppercase">
+                    NavFOR <span className="text-indigo-600">v{APP_VERSION}</span>
+                  </h1>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                    Cloud Workspace
+                  </p>
+                </div>
               </div>
-              <div className="flex flex-col items-start leading-none">
-                <h1 className="text-sm font-black tracking-tighter text-slate-800 uppercase">
-                  NavFOR <span className="text-indigo-600">v{APP_VERSION}</span>
-                </h1>
-                <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-0.5">
-                  <span className="truncate max-w-[80px]">{activeSection}</span> <ChevronDown size={10} className={cn("transition-transform", showSectionMenu && "rotate-180")} />
-                </p>
-              </div>
-            </button>
-            {showSectionMenu && (
+            )}
+            {user && showSectionMenu && (
               <>
                 <div className="fixed inset-0 z-[55]" onClick={() => setShowSectionMenu(false)} />
                 <div className="absolute top-full left-0 mt-2 w-64 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] py-2 overflow-hidden">
@@ -3338,39 +3304,38 @@ export default function App() {
                   <LogOut size={16} />
                 </button>
               </>
-            ) : isLocalMode ? (
+            ) : (
               <div className="flex items-center gap-2">
-                <div className="text-right flex flex-col items-end leading-none hidden sm:flex">
-                  <span className="text-[9px] font-black uppercase tracking-[0.2em] text-amber-500 mb-0.5">ローカル保存</span>
-                  <span className="text-xs font-bold text-slate-600">オフライン</span>
-                </div>
                 <button 
                   onClick={() => setIsAuthModalOpen(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-bold hover:bg-amber-100 transition-all shadow-sm"
-                  title="Firebase認証 / クラウド同期を開く"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                  title="設定診断 & トラブルシューティング / Diagnostics"
                 >
-                  <LogIn size={14} />
-                  <span>クラウド同期</span>
+                  <ShieldAlert size={14} className="text-indigo-600" />
+                  <span className="hidden sm:inline">設定診断</span>
                 </button>
               </div>
-            ) : (
-              <button 
-                onClick={() => handleSignIn()}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
-              >
-                <LogIn size={16} />
-                <span className="hidden sm:inline">{t('SignIn')}</span>
-              </button>
             )}
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className={cn(
-        "flex-1 min-h-0 overflow-hidden relative",
-        viewMode === 'dashboard' ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3" : "p-4 md:p-6 grid grid-cols-12 gap-6"
-      )}>
+      {!user ? (
+        <main className="flex-1 min-h-0 overflow-y-auto relative bg-[#f8fafc]">
+          <SignInView
+            onSuccess={() => {
+              setMessage({ text: "サインインしました。アカウントデータを読み込んでいます...", type: 'info' });
+            }}
+            onOpenDiagnostics={() => setIsAuthModalOpen(true)}
+            version={APP_VERSION}
+          />
+        </main>
+      ) : (
+        <main className={cn(
+          "flex-1 min-h-0 overflow-hidden relative",
+          viewMode === 'dashboard' ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3" : "p-4 md:p-6 grid grid-cols-12 gap-6"
+        )}>
         {/* Mobile Navigation (Bottom) */}
         <div className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-slate-200 z-[70] flex items-center justify-around px-2 shadow-[0_-4px_20px_rgba(0,0,0,0.1)]">
           <button 
@@ -4103,6 +4068,7 @@ export default function App() {
         </AnimatePresence>
       </div>
     </main>
+  )}
 
       {/* Footer Info Bar */}
       <footer className="bg-white border-t border-slate-200 px-6 py-2 flex items-center justify-between shrink-0">
@@ -4155,14 +4121,7 @@ export default function App() {
             onSuccess={() => {
               setIsAuthModalOpen(false);
               setAuthModalError(null);
-              setIsLocalMode(false);
-              setMessage({ text: "Google認証に成功しました。クラウド同期が有効です。", type: 'info' });
-            }}
-            onSwitchToLocalMode={() => {
-              setIsLocalMode(true);
-              localStorage.setItem('navfor_mode', 'local');
-              setIsAuthModalOpen(false);
-              setMessage({ text: "ローカルモード（オフライン保存）に切り替えました。", type: 'info' });
+              setMessage({ text: "サインインに成功しました。クラウド同期が有効です。", type: 'info' });
             }}
           />
         )}
