@@ -29,7 +29,8 @@ import {
   RefreshCw,
   Sparkles,
   ListTodo,
-  RotateCcw
+  RotateCcw,
+  LayoutGrid
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
@@ -45,16 +46,46 @@ export type TimelineNavItem =
   | { type: 'task'; taskId: string; task: Task; projectPath: string; projectIndex: number; colIndex: number; slotKey: string; cellIndex: number };
 
 const DEFAULT_CUSTOM_COLUMNS: CustomTimelineColumn[] = [
-  { id: 'day-1', label: 'Day 1' },
-  { id: 'day-2', label: 'Day 2' },
-  { id: 'day-3', label: 'Day 3' },
-  { id: 'day-4', label: 'Day 4' },
-  { id: 'day-5', label: 'Day 5' },
-  { id: 'day-6', label: 'Day 6' },
-  { id: 'day-7', label: 'Day 7' }
+  { id: 'phase-1', label: 'Phase 1' },
+  { id: 'phase-2', label: 'Phase 2' },
+  { id: 'phase-3', label: 'Phase 3' },
+  { id: 'phase-4', label: 'Phase 4' },
+  { id: 'phase-5', label: 'Phase 5' }
 ];
 
 const PRESETS: Record<string, { labelJa: string; labelEn: string; cols: CustomTimelineColumn[] }> = {
+  phases5: {
+    labelJa: 'フェーズ (Phase 1 - 5) [初期値]',
+    labelEn: 'Phases (Phase 1 - 5) [Default]',
+    cols: [
+      { id: 'phase-1', label: 'Phase 1' },
+      { id: 'phase-2', label: 'Phase 2' },
+      { id: 'phase-3', label: 'Phase 3' },
+      { id: 'phase-4', label: 'Phase 4' },
+      { id: 'phase-5', label: 'Phase 5' }
+    ]
+  },
+  phases3: {
+    labelJa: 'フェーズ (Phase 1 - 3)',
+    labelEn: 'Phases (Phase 1 - 3)',
+    cols: [
+      { id: 'phase-1', label: 'Phase 1' },
+      { id: 'phase-2', label: 'Phase 2' },
+      { id: 'phase-3', label: 'Phase 3' }
+    ]
+  },
+  devPhases: {
+    labelJa: '開発工程 (企画, 要件, 設計, 実装, 検証, 公開)',
+    labelEn: 'Dev Phases (Planning, Specs, Design, Implementation, QA, Release)',
+    cols: [
+      { id: 'phase-plan', label: '企画 (Planning)' },
+      { id: 'phase-spec', label: '要件 (Specs)' },
+      { id: 'phase-design', label: '設計 (Design)' },
+      { id: 'phase-dev', label: '実装 (Implementation)' },
+      { id: 'phase-qa', label: '検証 (QA/Test)' },
+      { id: 'phase-release', label: '公開 (Release)' }
+    ]
+  },
   stages3: {
     labelJa: '作業順 (Initial, Mid, Final)',
     labelEn: 'Order (Initial, Mid, Final)',
@@ -77,11 +108,6 @@ const PRESETS: Record<string, { labelJa: string; labelEn: string; cols: CustomTi
       { id: 'day-7', label: 'Day 7' }
     ]
   },
-  days14: {
-    labelJa: '1日単位 (Day 1 - 14)',
-    labelEn: '1 Day (Day 1 - 14)',
-    cols: Array.from({ length: 14 }, (_, i) => ({ id: `day-${i + 1}`, label: `Day ${i + 1}` }))
-  },
   weeks4: {
     labelJa: '1週単位 (Week 1 - 4)',
     labelEn: '1 Week (Week 1 - 4)',
@@ -90,18 +116,6 @@ const PRESETS: Record<string, { labelJa: string; labelEn: string; cols: CustomTi
       { id: 'week-2', label: 'Week 2' },
       { id: 'week-3', label: 'Week 3' },
       { id: 'week-4', label: 'Week 4' }
-    ]
-  },
-  phases: {
-    labelJa: 'フェーズ (Planning, Ready, In Progress, Waiting, Review, Ongoing)',
-    labelEn: 'Phases (Planning, Ready, In Progress, Waiting, Review, Ongoing)',
-    cols: [
-      { id: 'phase-plan', label: 'Planning' },
-      { id: 'phase-ready', label: 'Ready' },
-      { id: 'phase-dev', label: 'In Progress' },
-      { id: 'phase-waiting', label: 'Waiting' },
-      { id: 'phase-review', label: 'Review' },
-      { id: 'phase-ongoing', label: 'Ongoing' }
     ]
   }
 };
@@ -235,11 +249,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  // Custom Columns State
+  // Custom Columns State (Phases)
   const [customColumns, setCustomColumns] = useState<CustomTimelineColumn[]>(() => {
     try {
       const saved = localStorage.getItem(`navfor_custom_timeline_cols_${activeSection}`);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // If previous default was Day 1-7, migrate to new default Phase 1-5
+          const isOldDayDefault = parsed.length === 7 && parsed[0]?.id === 'day-1' && parsed[6]?.id === 'day-7';
+          if (!isOldDayDefault) {
+            return parsed;
+          }
+        }
+      }
     } catch (e) {
       console.error(e);
     }
@@ -253,6 +276,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     } catch (e) {
       console.error(e);
     }
+  };
+
+  // Reset custom columns/phases to default Phase 1 - 5
+  const handleResetCustomColumns = () => {
+    saveCustomColumns(DEFAULT_CUSTOM_COLUMNS);
   };
 
   // Column renaming state
@@ -284,6 +312,66 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [daysCount, setDaysCount] = useState<number>(14); // 7, 14, 21, 30
   const [showUnscheduledColumn, setShowUnscheduledColumn] = useState(true);
   const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(new Set());
+
+  // Fine Grid Step in hours (1h, 2h, 4h, 6h, 12h, 24h)
+  const [gridStepHours, setGridStepHours] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_grid_step');
+      return saved ? Number(saved) : 4;
+    } catch {
+      return 4;
+    }
+  });
+
+  const handleSetGridStepHours = (hours: number) => {
+    setGridStepHours(hours);
+    try {
+      localStorage.setItem('navfor_timeline_grid_step', String(hours));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Grid ON / OFF toggle (works for both Dates and Custom/Stages modes)
+  const [isGridEnabled, setIsGridEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_grid_enabled');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const handleToggleGrid = (enabled: boolean) => {
+    setIsGridEnabled(enabled);
+    try {
+      localStorage.setItem('navfor_timeline_grid_enabled', String(enabled));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Stage grid subdivisions for Custom/Stages mode (e.g. 2, 3, 4, 5)
+  const [stageSubdivisions, setStageSubdivisions] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_stage_subdivisions');
+      return saved ? Number(saved) : 3;
+    } catch {
+      return 3;
+    }
+  });
+
+  const handleSetStageSubdivisions = (subs: number) => {
+    setStageSubdivisions(subs);
+    try {
+      localStorage.setItem('navfor_timeline_stage_subdivisions', String(subs));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Drag over fine grid slot state
+  const [dragOverGridSlot, setDragOverGridSlot] = useState<{ project: string; slotIdx: number } | null>(null);
 
   // Per-workspace custom folders (including empty folders)
   const [customFolders, setCustomFolders] = useState<string[]>(() => {
@@ -424,6 +512,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     type: 'calendar' | 'custom' | 'backlog';
     dateMs?: number;
     columnId?: string;
+    stepIdx?: number;
+    slotIdx?: number;
   } | null>(null);
   const [quickAddTitle, setQuickAddTitle] = useState('');
 
@@ -435,6 +525,88 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
     return dates;
   }, [windowStartDate, daysCount]);
+
+  // Fine grid calculations for Calendar Mode
+  const effectiveGridStep = isGridEnabled ? gridStepHours : 24;
+  const slotDurationMs = useMemo(() => effectiveGridStep * 3600 * 1000, [effectiveGridStep]);
+  const slotsPerDay = useMemo(() => Math.max(1, Math.round(24 / effectiveGridStep)), [effectiveGridStep]);
+  const totalSlots = useMemo(() => daysCount * slotsPerDay, [daysCount, slotsPerDay]);
+  const timelineStartMs = useMemo(() => startOfDay(windowStartDate).getTime(), [windowStartDate]);
+
+  const slotWidth = useMemo(() => {
+    if (!isGridEnabled) return 130;
+    if (gridStepHours <= 1) return 30;
+    if (gridStepHours <= 2) return 38;
+    if (gridStepHours <= 4) return 46;
+    if (gridStepHours <= 6) return 60;
+    if (gridStepHours <= 12) return 84;
+    return 130;
+  }, [isGridEnabled, gridStepHours]);
+
+  const totalGridWidth = useMemo(() => totalSlots * slotWidth, [totalSlots, slotWidth]);
+
+  // Grid calculations for Custom/Stages Mode (Dates pattern without dates)
+  const customSubSlotWidth = useMemo(() => {
+    if (!isGridEnabled) return 180;
+    if (stageSubdivisions <= 2) return 100;
+    if (stageSubdivisions <= 3) return 80;
+    if (stageSubdivisions <= 4) return 68;
+    return 60;
+  }, [isGridEnabled, stageSubdivisions]);
+
+  const customColWidth = useMemo(() => {
+    const effectiveSubs = isGridEnabled ? stageSubdivisions : 1;
+    return Math.max(150, effectiveSubs * customSubSlotWidth);
+  }, [isGridEnabled, stageSubdivisions, customSubSlotWidth]);
+
+  const totalCustomGridWidth = useMemo(() => {
+    return customColumns.length * customColWidth;
+  }, [customColumns.length, customColWidth]);
+
+  interface GridSlotInfo {
+    index: number;
+    startMs: number;
+    endMs: number;
+    date: Date;
+    hour: number;
+    isDayStart: boolean;
+    isToday: boolean;
+    dayIndex: number;
+  }
+
+  const gridSlots = useMemo<GridSlotInfo[]>(() => {
+    const slots: GridSlotInfo[] = [];
+    const today = startOfDay(new Date());
+    for (let d = 0; d < daysCount; d++) {
+      const dayDate = addDays(windowStartDate, d);
+      const isDayToday = isSameDay(dayDate, today);
+      for (let s = 0; s < slotsPerDay; s++) {
+        const startMs = dayDate.getTime() + s * slotDurationMs;
+        const endMs = startMs + slotDurationMs;
+        const hour = s * gridStepHours;
+        slots.push({
+          index: d * slotsPerDay + s,
+          startMs,
+          endMs,
+          date: dayDate,
+          hour,
+          isDayStart: s === 0,
+          isToday: isDayToday,
+          dayIndex: d
+        });
+      }
+    }
+    return slots;
+  }, [windowStartDate, daysCount, slotsPerDay, slotDurationMs, gridStepHours]);
+
+  // Current time line offset in px
+  const nowOffsetPx = useMemo(() => {
+    const nowMs = Date.now();
+    const diffMs = nowMs - timelineStartMs;
+    const totalMs = totalSlots * slotDurationMs;
+    if (diffMs < 0 || diffMs > totalMs) return -1;
+    return (diffMs / slotDurationMs) * slotWidth;
+  }, [timelineStartMs, totalSlots, slotDurationMs, slotWidth]);
 
   // Active tasks for this section (Urgent + Focus)
   const activeTasks = useMemo(() => {
@@ -624,123 +796,308 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     return map;
   }, [projectTree, timelineMode, customColumns]);
 
-  // Flat list of visible navigable items (folders and tasks) in visual display order
-  const visibleTimelineItems = useMemo<TimelineNavItem[]>(() => {
-    const items: TimelineNavItem[] = [];
-    const seenTaskIds = new Set<string>();
+  interface PlacedTask {
+    task: Task;
+    startPx: number;
+    widthPx: number;
+    endPx: number;
+    rowIdx: number;
+    topPx: number;
+  }
 
-    visibleProjectTree.forEach((project, projectIndex) => {
-      // 1. Folder item
-      items.push({
-        type: 'folder',
-        path: project.fullPath,
-        name: project.name,
-        level: project.level,
-        projectIndex,
-        colIndex: 0,
-        slotKey: '__folder__'
-      });
+  // Calculate layout of tasks for a project lane on the fine grid
+  const getPlacedTasksForProject = (projectTasks: Task[]) => {
+    const scheduled = projectTasks.filter(t => typeof t.deadline === 'number');
 
-      // 2. If project is not collapsed, add its visible tasks in visual left-to-right order
-      if (!collapsedProjectPaths.has(project.fullPath)) {
-        const projectTasks = project.tasks;
-        const baseCol = showUnscheduledColumn ? 2 : 1;
-
-        // Unscheduled / ToDo List tasks
-        if (showUnscheduledColumn) {
-          const unscheduled = projectTasks.filter(t => {
-            if (timelineMode === 'calendar') return !t.deadline;
-            return !getTaskCurrentColumnId(t, customColumns);
-          }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
-
-          unscheduled.forEach((t, cellIndex) => {
-            if (!seenTaskIds.has(t.id)) {
-              seenTaskIds.add(t.id);
-              items.push({
-                type: 'task',
-                taskId: t.id,
-                task: t,
-                projectPath: project.fullPath,
-                projectIndex,
-                colIndex: 1,
-                slotKey: '__backlog__',
-                cellIndex
-              });
-            }
-          });
-        }
-
-        // Timeline columns tasks
-        if (timelineMode === 'calendar') {
-          timelineDates.forEach((date, dIdx) => {
-            const dateTasks = projectTasks.filter(t => {
-              if (!t.deadline) return false;
-              return isSameDay(new Date(t.deadline), date);
-            }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
-
-            dateTasks.forEach((t, cellIndex) => {
-              if (!seenTaskIds.has(t.id)) {
-                seenTaskIds.add(t.id);
-                items.push({
-                  type: 'task',
-                  taskId: t.id,
-                  task: t,
-                  projectPath: project.fullPath,
-                  projectIndex,
-                  colIndex: baseCol + dIdx,
-                  slotKey: format(date, 'yyyy-MM-dd'),
-                  cellIndex
-                });
-              }
-            });
-          });
-        } else {
-          customColumns.forEach((col, cIdx) => {
-            const colTasks = projectTasks.filter(t => {
-              return getTaskCurrentColumnId(t, customColumns) === col.id;
-            }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
-
-            colTasks.forEach((t, cellIndex) => {
-              if (!seenTaskIds.has(t.id)) {
-                seenTaskIds.add(t.id);
-                items.push({
-                  type: 'task',
-                  taskId: t.id,
-                  task: t,
-                  projectPath: project.fullPath,
-                  projectIndex,
-                  colIndex: baseCol + cIdx,
-                  slotKey: col.id,
-                  cellIndex
-                });
-              }
-            });
-          });
-        }
-      }
+    scheduled.sort((a, b) => {
+      const aTime = a.startDate || a.deadline!;
+      const bTime = b.startDate || b.deadline!;
+      return aTime - bTime || (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
     });
 
-    return items;
-  }, [visibleProjectTree, collapsedProjectPaths, showUnscheduledColumn, timelineMode, timelineDates, customColumns]);
+    const placed: PlacedTask[] = [];
+    const rowEndPx: number[] = [];
 
-  const selectNavItem = (item: TimelineNavItem) => {
-    (window as any).__navforActivePane = 'timeline';
-    if (item.type === 'task') {
-      setSelectedKey(`task:${item.taskId}`);
-      setSelectedFolderPath(null);
-      onSelectTask(item.taskId);
-      const el = document.getElementById(`timeline-task-${item.taskId}`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    scheduled.forEach(task => {
+      const startMs = task.startDate && task.startDate < task.deadline! 
+        ? task.startDate 
+        : task.deadline!;
+      const endMs = task.deadline!;
+
+      const startSlotIdx = (startMs - timelineStartMs) / slotDurationMs;
+      const endSlotIdx = (endMs - timelineStartMs) / slotDurationMs;
+
+      const startPx = Math.max(0, startSlotIdx * slotWidth);
+      let widthPx: number;
+      if (task.startDate && task.startDate < task.deadline!) {
+        const spanPx = (endSlotIdx - startSlotIdx) * slotWidth;
+        widthPx = Math.max(120, spanPx);
+      } else {
+        widthPx = Math.max(130, Math.min(260, slotWidth * 3 - 4));
+      }
+      const endPx = startPx + widthPx;
+
+      let rowIdx = 0;
+      while (rowIdx < rowEndPx.length && startPx < (rowEndPx[rowIdx] + 6)) {
+        rowIdx++;
+      }
+
+      rowEndPx[rowIdx] = endPx;
+      const topPx = 6 + rowIdx * 34;
+
+      placed.push({
+        task,
+        startPx,
+        widthPx,
+        endPx,
+        rowIdx,
+        topPx
+      });
+    });
+
+    const laneHeight = Math.max(54, (rowEndPx.length || 1) * 34 + 14);
+    return { placed, laneHeight };
+  };
+
+  const handleGridDrop = (e: React.DragEvent, projectPath: string, targetTimeMs: number) => {
+    const data = getDraggedTaskData(e);
+    if (!data?.taskId) return;
+
+    const updates: Partial<Task> = {
+      project: projectPath,
+      deadline: targetTimeMs,
+      isAllDay: false
+    };
+
+    if (onUpdateTask) {
+      onUpdateTask(data.taskId, updates);
     } else {
-      setSelectedKey(`folder:${item.path}`);
-      setSelectedFolderPath(item.path);
-      const el = document.getElementById(`timeline-project-${encodeURIComponent(item.path)}`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+      if (onMoveTaskFolder) onMoveTaskFolder(data.taskId, projectPath);
+      if (onScheduleTask) onScheduleTask(data.taskId, targetTimeMs);
+    }
+    (window as any).__navforDraggingTask = null;
+  };
+
+  // 2D representation of all visible tasks on the timeline for deterministic arrow key navigation
+  const timelineLanes = useMemo(() => {
+    return visibleProjectTree.map((project, pIdx) => {
+      const projectTasks = project.tasks;
+
+      // Unscheduled tasks (ToDo list)
+      const unscheduled = (showUnscheduledColumn 
+        ? projectTasks.filter(t => timelineMode === 'calendar' ? !t.deadline : !getTaskCurrentColumnId(t, customColumns))
+        : []
+      ).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+
+      // Scheduled / column tasks
+      let scheduled: Task[] = [];
+      if (timelineMode === 'calendar') {
+        scheduled = projectTasks.filter(t => typeof t.deadline === 'number')
+          .sort((a, b) => {
+            const aTime = a.startDate || a.deadline!;
+            const bTime = b.startDate || b.deadline!;
+            return aTime - bTime || (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
+          });
+      } else {
+        const colOrderMap = new Map<string, number>(customColumns.map((c, idx) => [c.id, idx]));
+        scheduled = projectTasks.filter(t => Boolean(getTaskCurrentColumnId(t, customColumns)))
+          .sort((a, b) => {
+            const colA: number = colOrderMap.get(getTaskCurrentColumnId(a, customColumns) || '') ?? 999;
+            const colB: number = colOrderMap.get(getTaskCurrentColumnId(b, customColumns) || '') ?? 999;
+            if (colA !== colB) return colA - colB;
+            return (a.order ?? 0) - (b.order ?? 0) || (Number(a.createdAt) - Number(b.createdAt));
+          });
+      }
+
+      // Combine in visual left-to-right order with approximate horizontal coordinate
+      const allTasksInLane = [
+        ...unscheduled.map((t, idx) => ({ task: t, xApprox: -200 + idx * 10 })),
+        ...scheduled.map((t) => {
+          let xApprox = 0;
+          if (timelineMode === 'calendar' && t.deadline) {
+            xApprox = (t.deadline - timelineStartMs) / slotDurationMs;
+          } else {
+            const colIdx = customColumns.findIndex(c => c.id === getTaskCurrentColumnId(t, customColumns));
+            xApprox = colIdx >= 0 ? colIdx * 100 + (t.order ?? 0) : 0;
+          }
+          return { task: t, xApprox };
+        })
+      ];
+
+      return {
+        project,
+        pIdx,
+        tasks: allTasksInLane
+      };
+    });
+  }, [visibleProjectTree, showUnscheduledColumn, timelineMode, customColumns, timelineStartMs, slotDurationMs]);
+
+  // 2D Spatial Arrow Key Navigation: moves up, down, left, right exactly as displayed on the timeline
+  const navigateSpatialTask = (direction: 'up' | 'down' | 'left' | 'right') => {
+    (window as any).__navforActivePane = 'timeline';
+
+    // 1. Gather all rendered task chips inside the timeline
+    const allTaskEls = Array.from(
+      document.querySelectorAll('#timeline-root [id^="timeline-task-"]')
+    ) as HTMLElement[];
+
+    if (allTaskEls.length === 0) return;
+
+    // If no task is currently active, select the first or last task
+    if (!activeTaskId) {
+      const targetEl = (direction === 'down' || direction === 'right') ? allTaskEls[0] : allTaskEls[allTaskEls.length - 1];
+      const targetId = targetEl.id.replace('timeline-task-', '');
+      onSelectTask(targetId);
+      setSelectedKey(`task:${targetId}`);
+      setSelectedFolderPath(null);
+      targetEl.focus({ preventScroll: true });
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+      return;
+    }
+
+    const curEl = document.getElementById(`timeline-task-${activeTaskId}`);
+    if (!curEl) {
+      const targetId = allTaskEls[0].id.replace('timeline-task-', '');
+      onSelectTask(targetId);
+      setSelectedKey(`task:${targetId}`);
+      setSelectedFolderPath(null);
+      allTaskEls[0].focus({ preventScroll: true });
+      allTaskEls[0].scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+      return;
+    }
+
+    const curRect = curEl.getBoundingClientRect();
+    const curCx = curRect.left + curRect.width / 2;
+    const curCy = curRect.top + curRect.height / 2;
+
+    // Build candidates list with DOM bounding rects
+    const candidates = allTaskEls
+      .filter(el => el.id !== `timeline-task-${activeTaskId}`)
+      .map(el => {
+        const id = el.id.replace('timeline-task-', '');
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        return { el, id, rect, cx, cy };
+      });
+
+    let chosen: { el: HTMLElement; id: string } | null = null;
+
+    if (direction === 'down') {
+      // Find tasks strictly below current task
+      const below = candidates.filter(c => c.cy > curCy + 6 || c.rect.top >= curRect.top + 8);
+      if (below.length > 0) {
+        let bestScore = Infinity;
+        for (const cand of below) {
+          const dy = cand.cy - curCy; // > 0
+          const dx = cand.cx - curCx;
+          // Check if candidate is vertically aligned (same column / stack)
+          const isDirectlyBelow = Math.abs(dx) <= Math.max(curRect.width, cand.rect.width) * 0.75;
+          let score: number;
+          if (isDirectlyBelow) {
+            // Immediate next task below in same stack gets lowest score
+            score = dy;
+          } else {
+            // Lower lane / another column: minimize dy with dx penalty
+            score = dy * 1.5 + Math.abs(dx) * 2.2 + 1000;
+          }
+          if (score < bestScore) {
+            bestScore = score;
+            chosen = cand;
+          }
+        }
+      }
+    } else if (direction === 'up') {
+      // Find tasks strictly above current task
+      const above = candidates.filter(c => c.cy < curCy - 6 || c.rect.bottom <= curRect.bottom - 8);
+      if (above.length > 0) {
+        let bestScore = Infinity;
+        for (const cand of above) {
+          const dy = curCy - cand.cy; // > 0
+          const dx = cand.cx - curCx;
+          const isDirectlyAbove = Math.abs(dx) <= Math.max(curRect.width, cand.rect.width) * 0.75;
+          let score: number;
+          if (isDirectlyAbove) {
+            score = dy;
+          } else {
+            score = dy * 1.5 + Math.abs(dx) * 2.2 + 1000;
+          }
+          if (score < bestScore) {
+            bestScore = score;
+            chosen = cand;
+          }
+        }
+      }
+    } else if (direction === 'right') {
+      // Find tasks to the right of current task
+      const right = candidates.filter(c => c.cx > curCx + 8 || c.rect.left >= curRect.left + 10);
+      if (right.length > 0) {
+        let bestScore = Infinity;
+        for (const cand of right) {
+          const dx = cand.cx - curCx; // > 0
+          const dy = cand.cy - curCy;
+          // In same horizontal lane or row?
+          const isSameLane = Math.abs(dy) <= Math.max(curRect.height, cand.rect.height) * 1.8;
+          let score: number;
+          if (isSameLane) {
+            score = dx;
+          } else {
+            score = dx * 1.2 + Math.abs(dy) * 3.0 + 1000;
+          }
+          if (score < bestScore) {
+            bestScore = score;
+            chosen = cand;
+          }
+        }
+      } else {
+        // Wrap to the next project lane below: pick leftmost task in lower lanes
+        const below = candidates.filter(c => c.cy > curCy + 10);
+        if (below.length > 0) {
+          below.sort((a, b) => (a.cy - b.cy) || (a.cx - b.cx));
+          chosen = below[0];
+        }
+      }
+    } else if (direction === 'left') {
+      // Find tasks to the left of current task
+      const left = candidates.filter(c => c.cx < curCx - 8 || c.rect.right <= curRect.right - 10);
+      if (left.length > 0) {
+        let bestScore = Infinity;
+        for (const cand of left) {
+          const dx = curCx - cand.cx; // > 0
+          const dy = cand.cy - curCy;
+          const isSameLane = Math.abs(dy) <= Math.max(curRect.height, cand.rect.height) * 1.8;
+          let score: number;
+          if (isSameLane) {
+            score = dx;
+          } else {
+            score = dx * 1.2 + Math.abs(dy) * 3.0 + 1000;
+          }
+          if (score < bestScore) {
+            bestScore = score;
+            chosen = cand;
+          }
+        }
+      } else {
+        // Wrap to previous project lane above: pick rightmost task in upper lanes
+        const above = candidates.filter(c => c.cy < curCy - 10);
+        if (above.length > 0) {
+          above.sort((a, b) => (b.cy - a.cy) || (b.cx - a.cx));
+          chosen = above[0];
+        }
+      }
+    }
+
+    if (chosen) {
+      onSelectTask(chosen.id);
+      setSelectedKey(`task:${chosen.id}`);
+      setSelectedFolderPath(null);
+      chosen.el.focus({ preventScroll: true });
+      chosen.el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
     }
   };
 
+  // Keyboard navigation: visual sequence task file selection navigation across lanes and rows
   const handleNavKey = (e: KeyboardEvent | React.KeyboardEvent) => {
-    // Ignore key navigation if typing in input / textarea / select or if quick-add is active
     const target = e.target as HTMLElement;
     const activeEl = typeof document !== 'undefined' ? (document.activeElement as HTMLElement) : null;
     if (
@@ -757,247 +1114,129 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       return;
     }
 
-    if (visibleTimelineItems.length === 0) return;
-
-    let currentIndex = -1;
-    if (selectedKey) {
-      if (selectedKey.startsWith('task:')) {
-        const id = selectedKey.slice(5);
-        currentIndex = visibleTimelineItems.findIndex(it => it.type === 'task' && it.taskId === id);
-      } else if (selectedKey.startsWith('folder:')) {
-        const p = selectedKey.slice(7);
-        currentIndex = visibleTimelineItems.findIndex(it => it.type === 'folder' && it.path === p);
-      }
-    }
-    if (currentIndex === -1 && activeTaskId) {
-      currentIndex = visibleTimelineItems.findIndex(it => it.type === 'task' && it.taskId === activeTaskId);
-    }
-    if (currentIndex === -1 && selectedFolderPath) {
-      currentIndex = visibleTimelineItems.findIndex(it => it.type === 'folder' && it.path === selectedFolderPath);
-    }
-
-    if (currentIndex === -1) {
-      // If nothing matches or task was in a project, try finding its project folder
-      if (activeTaskId) {
-        const task = tasks.find(t => t.id === activeTaskId);
-        if (task?.project) {
-          const folderIdx = visibleTimelineItems.findIndex(it => it.type === 'folder' && it.path === task.project);
-          if (folderIdx !== -1) {
-            currentIndex = folderIdx;
-          }
-        }
-      }
-    }
-
-    if (currentIndex === -1) {
-      e.preventDefault();
-      const firstTaskIdx = visibleTimelineItems.findIndex(it => it.type === 'task');
-      selectNavItem(visibleTimelineItems[firstTaskIdx !== -1 ? firstTaskIdx : 0]);
-      return;
-    }
-
-    const currentItem = visibleTimelineItems[currentIndex];
-
-    // ====================================================
-    // RIGHT ARROW (→): Move to next item to the right
-    // ====================================================
-    if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      if (currentItem.type === 'folder') {
-        if (collapsedProjectPaths.has(currentItem.path)) {
-          toggleProjectCollapse(currentItem.path);
-        } else {
-          // Move to the first task in this project row
-          const sameRowTasks = visibleTimelineItems.filter(
-            it => it.type === 'task' && it.projectIndex === currentItem.projectIndex
-          ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
-          if (sameRowTasks.length > 0) {
-            sameRowTasks.sort((a, b) => a.colIndex - b.colIndex || a.cellIndex - b.cellIndex);
-            selectNavItem(sameRowTasks[0]);
-          }
-        }
-      } else {
-        // Current item is a task: find tasks to the right in the same project row
-        const sameRowRightTasks = visibleTimelineItems.filter(
-          it => it.type === 'task' && it.projectIndex === currentItem.projectIndex && it.colIndex > currentItem.colIndex
-        ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
-
-        if (sameRowRightTasks.length > 0) {
-          sameRowRightTasks.sort((a, b) => a.colIndex - b.colIndex || a.cellIndex - b.cellIndex);
-          selectNavItem(sameRowRightTasks[0]);
-        }
-      }
-    } 
-    // ====================================================
-    // LEFT ARROW (←): Move to previous item to the left
-    // ====================================================
-    else if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      if (currentItem.type === 'task') {
-        // Find tasks to the left in the same project row
-        const sameRowLeftTasks = visibleTimelineItems.filter(
-          it => it.type === 'task' && it.projectIndex === currentItem.projectIndex && it.colIndex < currentItem.colIndex
-        ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
-
-        if (sameRowLeftTasks.length > 0) {
-          sameRowLeftTasks.sort((a, b) => b.colIndex - a.colIndex || a.cellIndex - b.cellIndex);
-          selectNavItem(sameRowLeftTasks[0]);
-        } else {
-          // If at the leftmost task in this row, jump to its project folder
-          const curFolder = visibleTimelineItems.find(
-            it => it.type === 'folder' && it.projectIndex === currentItem.projectIndex
-          );
-          if (curFolder) {
-            selectNavItem(curFolder);
-          }
-        }
-      } else if (currentItem.type === 'folder') {
-        if (!collapsedProjectPaths.has(currentItem.path)) {
-          toggleProjectCollapse(currentItem.path);
-        }
-      }
-    } 
-    // ====================================================
-    // DOWN ARROW (↓): Move downward in visual 2D grid order
-    // ====================================================
-    else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (currentItem.type === 'folder') {
-        // Move to the next visible project folder below
-        const allFolders = visibleTimelineItems.filter(it => it.type === 'folder') as Array<Extract<TimelineNavItem, { type: 'folder' }>>;
-        const fIdx = allFolders.findIndex(f => f.path === currentItem.path);
-        if (fIdx !== -1 && fIdx < allFolders.length - 1) {
-          selectNavItem(allFolders[fIdx + 1]);
-        }
-      } else {
-        // Current item is a task:
-        // 1. If another task exists BELOW in the SAME cell, move to it
-        const sameCellBelow = visibleTimelineItems.find(
-          it => it.type === 'task' && 
-                it.projectIndex === currentItem.projectIndex && 
-                it.slotKey === currentItem.slotKey && 
-                it.cellIndex === currentItem.cellIndex + 1
-        );
-
-        if (sameCellBelow) {
-          selectNavItem(sameCellBelow);
-        } else {
-          // 2. Move to the next project row below
-          const maxProjectIndex = Math.max(...visibleTimelineItems.map(it => it.projectIndex));
-          let foundTarget: TimelineNavItem | null = null;
-
-          for (let pIdx = currentItem.projectIndex + 1; pIdx <= maxProjectIndex; pIdx++) {
-            const rowTasks = visibleTimelineItems.filter(
-              it => it.type === 'task' && it.projectIndex === pIdx
-            ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
-
-            if (rowTasks.length > 0) {
-              // Prefer exact same slotKey / date
-              const exactSlotTask = rowTasks.find(it => it.slotKey === currentItem.slotKey);
-              if (exactSlotTask) {
-                foundTarget = exactSlotTask;
-                break;
-              }
-              // Otherwise pick task in this row with closest colIndex
-              rowTasks.sort((a, b) => Math.abs(a.colIndex - currentItem.colIndex) - Math.abs(b.colIndex - currentItem.colIndex) || a.cellIndex - b.cellIndex);
-              foundTarget = rowTasks[0];
-              break;
-            } else {
-              // Row is collapsed or has no tasks; move to its folder header
-              const rowFolder = visibleTimelineItems.find(it => it.type === 'folder' && it.projectIndex === pIdx);
-              if (rowFolder) {
-                foundTarget = rowFolder;
-                break;
-              }
-            }
-          }
-
-          if (foundTarget) {
-            selectNavItem(foundTarget);
-          }
-        }
-      }
-    } 
-    // ====================================================
-    // UP ARROW (↑): Move upward in visual 2D grid order
-    // ====================================================
-    else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (currentItem.type === 'folder') {
-        // Move to the previous visible project folder above
-        const allFolders = visibleTimelineItems.filter(it => it.type === 'folder') as Array<Extract<TimelineNavItem, { type: 'folder' }>>;
-        const fIdx = allFolders.findIndex(f => f.path === currentItem.path);
-        if (fIdx > 0) {
-          selectNavItem(allFolders[fIdx - 1]);
-        }
-      } else {
-        // Current item is a task:
-        // 1. If a task exists ABOVE in the SAME cell, move to it
-        const sameCellAbove = visibleTimelineItems.find(
-          it => it.type === 'task' && 
-                it.projectIndex === currentItem.projectIndex && 
-                it.slotKey === currentItem.slotKey && 
-                it.cellIndex === currentItem.cellIndex - 1
-        );
-
-        if (sameCellAbove) {
-          selectNavItem(sameCellAbove);
-        } else {
-          // 2. Move to the project row above
-          let foundTarget: TimelineNavItem | null = null;
-
-          for (let pIdx = currentItem.projectIndex - 1; pIdx >= 0; pIdx--) {
-            const rowTasks = visibleTimelineItems.filter(
-              it => it.type === 'task' && it.projectIndex === pIdx
-            ) as Array<Extract<TimelineNavItem, { type: 'task' }>>;
-
-            if (rowTasks.length > 0) {
-              // Prefer exact same slotKey / date (bottommost task in that cell)
-              const exactSlotTasks = rowTasks.filter(it => it.slotKey === currentItem.slotKey);
-              if (exactSlotTasks.length > 0) {
-                exactSlotTasks.sort((a, b) => b.cellIndex - a.cellIndex);
-                foundTarget = exactSlotTasks[0];
-                break;
-              }
-              // Otherwise pick task with closest colIndex
-              rowTasks.sort((a, b) => Math.abs(a.colIndex - currentItem.colIndex) - Math.abs(b.colIndex - currentItem.colIndex) || b.cellIndex - a.cellIndex);
-              foundTarget = rowTasks[0];
-              break;
-            } else {
-              // Row is collapsed or has no tasks; move to its folder header
-              const rowFolder = visibleTimelineItems.find(it => it.type === 'folder' && it.projectIndex === pIdx);
-              if (rowFolder) {
-                foundTarget = rowFolder;
-                break;
-              }
-            }
-          }
-
-          if (foundTarget) {
-            selectNavItem(foundTarget);
-          }
-        }
-      }
-    } 
-    // ENTER or SPACE: action trigger
-    else if (e.key === 'Enter' || e.key === ' ') {
-      if (currentItem.type === 'folder') {
+    // 1. Task navigation if a task is active: 2D spatial navigation exactly as displayed
+    if (activeTaskId) {
+      if (e.key === 'ArrowDown') {
         e.preventDefault();
-        toggleProjectCollapse(currentItem.path);
-      } else if (currentItem.type === 'task') {
+        navigateSpatialTask('down');
+        return;
+      }
+      if (e.key === 'ArrowUp') {
         e.preventDefault();
-        if (e.key === ' ') {
-          onToggleDone(currentItem.taskId);
-        } else {
-          onSelectTask(currentItem.taskId);
+        navigateSpatialTask('up');
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        navigateSpatialTask('right');
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        navigateSpatialTask('left');
+        return;
+      }
+
+      // SPACE: Toggle done
+      if (e.key === ' ') {
+        e.preventDefault();
+        onToggleDone(activeTaskId);
+        return;
+      }
+
+      // ESCAPE: Clear selection
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onSelectTask('');
+        setSelectedKey(null);
+        return;
+      }
+    }
+
+    // 2. Folder navigation if folder is selected
+    if (selectedFolderPath || (selectedKey && selectedKey.startsWith('folder:'))) {
+      const curPath = selectedFolderPath || selectedKey?.slice(7) || '';
+      const curIdx = visibleProjectTree.findIndex(p => p.fullPath === curPath);
+
+      if (e.key === 'ArrowUp' && curIdx > 0) {
+        e.preventDefault();
+        const prev = visibleProjectTree[curIdx - 1];
+        setSelectedFolderPath(prev.fullPath);
+        setSelectedKey(`folder:${prev.fullPath}`);
+        const el = document.getElementById(`timeline-project-${encodeURIComponent(prev.fullPath)}`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        return;
+      }
+      if (e.key === 'ArrowDown' && curIdx !== -1 && curIdx < visibleProjectTree.length - 1) {
+        e.preventDefault();
+        const next = visibleProjectTree[curIdx + 1];
+        setSelectedFolderPath(next.fullPath);
+        setSelectedKey(`folder:${next.fullPath}`);
+        const el = document.getElementById(`timeline-project-${encodeURIComponent(next.fullPath)}`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (collapsedProjectPaths.has(curPath)) {
+          toggleProjectCollapse(curPath);
+          return;
         }
+        // If expanded and has tasks, select first task in this lane
+        const lane = timelineLanes[curIdx];
+        if (lane && lane.tasks.length > 0) {
+          const firstTask = lane.tasks[0].task;
+          (window as any).__navforActivePane = 'timeline';
+          onSelectTask(firstTask.id);
+          setSelectedKey(`task:${firstTask.id}`);
+          setSelectedFolderPath(null);
+          const el = document.getElementById(`timeline-task-${firstTask.id}`);
+          el?.focus({ preventScroll: true });
+          el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        }
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (!collapsedProjectPaths.has(curPath)) {
+          toggleProjectCollapse(curPath);
+        }
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        toggleProjectCollapse(curPath);
+        return;
+      }
+    }
+
+    // 3. If nothing selected and user presses ArrowDown or ArrowRight on timeline
+    if (!activeTaskId && !selectedFolderPath && !selectedKey) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        navigateSpatialTask('down');
+        return;
+      }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        navigateSpatialTask('up');
+        return;
       }
     }
   };
 
+  // Keep DOM focus on the selected task chip when Timeline is active
+  useEffect(() => {
+    if (activeTaskId && (window as any).__navforActivePane === 'timeline') {
+      const el = document.getElementById(`timeline-task-${activeTaskId}`);
+      if (el && document.activeElement !== el) {
+        el.focus({ preventScroll: true });
+      }
+    }
+  }, [activeTaskId]);
+
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing in form controls
       const activeEl = document.activeElement as HTMLElement;
       if (
         activeEl?.tagName === 'INPUT' ||
@@ -1008,14 +1247,22 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         return;
       }
 
-      // Ignore if Explorer is active or target is inside Explorer
-      const isInsideExplorer =
-        Boolean(activeEl?.closest('#explorer-tree-root')) ||
-        Boolean((e.target as HTMLElement)?.closest('#explorer-tree-root')) ||
-        (window as any).__navforActivePane === 'explorer';
+      // Check if Timeline is active pane
+      const isTimelineActive =
+        (window as any).__navforActivePane === 'timeline' ||
+        Boolean(activeEl?.closest('#timeline-root')) ||
+        Boolean((e.target as HTMLElement)?.closest('#timeline-root'));
 
-      if (isInsideExplorer) {
-        return;
+      if (!isTimelineActive) {
+        // If Explorer is active pane and target is in explorer, let Explorer handle
+        const isInsideExplorer =
+          (window as any).__navforActivePane === 'explorer' &&
+          (Boolean(activeEl?.closest('#explorer-tree-root')) ||
+           Boolean((e.target as HTMLElement)?.closest('#explorer-tree-root')));
+
+        if (isInsideExplorer) {
+          return;
+        }
       }
 
       // Ignore if dialog, preset dropdown, or quick-add is active
@@ -1023,15 +1270,18 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         return;
       }
 
-      // Handle arrow keys, enter, space
-      if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Enter', ' '].includes(e.key)) {
+      // Handle arrow keys, enter, space, escape
+      if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Enter', ' ', 'Escape'].includes(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation?.();
         handleNavKey(e);
       }
     };
 
-    window.addEventListener('keydown', handleGlobalKeyDown);
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [visibleTimelineItems, activeTaskId, selectedFolderPath, selectedKey, collapsedProjectPaths, isPresetOpen, quickAddCell]);
+    window.addEventListener('keydown', handleGlobalKeyDown, true);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
+  }, [activeTaskId, selectedFolderPath, selectedKey, collapsedProjectPaths, isPresetOpen, quickAddCell, visibleProjectTree, tasks, slotDurationMs, timelineStartMs]);
 
   const handleNavigate = (direction: 'prev' | 'next' | 'today') => {
     if (direction === 'today') {
@@ -1608,6 +1858,65 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               ))}
             </div>
           )}
+
+          {/* Grid ON / OFF Toggle (Supported in both Dates and Custom/Stages) */}
+          <button
+            onClick={() => handleToggleGrid(!isGridEnabled)}
+            className={cn(
+              "px-2 py-1 text-[11px] font-semibold rounded-lg border transition-all flex items-center gap-1.5 shadow-2xs",
+              isGridEnabled
+                ? "bg-indigo-50 text-indigo-700 border-indigo-200 font-bold"
+                : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
+            )}
+            title={isJa ? (isGridEnabled ? 'グリッドをOFFにする' : 'グリッドをONにする') : (isGridEnabled ? 'Turn Grid OFF' : 'Turn Grid ON')}
+          >
+            <LayoutGrid size={13} className={isGridEnabled ? "text-indigo-600" : "text-slate-400"} />
+            <span className="hidden sm:inline">{isJa ? 'グリッド' : 'Grid'}</span>
+            <span className={cn(
+              "text-[9px] px-1 py-0.5 rounded font-mono font-bold uppercase",
+              isGridEnabled ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
+            )}>
+              {isGridEnabled ? 'ON' : 'OFF'}
+            </span>
+          </button>
+
+          {/* Fine Grid Step Granularity Selector (Dates: 1-24h, Custom: 2-5 steps) */}
+          {isGridEnabled && timelineMode === 'calendar' && (
+            <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-[11px] font-semibold text-slate-600">
+              {[1, 2, 4, 6, 12, 24].map(hours => (
+                <button
+                  key={hours}
+                  onClick={() => handleSetGridStepHours(hours)}
+                  className={cn(
+                    "px-1.5 py-0.5 rounded transition-all text-[10px]",
+                    gridStepHours === hours ? "bg-indigo-600 text-white shadow-2xs font-bold" : "hover:text-slate-900"
+                  )}
+                  title={isJa ? `${hours}時間グリッド刻み` : `${hours}h grid granularity`}
+                >
+                  {hours}h
+                </button>
+              ))}
+            </div>
+          )}
+
+          {isGridEnabled && timelineMode === 'custom' && (
+            <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-[11px] font-semibold text-slate-600">
+              <span className="px-1 text-[10px] text-slate-400 font-bold">{isJa ? '分割' : 'Steps'}:</span>
+              {[2, 3, 4, 5].map(subs => (
+                <button
+                  key={subs}
+                  onClick={() => handleSetStageSubdivisions(subs)}
+                  className={cn(
+                    "px-1.5 py-0.5 rounded transition-all text-[10px]",
+                    stageSubdivisions === subs ? "bg-indigo-600 text-white shadow-2xs font-bold" : "hover:text-slate-900"
+                  )}
+                  title={isJa ? `各ステージを${subs}分割` : `${subs} subdivisions per stage`}
+                >
+                  {subs}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1650,7 +1959,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             }}
             style={{ width: `${projectColWidth}px` }}
             className={cn(
-              "shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sticky left-0 z-40 transition-colors relative group/projcol",
+              "shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sticky left-0 z-40 transition-colors group/projcol",
               isDragOverRootHeader && "bg-indigo-100 ring-2 ring-indigo-500 ring-inset"
             )}
             title={isJa ? "サブプロジェクトをここにドロップすると最上位プロジェクト化できます" : "Drop subproject here to make it a top-level project"}
@@ -1703,33 +2012,53 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </div>
           )}
 
-          {/* Columns Header: Calendar Dates vs Custom Columns */}
+          {/* Columns Header: Calendar Dates with Fine Grid Slots vs Custom Columns */}
           {timelineMode === 'calendar' ? (
-            <div className="flex flex-1 min-w-max">
+            <div className="flex flex-1 min-w-max" style={{ width: `${totalGridWidth}px` }}>
               {timelineDates.map(date => {
                 const today = isToday(date);
                 const dayOfWeek = format(date, 'EEE');
                 const isWeekend = dayOfWeek === 'Sat' || dayOfWeek === 'Sun';
+                const dayWidth = slotsPerDay * slotWidth;
 
                 return (
                   <div
                     key={date.toISOString()}
+                    style={{ width: `${dayWidth}px` }}
                     className={cn(
-                      "w-28 sm:w-32 lg:w-36 shrink-0 px-2 py-1.5 border-r border-slate-200 text-center select-none transition-colors",
+                      "shrink-0 border-r border-slate-300 select-none transition-colors flex flex-col justify-between",
                       today && "bg-indigo-50/80 font-bold",
                       !today && isWeekend && "bg-slate-50 text-slate-500",
                       !today && !isWeekend && "bg-slate-100 text-slate-700"
                     )}
                   >
-                    <div className="text-[10px] uppercase font-bold text-slate-400 leading-none">
-                      {dayOfWeek}
+                    <div className="px-2 py-1 flex items-center justify-between border-b border-slate-200/70">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 leading-none">
+                        {dayOfWeek}
+                      </span>
+                      <span className={cn(
+                        "text-xs font-mono font-bold px-1.5 py-0.5 rounded",
+                        today ? "bg-indigo-600 text-white" : "text-slate-700"
+                      )}>
+                        {format(date, 'M/d')}
+                      </span>
                     </div>
-                    <div className={cn(
-                      "text-xs font-mono font-bold mt-0.5 inline-block px-1.5 py-0.5 rounded",
-                      today ? "bg-indigo-600 text-white" : "text-slate-700"
-                    )}>
-                      {format(date, 'M/d')}
-                    </div>
+
+                    {/* Fine Grid Slot Markers within Day */}
+                    {slotsPerDay > 1 && (
+                      <div className="flex divide-x divide-slate-200/60 text-[9px] text-slate-400 font-mono">
+                        {Array.from({ length: slotsPerDay }).map((_, sIdx) => (
+                          <div
+                            key={sIdx}
+                            style={{ width: `${slotWidth}px` }}
+                            className="text-center py-0.5 truncate select-none"
+                            title={`${String(sIdx * gridStepHours).padStart(2, '0')}:00`}
+                          >
+                            {String(sIdx * gridStepHours).padStart(2, '0')}h
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1743,58 +2072,77 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 return (
                   <div
                     key={col.id}
-                    className="w-32 sm:w-36 lg:w-40 shrink-0 px-2 py-1.5 border-r border-slate-200 bg-slate-100 text-slate-700 flex items-center justify-between group relative"
+                    style={{ width: `${customColWidth}px` }}
+                    className="shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative"
                   >
-                    {isEditing ? (
-                      <div className="flex items-center gap-1 w-full">
-                        <input
-                          autoFocus
-                          type="text"
-                          value={editingColumnLabel}
-                          onChange={(e) => setEditingColumnLabel(e.target.value)}
-                          onKeyDown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === 'Enter') handleSaveRenameColumn(col.id);
-                            if (e.key === 'Escape') setEditingColumnId(null);
-                          }}
-                          onBlur={() => handleSaveRenameColumn(col.id)}
-                          className="w-full bg-white border border-indigo-400 rounded px-1.5 py-0.5 text-xs font-bold text-slate-800 outline-none"
-                        />
-                      </div>
-                    ) : (
-                      <>
-                        <span 
-                          onDoubleClick={() => {
-                            setEditingColumnId(col.id);
-                            setEditingColumnLabel(col.label);
-                          }}
-                          className="text-xs font-bold truncate flex-1 cursor-pointer hover:text-indigo-600"
-                          title={isJa ? "ダブルクリックで名前変更" : "Double-click to rename"}
-                        >
-                          {col.label}
-                        </span>
-                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button
-                            onClick={() => {
+                    <div className="px-2 py-1.5 flex items-center justify-between">
+                      {isEditing ? (
+                        <div className="flex items-center gap-1 w-full">
+                          <input
+                            autoFocus
+                            type="text"
+                            value={editingColumnLabel}
+                            onChange={(e) => setEditingColumnLabel(e.target.value)}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              if (e.key === 'Enter') handleSaveRenameColumn(col.id);
+                              if (e.key === 'Escape') setEditingColumnId(null);
+                            }}
+                            onBlur={() => handleSaveRenameColumn(col.id)}
+                            className="w-full bg-white border border-indigo-400 rounded px-1.5 py-0.5 text-xs font-bold text-slate-800 outline-none"
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <span 
+                            onDoubleClick={() => {
                               setEditingColumnId(col.id);
                               setEditingColumnLabel(col.label);
                             }}
-                            className="p-1 hover:text-indigo-600 hover:bg-slate-200 rounded text-slate-400"
-                            title={isJa ? "列名を変更" : "Rename column"}
+                            className="text-xs font-bold truncate flex-1 cursor-pointer hover:text-indigo-600"
+                            title={isJa ? "ダブルクリックで名前変更" : "Double-click to rename"}
                           >
-                            <Edit2 size={11} />
-                          </button>
-                          {customColumns.length > 1 && (
+                            {col.label}
+                          </span>
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
-                              onClick={() => handleDeleteColumn(col.id)}
-                              className="p-1 hover:text-red-600 hover:bg-red-50 rounded text-slate-400"
-                              title={isJa ? "列を削除" : "Delete column"}
+                              onClick={() => {
+                                setEditingColumnId(col.id);
+                                setEditingColumnLabel(col.label);
+                              }}
+                              className="p-1 hover:text-indigo-600 hover:bg-slate-200 rounded text-slate-400"
+                              title={isJa ? "列名を変更" : "Rename column"}
                             >
-                              <Trash2 size={11} />
+                              <Edit2 size={11} />
                             </button>
-                          )}
-                        </div>
-                      </>
+                            {customColumns.length > 1 && (
+                              <button
+                                onClick={() => handleDeleteColumn(col.id)}
+                                className="p-1 hover:text-red-600 hover:bg-red-50 rounded text-slate-400"
+                                title={isJa ? "列を削除" : "Delete column"}
+                              >
+                                <Trash2 size={11} />
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Stage sub-slot grid indicators when grid is enabled */}
+                    {isGridEnabled && stageSubdivisions > 1 && (
+                      <div className="flex border-t border-slate-200/80 text-[9px] font-mono text-slate-400 divide-x divide-slate-200/60 bg-slate-50/70">
+                        {Array.from({ length: stageSubdivisions }).map((_, sIdx) => (
+                          <div
+                            key={sIdx}
+                            style={{ width: `${customSubSlotWidth}px` }}
+                            className="text-center py-0.5 truncate select-none"
+                            title={`Step ${sIdx + 1}`}
+                          >
+                            S{sIdx + 1}
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
                 );
@@ -1832,6 +2180,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               if (timelineMode === 'calendar') return !t.deadline;
               return !getTaskCurrentColumnId(t, customColumns);
             }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+
+            // Fine grid task placements and calculated dynamic lane height for calendar mode
+            const { placed, laneHeight } = getPlacedTasksForProject(projectTasks);
 
             return (
               <div 
@@ -1983,88 +2334,126 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                       </div>
                     )}
 
-                    {/* Content Columns: Calendar Mode vs Custom Mode */}
+                    {/* Content Columns: Calendar Mode with Fine Grid vs Custom Mode */}
                     {timelineMode === 'calendar' ? (
-                      /* Calendar Date Cells */
-                      <div className="flex flex-1 min-w-max">
-                        {timelineDates.map(date => {
-                          const isDateToday = isToday(date);
-                          const dateKey = String(date.getTime());
-                          const isDragOver = dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === dateKey;
-                          
-                          // Find tasks matching this date
-                          const cellTasks = projectTasks.filter(t => t.deadline && isSameDay(new Date(t.deadline), date))
-                            .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+                      /* Calendar Fine Grid Lane */
+                      <div 
+                        style={{ width: `${totalGridWidth}px`, height: `${laneHeight}px`, minHeight: '56px' }}
+                        className="relative flex-1 shrink-0 select-none bg-white"
+                      >
+                        {/* Vertical Grid Lines & Droppable / Double-Clickable Slots */}
+                        <div className="absolute inset-0 flex pointer-events-auto">
+                          {timelineDates.map((date, dayIdx) => {
+                            const isDateToday = isToday(date);
+                            const dayWidth = slotsPerDay * slotWidth;
 
-                          return (
-                            <div
-                              key={date.toISOString()}
-                              onDragOver={(e) => {
-                                e.preventDefault();
-                                setDragOverCell({ project: project.fullPath, slotKey: dateKey });
-                              }}
-                              onDragLeave={() => setDragOverCell(null)}
-                              onDrop={(e) => handleCellDrop(e, project.fullPath, { type: 'calendar', date })}
-                              onDoubleClick={() => {
-                                setQuickAddCell({ 
-                                  project: project.fullPath, 
-                                  slotKey: dateKey, 
-                                  type: 'calendar', 
-                                  dateMs: date.getTime() 
-                                });
-                                setQuickAddTitle('');
-                              }}
-                              className={cn(
-                                "w-28 sm:w-32 lg:w-36 shrink-0 p-1.5 border-r border-slate-100 flex flex-col gap-1 min-h-[56px] transition-colors relative group/cell",
-                                isDateToday && "bg-indigo-50/30",
-                                isDragOver && "bg-indigo-100 border-2 border-dashed border-indigo-500"
-                              )}
-                            >
-                              {/* Render Task Chips sorted in chronological sequence */}
-                              {cellTasks.map((task) => renderTaskChip(task))}
+                            return (
+                              <div 
+                                key={date.toISOString()}
+                                style={{ width: `${dayWidth}px` }}
+                                className={cn(
+                                  "flex divide-x divide-slate-100/80 border-r border-slate-300 h-full shrink-0",
+                                  isDateToday && "bg-indigo-50/20"
+                                )}
+                              >
+                                {Array.from({ length: slotsPerDay }).map((_, sIdx) => {
+                                  const slotIdx = dayIdx * slotsPerDay + sIdx;
+                                  const slotStartMs = timelineStartMs + slotIdx * slotDurationMs;
+                                  const slotKey = `slot-${project.fullPath}-${slotIdx}`;
+                                  const isDragOver = dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === slotKey;
 
-                              {/* Quick Add input in date cell */}
-                              {quickAddCell?.project === project.fullPath && quickAddCell?.slotKey === dateKey ? (
-                                <form onSubmit={handleQuickAddSubmit} className="mt-1">
-                                  <input
-                                    autoFocus
-                                    type="text"
-                                    placeholder={isJa ? "タスク名..." : "Task name..."}
-                                    value={quickAddTitle}
-                                    onChange={(e) => setQuickAddTitle(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      e.stopPropagation();
-                                      if (e.key === 'Escape') {
-                                        setQuickAddCell(null);
+                                  return (
+                                    <div
+                                      key={sIdx}
+                                      style={{ width: `${slotWidth}px` }}
+                                      onDragOver={(e) => {
+                                        e.preventDefault();
+                                        setDragOverCell({ project: project.fullPath, slotKey });
+                                      }}
+                                      onDragLeave={() => setDragOverCell(null)}
+                                      onDrop={(e) => {
+                                        e.preventDefault();
+                                        setDragOverCell(null);
+                                        handleGridDrop(e, project.fullPath, slotStartMs);
+                                      }}
+                                      onDoubleClick={(e) => {
+                                        e.stopPropagation();
+                                        setQuickAddCell({
+                                          project: project.fullPath,
+                                          slotKey,
+                                          type: 'calendar',
+                                          dateMs: slotStartMs,
+                                          slotIdx
+                                        });
                                         setQuickAddTitle('');
-                                      }
-                                    }}
-                                    onBlur={() => {
-                                      if (!quickAddTitle.trim()) setQuickAddCell(null);
-                                    }}
-                                    className="w-full bg-white border border-indigo-300 rounded px-1.5 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
-                                  />
-                                </form>
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    setQuickAddCell({ 
-                                      project: project.fullPath, 
-                                      slotKey: dateKey, 
-                                      type: 'calendar', 
-                                      dateMs: date.getTime() 
-                                    });
-                                    setQuickAddTitle('');
-                                  }}
-                                  className="w-full py-0.5 rounded text-[10px] text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 transition-colors opacity-0 group-hover/cell:opacity-100 mt-auto flex items-center justify-center gap-0.5"
-                                  title={isJa ? 'この日時にタスク作成' : 'Add task on this date'}
-                                >
-                                  <Plus size={11} />
-                                </button>
-                              )}
+                                      }}
+                                      className={cn(
+                                        "h-full transition-colors relative group/slot cursor-pointer shrink-0",
+                                        isDragOver && "bg-indigo-100 border-2 border-dashed border-indigo-500",
+                                        "hover:bg-indigo-50/30"
+                                      )}
+                                      title={isJa ? `${format(new Date(slotStartMs), 'M/d HH:mm')} - ダブルクリックでタスク追加` : `${format(new Date(slotStartMs), 'M/d HH:mm')} - Double-click to add task`}
+                                    />
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Placed Task Chips on Fine Grid */}
+                        <div className="absolute inset-0 pointer-events-none">
+                          {placed.map(({ task, startPx, widthPx, topPx }) => (
+                            <div
+                              key={task.id}
+                              style={{
+                                position: 'absolute',
+                                left: `${startPx}px`,
+                                top: `${topPx}px`,
+                                width: `${widthPx}px`,
+                                pointerEvents: 'auto'
+                              }}
+                            >
+                              {renderTaskChip(task)}
                             </div>
-                          );
-                        })}
+                          ))}
+                        </div>
+
+                        {/* Quick Add Form in clicked grid slot */}
+                        {quickAddCell?.project === project.fullPath && quickAddCell?.type === 'calendar' && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: `${Math.min(totalGridWidth - 220, (quickAddCell.slotIdx ?? 0) * slotWidth)}px`,
+                              top: '4px',
+                              width: '210px',
+                              zIndex: 40
+                            }}
+                            className="bg-white p-1 rounded-lg shadow-xl border border-indigo-400 pointer-events-auto"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <form onSubmit={handleQuickAddSubmit}>
+                              <input
+                                autoFocus
+                                type="text"
+                                placeholder={isJa ? "タスク名を入力..." : "Task name..."}
+                                value={quickAddTitle}
+                                onChange={(e) => setQuickAddTitle(e.target.value)}
+                                onKeyDown={(e) => {
+                                  e.stopPropagation();
+                                  if (e.key === 'Escape') {
+                                    setQuickAddCell(null);
+                                    setQuickAddTitle('');
+                                  }
+                                }}
+                                onBlur={() => {
+                                  if (!quickAddTitle.trim()) setQuickAddCell(null);
+                                }}
+                                className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
+                              />
+                            </form>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       /* Custom Abstract Columns Cells */
@@ -2080,6 +2469,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           return (
                             <div
                               key={col.id}
+                              style={{ width: `${customColWidth}px` }}
                               onDragOver={(e) => {
                                 e.preventDefault();
                                 setDragOverCell({ project: project.fullPath, slotKey: colKey });
@@ -2096,16 +2486,27 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 setQuickAddTitle('');
                               }}
                               className={cn(
-                                "w-32 sm:w-36 lg:w-40 shrink-0 p-1.5 border-r border-slate-100 flex flex-col gap-1 min-h-[56px] transition-colors relative group/cell",
+                                "shrink-0 p-1.5 border-r border-slate-100 flex flex-col gap-1 min-h-[56px] transition-colors relative group/cell",
                                 isDragOver && "bg-indigo-100 border-2 border-dashed border-indigo-500"
                               )}
                             >
+                              {/* Background fine grid division lines when Grid is enabled */}
+                              {isGridEnabled && stageSubdivisions > 1 && (
+                                <div className="absolute inset-0 pointer-events-none flex divide-x divide-slate-100/80 border-r border-slate-200/60">
+                                  {Array.from({ length: stageSubdivisions }).map((_, sIdx) => (
+                                    <div key={sIdx} style={{ width: `${customSubSlotWidth}px` }} className="h-full" />
+                                  ))}
+                                </div>
+                              )}
+
                               {/* Render Task Chips sorted in sequence */}
-                              {cellTasks.map((task) => renderTaskChip(task))}
+                              <div className="relative z-10 flex flex-col gap-1 w-full">
+                                {cellTasks.map((task) => renderTaskChip(task))}
+                              </div>
 
                               {/* Quick Add input in custom cell */}
                               {quickAddCell?.project === project.fullPath && quickAddCell?.slotKey === colKey ? (
-                                <form onSubmit={handleQuickAddSubmit} className="mt-1">
+                                <form onSubmit={handleQuickAddSubmit} className="mt-1 relative z-20">
                                   <input
                                     autoFocus
                                     type="text"
@@ -2136,7 +2537,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                     });
                                     setQuickAddTitle('');
                                   }}
-                                  className="w-full py-0.5 rounded text-[10px] text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 transition-colors opacity-0 group-hover/cell:opacity-100 mt-auto flex items-center justify-center gap-0.5"
+                                  className="w-full py-0.5 rounded text-[10px] text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 transition-colors opacity-0 group-hover/cell:opacity-100 mt-auto flex items-center justify-center gap-0.5 relative z-20"
                                   title={isJa ? 'この列にタスク作成' : 'Add task in this column'}
                                 >
                                   <Plus size={11} />
@@ -2282,6 +2683,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       <div
         key={task.id}
         id={`timeline-task-${task.id}`}
+        tabIndex={0}
         draggable={true}
         onDragStart={(e) => handleTaskDragStart(e, task)}
         onDragOver={(e) => {
@@ -2299,14 +2701,19 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           const pos = dragOverTask?.position || 'after';
           handleTaskDropOnTask(e, task, pos);
         }}
-        onClick={() => {
+        onFocus={() => {
+          (window as any).__navforActivePane = 'timeline';
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
           (window as any).__navforActivePane = 'timeline';
           setSelectedKey(`task:${task.id}`);
           setSelectedFolderPath(null);
           onSelectTask(task.id);
+          e.currentTarget.focus();
         }}
         className={cn(
-          "group/chip relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-grab active:cursor-grabbing transition-all shadow-2xs border select-none",
+          "group/chip relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-grab active:cursor-grabbing transition-all shadow-2xs border select-none outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
           isSelected 
             ? (task.isDone
                 ? "bg-slate-800 text-slate-200 border-slate-700 shadow-xs ring-2 ring-indigo-400/60"

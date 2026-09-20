@@ -28,6 +28,7 @@ export interface Task {
   recurrence?: TaskRecurrence; // repetition settings (繰り返し)
   order?: number; // custom execution order
   timelineColumn?: string; // custom abstract timeline column/stage
+  timelineStep?: number; // custom step/slot index within phase/stage for grid positioning
   timelinePresetColumns?: Record<string, string>; // presetKey -> columnId mapping
 }
 

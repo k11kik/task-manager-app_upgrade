@@ -490,6 +490,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   // Keyboard navigation handler (ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Enter, F2)
   const handleTreeKeyDown = (e: React.KeyboardEvent | KeyboardEvent) => {
     if (renamingItem || creatingInFolder) return; // Let input handle keys
+    if ((window as any).__navforActivePane === 'timeline') return; // Timeline is active pane
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -642,10 +643,13 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       // Ignore if typing in input / textarea / contenteditable
-      const activeEl = document.activeElement as HTMLElement;
+      const target = e.target as HTMLElement | null;
+      const activeEl = document.activeElement as HTMLElement | null;
       if (
-        ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl?.tagName) ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl?.tagName || '') ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName || '') ||
         activeEl?.isContentEditable ||
+        target?.isContentEditable ||
         renamingItem ||
         creatingInFolder
       ) {
@@ -654,18 +658,20 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
       // Do NOT handle if user is inside Timeline or timeline is active pane
       const isInsideTimeline =
+        (window as any).__navforActivePane === 'timeline' ||
         Boolean(activeEl?.closest('#timeline-root')) ||
-        Boolean((e.target as HTMLElement)?.closest('#timeline-root')) ||
-        (window as any).__navforActivePane === 'timeline';
+        Boolean((e.target as HTMLElement)?.closest('#timeline-root'));
 
       if (isInsideTimeline) {
         return;
       }
 
       const isExplorerFocused = 
-        Boolean(activeEl?.closest('#explorer-tree-root')) ||
-        Boolean((e.target as HTMLElement)?.closest('#explorer-tree-root')) ||
-        (window as any).__navforActivePane === 'explorer';
+        (window as any).__navforActivePane !== 'timeline' && (
+          Boolean(activeEl?.closest('#explorer-tree-root')) ||
+          Boolean((e.target as HTMLElement)?.closest('#explorer-tree-root')) ||
+          (window as any).__navforActivePane === 'explorer'
+        );
 
       // Arrow navigation & Enter/F2 for Explorer tree
       if (isExplorerFocused) {
@@ -1110,6 +1116,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 onChange={(e) => setRenameInputValue(e.target.value)}
                 onBlur={handleRenameSubmit}
                 onKeyDown={(e) => {
+                  e.stopPropagation();
                   if (e.key === 'Escape') setRenamingItem(null);
                 }}
                 className="w-full bg-white border border-indigo-400 rounded px-1 py-0.5 text-xs outline-none shadow-2xs font-mono"
@@ -1189,6 +1196,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                   }
                 }}
                 onKeyDown={(e) => {
+                  e.stopPropagation();
                   if (e.key === 'Escape') {
                     setCreatingInFolder(null);
                     setInlineInputValue('');
@@ -1316,6 +1324,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               onChange={(e) => setRenameInputValue(e.target.value)}
               onBlur={handleRenameSubmit}
               onKeyDown={(e) => {
+                e.stopPropagation();
                 if (e.key === 'Escape') setRenamingItem(null);
               }}
               className="w-full bg-white border border-indigo-400 rounded px-1 py-0.5 text-xs outline-none shadow-2xs font-sans"
@@ -1658,6 +1667,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                   }
                 }}
                 onKeyDown={(e) => {
+                  e.stopPropagation();
                   if (e.key === 'Escape') {
                     setCreatingInFolder(null);
                     setInlineInputValue('');
