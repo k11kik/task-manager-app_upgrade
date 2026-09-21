@@ -131,7 +131,7 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "3.1.5";
+  const APP_VERSION = "3.1.6";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -3466,6 +3466,8 @@ export default function App() {
                       onSelectTask={handleOpenTaskInTab}
                       onUpdateTask={updateTask}
                       onScheduleTask={(taskId, deadline) => updateTask(taskId, { deadline })}
+                      onRenameFolder={handleRenameFolder}
+                      onRenameTask={(taskId, newTitle) => updateTask(taskId, { title: newTitle })}
                       onToggleDone={toggleDone}
                       onToggleStar={toggleStar}
                       onTogglePin={togglePin}

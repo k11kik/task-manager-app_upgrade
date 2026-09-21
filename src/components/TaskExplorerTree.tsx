@@ -367,27 +367,15 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   };
 
   // Flatten currently visible items for VS Code keyboard navigation
+  // Flatten currently visible items in the Project Tree for keyboard navigation
+  // Note: Focus and Pinned sections are kept independent so arrow navigation in project tree never jumps into Focus
   const visibleItems = useMemo(() => {
     const list: Array<
       | { type: 'folder'; path: string; node?: FolderNode; parentPath: string }
       | { type: 'task'; task: Task; parentPath: string }
     > = [];
 
-    // 1. Focus Section tasks (if expanded)
-    if (!isFocusSectionCollapsed) {
-      urgentTasks.forEach(task => {
-        list.push({ type: 'task', task, parentPath: '__focus__' });
-      });
-    }
-
-    // 2. Pinned Section tasks (if expanded)
-    if (!isPinnedSectionCollapsed && pinnedTasks.length > 0) {
-      pinnedTasks.forEach(task => {
-        list.push({ type: 'task', task, parentPath: '__pinned__' });
-      });
-    }
-
-    // 3. Project Folders and Tasks
+    // Project Folders and Tasks
     const traverse = (node: FolderNode, parentPath: string) => {
       // Subfolders first (sorted alphabetically)
       const subs = Array.from(node.subfolders.values()).sort((a, b) => 
@@ -416,50 +404,101 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     });
 
     return list;
-  }, [rootFolderList, collapsedFolders, urgentTasks, isFocusSectionCollapsed, pinnedTasks, isPinnedSectionCollapsed]);
+  }, [rootFolderList, collapsedFolders]);
 
-  // Sync selectedKey with activeTaskId without clobbering parentPath context
+  // Track previous activeTaskId to only react when active task genuinely switches
+  const prevActiveTaskIdRef = useRef<string | undefined>(activeTaskId);
+
+  // Sync selectedKey with activeTaskId without clobbering folder selection
   useEffect(() => {
-    if (activeTaskId) {
-      setSelectedKey(prev => {
-        if (prev?.startsWith('task:')) {
-          const parts = prev.split(':');
-          if (parts[parts.length - 1] === activeTaskId) {
-            return prev;
-          }
-        }
+    const hasActiveTaskChanged = activeTaskId !== prevActiveTaskIdRef.current;
+    prevActiveTaskIdRef.current = activeTaskId;
+
+    if (!activeTaskId) return;
+
+    // Only sync if activeTaskId genuinely changed (e.g. user clicked a task in Timeline or opened a tab)
+    if (hasActiveTaskChanged) {
+      const isTimelineActive = (window as any).__navforActivePane === 'timeline';
+      const hasFolderSelected = selectedFolderPaths.size > 0 || (selectedKey?.startsWith('folder:') ?? false);
+
+      // If user clicked in timeline or if explorer didn't have a folder selected, sync to the task
+      if (isTimelineActive || !hasFolderSelected) {
         const match = visibleItems.find(it => it.type === 'task' && it.task.id === activeTaskId);
-        if (match && match.type === 'task') {
-          return getItemKey(match);
-        }
-        return `task:${activeTaskId}`;
-      });
+        const nextKey = match && match.type === 'task' ? getItemKey(match) : `task:${activeTaskId}`;
+        setSelectedKey(nextKey);
+        setSelectedTaskIds(new Set([activeTaskId]));
+        setSelectedFolderPaths(new Set());
+      }
     }
-  }, [activeTaskId, visibleItems]);
+  }, [activeTaskId, visibleItems, selectedKey, selectedFolderPaths]);
 
   // Helper to find index in visibleItems whether target is exact key, folder path, or task ID
   const findItemIndex = (targetKey: string | null): number => {
-    if (!targetKey) return -1;
-    // 1. Exact match
-    const exactIdx = visibleItems.findIndex(it => getItemKey(it) === targetKey);
-    if (exactIdx !== -1) return exactIdx;
+    if (targetKey) {
+      // 1. Exact match by getItemKey
+      const exactIdx = visibleItems.findIndex(it => getItemKey(it) === targetKey);
+      if (exactIdx !== -1) return exactIdx;
 
-    // 2. If it's a task key (task:parentPath:taskId or task:taskId)
-    if (targetKey.startsWith('task:')) {
-      const parts = targetKey.split(':');
-      const taskId = parts[parts.length - 1];
-      if (parts.length >= 3) {
-        const parentPath = parts[1];
-        const pIdx = visibleItems.findIndex(it => it.type === 'task' && it.task.id === taskId && it.parentPath === parentPath);
-        if (pIdx !== -1) return pIdx;
+      // 2. If it's a task key (task:parentPath:taskId or task:taskId)
+      if (targetKey.startsWith('task:')) {
+        const parts = targetKey.split(':');
+        const taskId = parts[parts.length - 1];
+        if (parts.length >= 3) {
+          const parentPath = parts[1];
+          const pIdx = visibleItems.findIndex(it => it.type === 'task' && it.task.id === taskId && it.parentPath === parentPath);
+          if (pIdx !== -1) return pIdx;
+        }
+        const tIdx = visibleItems.findIndex(it => it.type === 'task' && it.task.id === taskId);
+        if (tIdx !== -1) return tIdx;
       }
-      return visibleItems.findIndex(it => it.type === 'task' && it.task.id === taskId);
+
+      // 3. If folder key (folder:path)
+      if (targetKey.startsWith('folder:')) {
+        const folderPath = targetKey.replace('folder:', '');
+        const fIdx = visibleItems.findIndex(it => it.type === 'folder' && it.path === folderPath);
+        if (fIdx !== -1) return fIdx;
+      }
     }
 
-    // 3. If folder key (folder:path)
-    if (targetKey.startsWith('folder:')) {
-      const folderPath = targetKey.replace('folder:', '');
-      return visibleItems.findIndex(it => it.type === 'folder' && it.path === folderPath);
+    // 4. Fallback to selectedFolderPaths if selectedKey was out of sync
+    if (selectedFolderPaths.size > 0) {
+      const folderPath = Array.from(selectedFolderPaths)[0];
+      const fIdx = visibleItems.findIndex(it => it.type === 'folder' && it.path === folderPath);
+      if (fIdx !== -1) return fIdx;
+    }
+
+    // 5. Fallback to selectedTaskIds
+    if (selectedTaskIds.size > 0) {
+      const taskId = Array.from(selectedTaskIds)[0];
+      const tIdx = visibleItems.findIndex(it => it.type === 'task' && it.task.id === taskId);
+      if (tIdx !== -1) return tIdx;
+    }
+
+    // 6. Fallback: ancestor folder if item was hidden by collapsing
+    if (selectedKey) {
+      if (selectedKey.startsWith('task:')) {
+        const parts = selectedKey.split(':');
+        if (parts.length >= 3) {
+          const folderPath = parts[1];
+          const fIdx = visibleItems.findIndex(it => it.type === 'folder' && it.path === folderPath);
+          if (fIdx !== -1) return fIdx;
+        }
+      } else if (selectedKey.startsWith('folder:')) {
+        const path = selectedKey.replace('folder:', '');
+        const parts = path.split('/');
+        while (parts.length > 1) {
+          parts.pop();
+          const ancestorPath = parts.join('/');
+          const fIdx = visibleItems.findIndex(it => it.type === 'folder' && it.path === ancestorPath);
+          if (fIdx !== -1) return fIdx;
+        }
+      }
+    }
+
+    // 7. Fallback to activeTaskId
+    if (activeTaskId) {
+      const tIdx = visibleItems.findIndex(it => it.type === 'task' && it.task.id === activeTaskId);
+      if (tIdx !== -1) return tIdx;
     }
 
     return -1;
@@ -492,14 +531,76 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     if (renamingItem || creatingInFolder) return; // Let input handle keys
     if ((window as any).__navforActivePane === 'timeline') return; // Timeline is active pane
 
+    // 1. If currently selected item is inside FOCUS section, navigate independently within urgentTasks
+    if (selectedKey?.startsWith('task:__focus__:')) {
+      if (urgentTasks.length === 0) return;
+      const parts = selectedKey.split(':');
+      const currentId = parts[parts.length - 1];
+      const curIdx = urgentTasks.findIndex(t => t.id === currentId);
+
+      let nextIdx = curIdx;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        nextIdx = curIdx === -1 ? 0 : Math.min(curIdx + 1, urgentTasks.length - 1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        nextIdx = curIdx === -1 ? 0 : Math.max(curIdx - 1, 0);
+      }
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const nextTask = urgentTasks[nextIdx];
+        const nextKey = `task:__focus__:${nextTask.id}`;
+        setSelectedKey(nextKey);
+        setLastSelectedKey(nextKey);
+        setSelectedTaskIds(new Set([nextTask.id]));
+        setSelectedFolderPaths(new Set());
+        onSelectTask(nextTask.id);
+        requestAnimationFrame(() => {
+          const el = document.getElementById(`explorer-item-${encodeURIComponent(nextKey)}`);
+          el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+        return;
+      }
+    }
+
+    // 2. If currently selected item is inside PINNED section, navigate independently within pinnedTasks
+    if (selectedKey?.startsWith('task:__pinned__:')) {
+      if (pinnedTasks.length === 0) return;
+      const parts = selectedKey.split(':');
+      const currentId = parts[parts.length - 1];
+      const curIdx = pinnedTasks.findIndex(t => t.id === currentId);
+
+      let nextIdx = curIdx;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        nextIdx = curIdx === -1 ? 0 : Math.min(curIdx + 1, pinnedTasks.length - 1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        nextIdx = curIdx === -1 ? 0 : Math.max(curIdx - 1, 0);
+      }
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const nextTask = pinnedTasks[nextIdx];
+        const nextKey = `task:__pinned__:${nextTask.id}`;
+        setSelectedKey(nextKey);
+        setLastSelectedKey(nextKey);
+        setSelectedTaskIds(new Set([nextTask.id]));
+        setSelectedFolderPaths(new Set());
+        onSelectTask(nextTask.id);
+        requestAnimationFrame(() => {
+          const el = document.getElementById(`explorer-item-${encodeURIComponent(nextKey)}`);
+          el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+        return;
+      }
+    }
+
+    // 3. Project Tree navigation (ArrowDown / ArrowUp strictly within visibleItems)
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (visibleItems.length === 0) return;
 
       let idx = findItemIndex(selectedKey);
-      if (idx === -1 && activeTaskId) {
-        idx = findItemIndex(`task:${activeTaskId}`);
-      }
       if (idx === -1) {
         idx = 0;
       } else if (idx < visibleItems.length - 1) {
@@ -528,14 +629,17 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           setSelectedTaskIds(new Set());
         }
       }
+
+      // Scroll smoothly into view
+      requestAnimationFrame(() => {
+        const el = document.getElementById(`explorer-item-${encodeURIComponent(key)}`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (visibleItems.length === 0) return;
 
       let idx = findItemIndex(selectedKey);
-      if (idx === -1 && activeTaskId) {
-        idx = findItemIndex(`task:${activeTaskId}`);
-      }
       if (idx === -1) {
         idx = 0;
       } else if (idx > 0) {
@@ -564,6 +668,12 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           setSelectedTaskIds(new Set());
         }
       }
+
+      // Scroll smoothly into view
+      requestAnimationFrame(() => {
+        const el = document.getElementById(`explorer-item-${encodeURIComponent(key)}`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
     } else if (e.key === 'ArrowRight') {
       // If folder and collapsed, expand it
       if (selectedKey?.startsWith('folder:')) {
@@ -676,6 +786,8 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       // Arrow navigation & Enter/F2 for Explorer tree
       if (isExplorerFocused) {
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'F2'].includes(e.key)) {
+          e.preventDefault();
+          e.stopPropagation();
           handleTreeKeyDown(e);
           return;
         }
@@ -710,8 +822,22 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
   // Helper to determine where new item should be created from header button (VS Code-style context aware)
   const getTargetFolderForNewItem = (): string => {
+    // 1. If Explorer has an active folder selected, THAT ALWAYS TAKES TOP PRECEDENCE!
+    if (selectedFolderPaths.size > 0) {
+      const folderPath = Array.from(selectedFolderPaths)[0];
+      if (typeof folderPath === 'string' && folderPath) {
+        return folderPath;
+      }
+    }
     if (selectedKey?.startsWith('folder:')) {
       return selectedKey.replace('folder:', '');
+    }
+
+    // 2. If Explorer has an active task selected in the tree
+    if (selectedTaskIds.size > 0) {
+      const taskId = (Array.from(selectedTaskIds)[0] as string) || '';
+      const task = tasks.find(t => t.id === taskId);
+      if (task?.project) return task.project;
     }
     if (selectedKey?.startsWith('task:')) {
       const parts = selectedKey.split(':');
@@ -723,15 +849,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       const task = tasks.find(t => t.id === taskId);
       if (task?.project) return task.project;
     }
-    if (selectedFolderPaths.size === 1) {
-      return (Array.from(selectedFolderPaths)[0] as string) || '';
-    }
-    if (selectedTaskIds.size === 1) {
-      const taskId = (Array.from(selectedTaskIds)[0] as string) || '';
-      const task = tasks.find(t => t.id === taskId);
-      if (task?.project) return task.project;
-    }
-    if (activeTaskId) {
+
+    // 3. Fallback: Only if Explorer has nothing selected at all
+    if (activeTaskId && (window as any).__navforActivePane === 'timeline') {
       const task = tasks.find(t => t.id === activeTaskId);
       if (task?.project) return task.project;
     }
@@ -1046,6 +1166,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       >
         {/* Folder row */}
         <div
+          id={`explorer-item-${encodeURIComponent(folderItemKey)}`}
           draggable={true}
           tabIndex={0}
           onDragStart={(e) => handleFolderDragStart(e, node.fullPath)}
@@ -1145,6 +1266,42 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
           {/* Action buttons (hover) */}
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ml-1">
+            {/* Quick Add Task in this folder */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (collapsedFolders.has(node.fullPath)) {
+                  const next = new Set<string>(collapsedFolders);
+                  next.delete(node.fullPath);
+                  saveCollapsed(next);
+                }
+                setCreatingInFolder({ path: node.fullPath, type: 'task' });
+                setInlineInputValue('');
+              }}
+              className="p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-slate-300/40 rounded transition-colors"
+              title={isJa ? "このフォルダにタスク作成" : "New task in folder"}
+            >
+              <FilePlus size={12} />
+            </button>
+            {/* Quick Add Subfolder in this folder */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (collapsedFolders.has(node.fullPath)) {
+                  const next = new Set<string>(collapsedFolders);
+                  next.delete(node.fullPath);
+                  saveCollapsed(next);
+                }
+                setCreatingInFolder({ path: node.fullPath, type: 'folder' });
+                setInlineInputValue('');
+              }}
+              className="p-0.5 text-slate-400 hover:text-amber-600 hover:bg-slate-300/40 rounded transition-colors"
+              title={isJa ? "このフォルダにサブフォルダ作成" : "New subfolder in folder"}
+            >
+              <FolderPlus size={12} />
+            </button>
             {/* 3-dots Menu Button */}
             <button
               type="button"
@@ -1230,13 +1387,17 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   const renderTaskItem = (task: Task, depth = 1, parentPath = '') => {
     const itemKey = parentPath ? `task:${parentPath}:${task.id}` : `task:${task.id}`;
     const isMultiSelected = selectedTaskIds.has(task.id);
+    const isFocusItem = parentPath === '__focus__';
+    const isPinnedItem = parentPath === '__pinned__';
+    const isTreeItem = !isFocusItem && !isPinnedItem;
     const isExactSelected = selectedKey === itemKey;
-    const isKeyTaskMatch = selectedKey?.startsWith('task:') && selectedKey.endsWith(`:${task.id}`) && (
-      (selectedKey.includes(':__focus__:') && parentPath === '__focus__') ||
-      (selectedKey.includes(':__pinned__:') && parentPath === '__pinned__') ||
-      (!selectedKey.includes(':__focus__:') && !selectedKey.includes(':__pinned__') && parentPath !== '__focus__' && parentPath !== '__pinned__')
-    );
-    const isSelected = isExactSelected || isKeyTaskMatch || isMultiSelected;
+    const isKeyTaskMatch = selectedKey?.startsWith('task:') && selectedKey.endsWith(`:${task.id}`) && isTreeItem && !selectedKey.includes(':__focus__:') && !selectedKey.includes(':__pinned__:');
+
+    const isSelected = isFocusItem
+      ? selectedKey === `task:__focus__:${task.id}`
+      : isPinnedItem
+        ? selectedKey === `task:__pinned__:${task.id}`
+        : (isExactSelected || isKeyTaskMatch || (isMultiSelected && !selectedKey?.includes(':__focus__:') && !selectedKey?.includes(':__pinned__:')));
     const isUrgent = task.category === 'Urgent';
     const isRenamingHere = renamingItem?.type === 'task' && renamingItem.idOrPath === task.id && (!renamingItem.parentPath || renamingItem.parentPath === parentPath);
 
@@ -1245,6 +1406,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     return (
       <div
         key={itemKey}
+        id={`explorer-item-${encodeURIComponent(itemKey)}`}
         draggable={true}
         tabIndex={0}
         onDragStart={(e) => handleTaskDragStart(e, task)}
@@ -1437,7 +1599,6 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       id="explorer-tree-root"
       ref={treeRef}
       style={{ width: `${width}px` }}
-      onKeyDown={handleTreeKeyDown}
       onClick={() => {
         (window as any).__navforActivePane = 'explorer';
       }}
@@ -1497,6 +1658,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           <button
             onClick={() => {
               const target = getTargetFolderForNewItem();
+              if (target && collapsedFolders.has(target)) {
+                const next = new Set<string>(collapsedFolders);
+                next.delete(target);
+                saveCollapsed(next);
+              }
               setCreatingInFolder({ path: target, type: 'task' });
               setInlineInputValue('');
             }}
@@ -1510,6 +1676,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           <button
             onClick={() => {
               const target = getTargetFolderForNewItem();
+              if (target && collapsedFolders.has(target)) {
+                const next = new Set<string>(collapsedFolders);
+                next.delete(target);
+                saveCollapsed(next);
+              }
               setCreatingInFolder({ path: target, type: 'folder' });
               setInlineInputValue('');
             }}
@@ -1710,6 +1881,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               </button>
               <button
                 onClick={() => {
+                  if (activeMenu.idOrPath && collapsedFolders.has(activeMenu.idOrPath)) {
+                    const next = new Set<string>(collapsedFolders);
+                    next.delete(activeMenu.idOrPath);
+                    saveCollapsed(next);
+                  }
                   setCreatingInFolder({ path: activeMenu.idOrPath, type: 'task' });
                   setInlineInputValue('');
                   setActiveMenu(null);
@@ -1721,6 +1897,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               </button>
               <button
                 onClick={() => {
+                  if (activeMenu.idOrPath && collapsedFolders.has(activeMenu.idOrPath)) {
+                    const next = new Set<string>(collapsedFolders);
+                    next.delete(activeMenu.idOrPath);
+                    saveCollapsed(next);
+                  }
                   setCreatingInFolder({ path: activeMenu.idOrPath, type: 'folder' });
                   setInlineInputValue('');
                   setActiveMenu(null);

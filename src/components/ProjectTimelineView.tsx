@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -27,10 +27,10 @@ import {
   Check,
   X,
   RefreshCw,
-  Sparkles,
   ListTodo,
   RotateCcw,
-  LayoutGrid
+  LayoutGrid,
+  ArrowLeftRight
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
@@ -53,94 +53,18 @@ const DEFAULT_CUSTOM_COLUMNS: CustomTimelineColumn[] = [
   { id: 'phase-5', label: 'Phase 5' }
 ];
 
-const PRESETS: Record<string, { labelJa: string; labelEn: string; cols: CustomTimelineColumn[] }> = {
-  phases5: {
-    labelJa: 'フェーズ (Phase 1 - 5) [初期値]',
-    labelEn: 'Phases (Phase 1 - 5) [Default]',
-    cols: [
-      { id: 'phase-1', label: 'Phase 1' },
-      { id: 'phase-2', label: 'Phase 2' },
-      { id: 'phase-3', label: 'Phase 3' },
-      { id: 'phase-4', label: 'Phase 4' },
-      { id: 'phase-5', label: 'Phase 5' }
-    ]
-  },
-  phases3: {
-    labelJa: 'フェーズ (Phase 1 - 3)',
-    labelEn: 'Phases (Phase 1 - 3)',
-    cols: [
-      { id: 'phase-1', label: 'Phase 1' },
-      { id: 'phase-2', label: 'Phase 2' },
-      { id: 'phase-3', label: 'Phase 3' }
-    ]
-  },
-  devPhases: {
-    labelJa: '開発工程 (企画, 要件, 設計, 実装, 検証, 公開)',
-    labelEn: 'Dev Phases (Planning, Specs, Design, Implementation, QA, Release)',
-    cols: [
-      { id: 'phase-plan', label: '企画 (Planning)' },
-      { id: 'phase-spec', label: '要件 (Specs)' },
-      { id: 'phase-design', label: '設計 (Design)' },
-      { id: 'phase-dev', label: '実装 (Implementation)' },
-      { id: 'phase-qa', label: '検証 (QA/Test)' },
-      { id: 'phase-release', label: '公開 (Release)' }
-    ]
-  },
-  stages3: {
-    labelJa: '作業順 (Initial, Mid, Final)',
-    labelEn: 'Order (Initial, Mid, Final)',
-    cols: [
-      { id: 'order-initial', label: 'Initial' },
-      { id: 'order-mid', label: 'Mid' },
-      { id: 'order-final', label: 'Final' }
-    ]
-  },
-  days7: {
-    labelJa: '1日単位 (Day 1 - 7)',
-    labelEn: '1 Day (Day 1 - 7)',
-    cols: [
-      { id: 'day-1', label: 'Day 1' },
-      { id: 'day-2', label: 'Day 2' },
-      { id: 'day-3', label: 'Day 3' },
-      { id: 'day-4', label: 'Day 4' },
-      { id: 'day-5', label: 'Day 5' },
-      { id: 'day-6', label: 'Day 6' },
-      { id: 'day-7', label: 'Day 7' }
-    ]
-  },
-  weeks4: {
-    labelJa: '1週単位 (Week 1 - 4)',
-    labelEn: '1 Week (Week 1 - 4)',
-    cols: [
-      { id: 'week-1', label: 'Week 1' },
-      { id: 'week-2', label: 'Week 2' },
-      { id: 'week-3', label: 'Week 3' },
-      { id: 'week-4', label: 'Week 4' }
-    ]
-  }
-};
-
-export const detectPresetKey = (cols: CustomTimelineColumn[]): string => {
-  for (const [key, preset] of Object.entries(PRESETS)) {
-    if (preset.cols.length === cols.length && preset.cols.every((c, i) => c.id === cols[i]?.id)) {
-      return key;
-    }
-  }
-  return 'custom';
-};
-
 export const getTaskCurrentColumnId = (task: Task, cols: CustomTimelineColumn[]): string | undefined => {
-  const currentPreset = detectPresetKey(cols);
-  // 1. Check if task has a column assigned specifically for this preset
-  if (currentPreset !== 'custom' && task.timelinePresetColumns?.[currentPreset]) {
-    const presetColId = task.timelinePresetColumns[currentPreset];
-    if (cols.some(c => c.id === presetColId)) {
-      return presetColId;
-    }
-  }
-  // 2. Check general timelineColumn if it matches a column in the current custom columns
+  // 1. Check direct timelineColumn if it matches a column in current custom columns
   if (task.timelineColumn && cols.some(c => c.id === task.timelineColumn)) {
     return task.timelineColumn;
+  }
+  // 2. Check legacy timelinePresetColumns for backward compatibility
+  if (task.timelinePresetColumns) {
+    for (const colId of Object.values(task.timelinePresetColumns)) {
+      if (colId && cols.some(c => c.id === colId)) {
+        return colId;
+      }
+    }
   }
   return undefined;
 };
@@ -194,6 +118,8 @@ interface ProjectTimelineViewProps {
   onScheduleTask?: (taskId: string, deadline?: number) => void;
   onMoveTaskFolder?: (taskId: string, newProject: string) => void;
   onMoveFolder?: (sourceFolderPath: string, targetFolderPath: string) => void;
+  onRenameFolder?: (oldFolderPath: string, newFolderPath: string) => void;
+  onRenameTask?: (taskId: string, newTitle: string) => void;
   onToggleDone: (taskId: string) => void;
   onToggleStar: (taskId: string) => void;
   onTogglePin?: (taskId: string) => void;
@@ -220,6 +146,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   onScheduleTask,
   onMoveTaskFolder,
   onMoveFolder,
+  onRenameFolder,
+  onRenameTask,
   onToggleDone,
   onToggleStar,
   onTogglePin,
@@ -286,26 +214,6 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   // Column renaming state
   const [editingColumnId, setEditingColumnId] = useState<string | null>(null);
   const [editingColumnLabel, setEditingColumnLabel] = useState('');
-
-  // Preset dropdown toggle
-  const [isPresetOpen, setIsPresetOpen] = useState(false);
-  const presetDropdownRef = useRef<HTMLDivElement>(null);
-
-  // Close Presets dropdown when clicking outside
-  useEffect(() => {
-    if (!isPresetOpen) return;
-    const handleClickOutside = (e: MouseEvent | TouchEvent) => {
-      if (presetDropdownRef.current && !presetDropdownRef.current.contains(e.target as Node)) {
-        setIsPresetOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('touchstart', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('touchstart', handleClickOutside);
-    };
-  }, [isPresetOpen]);
 
   // Calendar Timeline view window state (start date, number of days visible)
   const [windowStartDate, setWindowStartDate] = useState<Date>(() => subDays(startOfDay(new Date()), 2));
@@ -418,6 +326,58 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [selectedFolderPath, setSelectedFolderPath] = useState<string | null>(null);
   const timelineGridRef = useRef<HTMLDivElement>(null);
 
+  // Inline rename state for folder or task
+  const [renamingItem, setRenamingItem] = useState<{
+    type: 'folder' | 'task';
+    idOrPath: string;
+    initialValue: string;
+  } | null>(null);
+  const [renameInputValue, setRenameInputValue] = useState('');
+
+  const startRenaming = (type: 'folder' | 'task', idOrPath: string, initialValue: string) => {
+    setRenamingItem({ type, idOrPath, initialValue });
+    setRenameInputValue(initialValue);
+  };
+
+  const handleRenameSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!renamingItem) return;
+
+    const val = renameInputValue.trim();
+    if (val && val !== renamingItem.initialValue) {
+      if (renamingItem.type === 'task') {
+        if (onRenameTask) {
+          onRenameTask(renamingItem.idOrPath, val);
+        }
+      } else {
+        // Folder rename
+        if (onRenameFolder) {
+          const oldPath = renamingItem.idOrPath;
+          const parts = oldPath.split('/');
+          parts[parts.length - 1] = val;
+          const newPath = parts.join('/');
+          onRenameFolder(oldPath, newPath);
+
+          // Update collapsedProjectPaths state
+          setCollapsedProjectPaths(prev => {
+            const next = new Set<string>();
+            prev.forEach(p => {
+              if (p === oldPath) next.add(newPath);
+              else if (p.startsWith(oldPath + '/')) next.add(p.replace(oldPath, newPath));
+              else next.add(p);
+            });
+            return next;
+          });
+
+          setSelectedFolderPath(newPath);
+          setSelectedKey(`folder:${newPath}`);
+        }
+      }
+    }
+    setRenamingItem(null);
+    setRenameInputValue('');
+  };
+
   // Sync selectedKey and selectedFolderPath when activeTaskId is selected from outside
   useEffect(() => {
     if (activeTaskId) {
@@ -485,11 +445,133 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     window.addEventListener('touchend', handleEnd);
   };
 
+  // User adjustable ToDo List column width
+  const [todoColWidth, setTodoColWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_todo_col_width');
+      if (saved) return parseInt(saved, 10);
+    } catch {}
+    return 160;
+  });
+
+  const isResizingTodo = useRef(false);
+  const startTodoXRef = useRef(0);
+  const startTodoWidthRef = useRef(0);
+
+  const handleStartTodoResize = (clientX: number) => {
+    isResizingTodo.current = true;
+    startTodoXRef.current = clientX;
+    startTodoWidthRef.current = todoColWidth;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const handleMove = (e: MouseEvent | TouchEvent) => {
+      if (!isResizingTodo.current) return;
+      const currentX = 'touches' in e ? e.touches[0].clientX : (e as MouseEvent).clientX;
+      const delta = currentX - startTodoXRef.current;
+      const newWidth = Math.max(100, Math.min(450, startTodoWidthRef.current + delta));
+      setTodoColWidth(newWidth);
+    };
+
+    const handleEnd = () => {
+      if (!isResizingTodo.current) return;
+      isResizingTodo.current = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleEnd);
+      window.removeEventListener('touchmove', handleMove);
+      window.removeEventListener('touchend', handleEnd);
+      try {
+        setTodoColWidth(w => {
+          localStorage.setItem('navfor_timeline_todo_col_width', String(w));
+          return w;
+        });
+      } catch {}
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('touchmove', handleMove, { passive: false });
+    window.addEventListener('touchend', handleEnd);
+  };
+
+  // User adjustable Phase (custom) columns width
+  const [customColWidths, setCustomColWidths] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_custom_col_widths');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {};
+  });
+
+  const isResizingCustomCol = useRef<string | null>(null);
+  const startCustomXRef = useRef(0);
+  const startCustomWidthRef = useRef(0);
+
+  const defaultCustomColWidth = useMemo(() => {
+    const subs = isGridEnabled ? stageSubdivisions : 1;
+    if (!isGridEnabled) return 200;
+    if (subs <= 2) return 200;
+    if (subs <= 3) return 240;
+    if (subs <= 4) return 272;
+    return 300;
+  }, [isGridEnabled, stageSubdivisions]);
+
+  const getCustomColWidth = useCallback((colId: string): number => {
+    return customColWidths[colId] || defaultCustomColWidth;
+  }, [customColWidths, defaultCustomColWidth]);
+
+  const handleStartCustomColResize = (colId: string, clientX: number) => {
+    isResizingCustomCol.current = colId;
+    startCustomXRef.current = clientX;
+    startCustomWidthRef.current = getCustomColWidth(colId);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const handleMove = (e: MouseEvent | TouchEvent) => {
+      if (!isResizingCustomCol.current) return;
+      const currentX = 'touches' in e ? e.touches[0].clientX : (e as MouseEvent).clientX;
+      const delta = currentX - startCustomXRef.current;
+      const newWidth = Math.max(120, Math.min(800, startCustomWidthRef.current + delta));
+      setCustomColWidths(prev => ({
+        ...prev,
+        [colId]: newWidth
+      }));
+    };
+
+    const handleEnd = () => {
+      if (!isResizingCustomCol.current) return;
+      isResizingCustomCol.current = null;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleEnd);
+      window.removeEventListener('touchmove', handleMove);
+      window.removeEventListener('touchend', handleEnd);
+      try {
+        setCustomColWidths(widths => {
+          localStorage.setItem('navfor_timeline_custom_col_widths', JSON.stringify(widths));
+          return widths;
+        });
+      } catch {}
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('touchmove', handleMove, { passive: false });
+    window.addEventListener('touchend', handleEnd);
+  };
+
   const handleResetColumnWidths = () => {
     const defaultProj = typeof window !== 'undefined' && window.innerWidth < 640 ? 210 : 256;
     setProjectColWidth(defaultProj);
+    setTodoColWidth(160);
+    setCustomColWidths({});
     try {
       localStorage.removeItem('navfor_timeline_project_col_width');
+      localStorage.removeItem('navfor_timeline_todo_col_width');
+      localStorage.removeItem('navfor_timeline_custom_col_widths');
     } catch {}
   };
 
@@ -546,22 +628,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const totalGridWidth = useMemo(() => totalSlots * slotWidth, [totalSlots, slotWidth]);
 
   // Grid calculations for Custom/Stages Mode (Dates pattern without dates)
-  const customSubSlotWidth = useMemo(() => {
-    if (!isGridEnabled) return 180;
-    if (stageSubdivisions <= 2) return 100;
-    if (stageSubdivisions <= 3) return 80;
-    if (stageSubdivisions <= 4) return 68;
-    return 60;
-  }, [isGridEnabled, stageSubdivisions]);
-
-  const customColWidth = useMemo(() => {
-    const effectiveSubs = isGridEnabled ? stageSubdivisions : 1;
-    return Math.max(150, effectiveSubs * customSubSlotWidth);
-  }, [isGridEnabled, stageSubdivisions, customSubSlotWidth]);
-
   const totalCustomGridWidth = useMemo(() => {
-    return customColumns.length * customColWidth;
-  }, [customColumns.length, customColWidth]);
+    return customColumns.reduce((sum, col) => sum + getCustomColWidth(col.id), 0);
+  }, [customColumns, getCustomColWidth]);
 
   interface GridSlotInfo {
     index: number;
@@ -706,8 +775,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       const next = new Set(prev);
       const isCurrentlyCollapsed = next.has(path);
       if (isCurrentlyCollapsed) {
-        // Expanding parent: remove from collapsed set
+        // Expanding parent: remove parent AND all its child/descendant folders so children are toggled open
         next.delete(path);
+        projectTree.forEach(p => {
+          if (p.fullPath.startsWith(path + '/')) {
+            next.delete(p.fullPath);
+          }
+        });
       } else {
         // Collapsing parent: collapse this folder AND all its child/descendant folders
         next.add(path);
@@ -859,6 +933,87 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     return { placed, laneHeight };
   };
 
+  interface PlacedCustomTask {
+    task: Task;
+    startPx: number;
+    widthPx: number;
+    endPx: number;
+    rowIdx: number;
+    topPx: number;
+    colIdx: number;
+    stepIdx: number;
+  }
+
+  // Calculate layout of tasks for a project lane on the Custom Stages grid (Dates pattern without dates)
+  const getPlacedCustomTasksForProject = (projectTasks: Task[]) => {
+    // Tasks assigned to a custom column
+    const scheduled = projectTasks.filter(t => Boolean(getTaskCurrentColumnId(t, customColumns)));
+
+    // Sort by column index, then timelineStep, then order, then createdAt
+    const colOrderMap = new Map<string, number>(customColumns.map((c, idx) => [c.id, idx]));
+    scheduled.sort((a, b) => {
+      const colA = colOrderMap.get(getTaskCurrentColumnId(a, customColumns) || '') ?? 999;
+      const colB = colOrderMap.get(getTaskCurrentColumnId(b, customColumns) || '') ?? 999;
+      if (colA !== colB) return colA - colB;
+      const stepA = a.timelineStep ?? 0;
+      const stepB = b.timelineStep ?? 0;
+      if (stepA !== stepB) return stepA - stepB;
+      return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
+    });
+
+    const placed: PlacedCustomTask[] = [];
+    const rowEndPx: number[] = [];
+    const effectiveSubs = isGridEnabled ? stageSubdivisions : 1;
+
+    // Cumulative horizontal start offsets for each custom column
+    const colOffsets: number[] = [];
+    let accX = 0;
+    customColumns.forEach(col => {
+      colOffsets.push(accX);
+      accX += getCustomColWidth(col.id);
+    });
+
+    scheduled.forEach(task => {
+      const colId = getTaskCurrentColumnId(task, customColumns);
+      const colIdx = customColumns.findIndex(c => c.id === colId);
+      if (colIdx === -1) return;
+
+      const rawStep = task.timelineStep ?? 0;
+      const stepIdx = Math.max(0, Math.min(effectiveSubs - 1, rawStep));
+
+      const thisColWidth = getCustomColWidth(colId!);
+      const thisSubSlotWidth = thisColWidth / effectiveSubs;
+
+      // Horizontal coordinate calculation
+      const startPx = colOffsets[colIdx] + stepIdx * thisSubSlotWidth + 4;
+      // Width of chip: spans comfortably within step slot, minimum 110px
+      const widthPx = Math.max(110, Math.min(thisColWidth - 8, thisSubSlotWidth * 1.5 - 8));
+      const endPx = startPx + widthPx;
+
+      let rowIdx = 0;
+      while (rowIdx < rowEndPx.length && startPx < (rowEndPx[rowIdx] + 6)) {
+        rowIdx++;
+      }
+
+      rowEndPx[rowIdx] = endPx;
+      const topPx = 6 + rowIdx * 34;
+
+      placed.push({
+        task,
+        startPx,
+        widthPx,
+        endPx,
+        rowIdx,
+        topPx,
+        colIdx,
+        stepIdx
+      });
+    });
+
+    const laneHeight = Math.max(54, (rowEndPx.length || 1) * 34 + 14);
+    return { placed, laneHeight };
+  };
+
   const handleGridDrop = (e: React.DragEvent, projectPath: string, targetTimeMs: number) => {
     const data = getDraggedTaskData(e);
     if (!data?.taskId) return;
@@ -874,6 +1029,24 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     } else {
       if (onMoveTaskFolder) onMoveTaskFolder(data.taskId, projectPath);
       if (onScheduleTask) onScheduleTask(data.taskId, targetTimeMs);
+    }
+    (window as any).__navforDraggingTask = null;
+  };
+
+  const handleCustomGridDrop = (e: React.DragEvent, projectPath: string, columnId: string, stepIdx: number) => {
+    const data = getDraggedTaskData(e);
+    if (!data?.taskId) return;
+
+    const updates: Partial<Task> = {
+      project: projectPath,
+      timelineColumn: columnId,
+      timelineStep: stepIdx
+    };
+
+    if (onUpdateTask) {
+      onUpdateTask(data.taskId, updates);
+    } else {
+      if (onMoveTaskFolder) onMoveTaskFolder(data.taskId, projectPath);
     }
     (window as any).__navforDraggingTask = null;
   };
@@ -1144,6 +1317,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         return;
       }
 
+      // ENTER or F2: Inline rename task title (like Explorer)
+      if (e.key === 'Enter' || e.key === 'F2') {
+        e.preventDefault();
+        const task = tasks.find(t => t.id === activeTaskId);
+        if (task) {
+          startRenaming('task', task.id, task.title);
+        }
+        return;
+      }
+
       // ESCAPE: Clear selection
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -1203,9 +1386,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         }
         return;
       }
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' || e.key === 'F2') {
         e.preventDefault();
-        toggleProjectCollapse(curPath);
+        const parts = curPath.split('/');
+        const folderName = parts[parts.length - 1];
+        startRenaming('folder', curPath, folderName);
         return;
       }
     }
@@ -1242,7 +1427,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         activeEl?.tagName === 'INPUT' ||
         activeEl?.tagName === 'TEXTAREA' ||
         activeEl?.tagName === 'SELECT' ||
-        activeEl?.isContentEditable
+        activeEl?.isContentEditable ||
+        renamingItem
       ) {
         return;
       }
@@ -1265,13 +1451,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         }
       }
 
-      // Ignore if dialog, preset dropdown, or quick-add is active
-      if (document.querySelector('[role="dialog"]') || isPresetOpen || quickAddCell) {
+      // Ignore if dialog or quick-add is active
+      if (document.querySelector('[role="dialog"]') || quickAddCell) {
         return;
       }
 
-      // Handle arrow keys, enter, space, escape
-      if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Enter', ' ', 'Escape'].includes(e.key)) {
+      // Handle arrow keys, enter, space, escape, f2
+      if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Enter', ' ', 'Escape', 'F2'].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation?.();
@@ -1281,7 +1467,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
     window.addEventListener('keydown', handleGlobalKeyDown, true);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
-  }, [activeTaskId, selectedFolderPath, selectedKey, collapsedProjectPaths, isPresetOpen, quickAddCell, visibleProjectTree, tasks, slotDurationMs, timelineStartMs]);
+  }, [activeTaskId, selectedFolderPath, selectedKey, collapsedProjectPaths, quickAddCell, visibleProjectTree, tasks, slotDurationMs, timelineStartMs, renamingItem]);
 
   const handleNavigate = (direction: 'prev' | 'next' | 'today') => {
     if (direction === 'today') {
@@ -1293,10 +1479,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  // Add custom column
+  // Add custom column (Phase)
   const handleAddColumn = () => {
-    const newId = `col-${Date.now()}`;
-    const newLabel = `${isJa ? '列' : 'Column'} ${customColumns.length + 1}`;
+    const nextNum = customColumns.length + 1;
+    const newId = `phase-${Date.now()}`;
+    const newLabel = `Phase ${nextNum}`;
     saveCustomColumns([...customColumns, { id: newId, label: newLabel }]);
     setEditingColumnId(newId);
     setEditingColumnLabel(newLabel);
@@ -1320,15 +1507,6 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     if (customColumns.length <= 1) return;
     const updated = customColumns.filter(col => col.id !== colId);
     saveCustomColumns(updated);
-  };
-
-  // Apply preset
-  const handleApplyPreset = (key: string) => {
-    const preset = PRESETS[key];
-    if (preset) {
-      saveCustomColumns(preset.cols);
-    }
-    setIsPresetOpen(false);
   };
 
   // Drag and drop task & folder handling
@@ -1454,34 +1632,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           updates.timelineColumn = undefined;
         }
       } else {
-        const currentPreset = detectPresetKey(customColumns);
-        const newPresetCols: Record<string, string> = { ...(draggedTask?.timelinePresetColumns || {}) };
-
-        // If task has an existing timelineColumn from another preset, preserve it
-        if (draggedTask?.timelineColumn) {
-          for (const [pKey, pVal] of Object.entries(PRESETS)) {
-            if (pVal.cols.some(c => c.id === draggedTask.timelineColumn)) {
-              if (!newPresetCols[pKey]) newPresetCols[pKey] = draggedTask.timelineColumn;
-            }
-          }
-        }
-
         if (slot.columnId) {
-          if (currentPreset !== 'custom') {
-            newPresetCols[currentPreset] = slot.columnId;
-          }
-          updates.timelinePresetColumns = newPresetCols;
           updates.timelineColumn = slot.columnId;
+          if (updates.timelineStep === undefined) {
+            updates.timelineStep = draggedTask?.timelineStep ?? 0;
+          }
           // In custom columns: do NOT clear deadline, original deadline is preserved
         } else {
-          // In ToDo List (backlog): clear column for this preset, preserve other presets
-          if (currentPreset !== 'custom') {
-            delete newPresetCols[currentPreset];
-          }
-          updates.timelinePresetColumns = newPresetCols;
-          if (draggedTask?.timelineColumn && customColumns.some(c => c.id === draggedTask.timelineColumn)) {
-            updates.timelineColumn = undefined;
-          }
+          // In ToDo List (backlog): remove from column
+          updates.timelineColumn = undefined;
+          updates.timelineStep = undefined;
         }
       }
 
@@ -1539,31 +1699,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       };
 
       if (timelineMode === 'custom') {
-        const currentPreset = detectPresetKey(customColumns);
-        const newPresetCols: Record<string, string> = { ...(draggedTask?.timelinePresetColumns || {}) };
-
-        if (draggedTask?.timelineColumn) {
-          for (const [pKey, pVal] of Object.entries(PRESETS)) {
-            if (pVal.cols.some(c => c.id === draggedTask.timelineColumn)) {
-              if (!newPresetCols[pKey]) newPresetCols[pKey] = draggedTask.timelineColumn;
-            }
-          }
-        }
-
         if (targetColId) {
-          if (currentPreset !== 'custom') {
-            newPresetCols[currentPreset] = targetColId;
-          }
-          updates.timelinePresetColumns = newPresetCols;
           updates.timelineColumn = targetColId;
+          updates.timelineStep = targetTask.timelineStep ?? 0;
         } else {
-          if (currentPreset !== 'custom') {
-            delete newPresetCols[currentPreset];
-          }
-          updates.timelinePresetColumns = newPresetCols;
-          if (draggedTask?.timelineColumn && customColumns.some(c => c.id === draggedTask.timelineColumn)) {
-            updates.timelineColumn = undefined;
-          }
+          updates.timelineColumn = undefined;
+          updates.timelineStep = undefined;
         }
       } else {
         updates.timelineColumn = isTargetBacklog ? undefined : targetTask.timelineColumn;
@@ -1629,18 +1770,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
 
     const { project, type, dateMs, columnId } = quickAddCell;
-    const currentPreset = detectPresetKey(customColumns);
-    const presetCols: Record<string, string> = {};
-    if (columnId && currentPreset !== 'custom') {
-      presetCols[currentPreset] = columnId;
-    }
 
     await onAddTask({
       title: quickAddTitle.trim(),
       project,
       deadline: type === 'calendar' ? dateMs : undefined,
       timelineColumn: type === 'custom' ? columnId : undefined,
-      timelinePresetColumns: Object.keys(presetCols).length > 0 ? presetCols : undefined,
+      timelineStep: type === 'custom' ? (quickAddCell.stepIdx ?? 0) : undefined,
       isAllDay: true,
       order: Date.now() % 10000
     });
@@ -1725,43 +1861,26 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               </button>
             </div>
           ) : (
-            /* Custom Columns Controls (Presets & Add Column) */
+            /* Custom Columns Controls (Add Column & Reset) */
             <div className="flex items-center gap-1.5">
-              {/* Presets Dropdown */}
-              <div className="relative" ref={presetDropdownRef}>
-                <button
-                  onClick={() => setIsPresetOpen(!isPresetOpen)}
-                  className="px-2.5 py-1 text-[11px] font-semibold bg-white border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-700 flex items-center gap-1 shadow-2xs"
-                >
-                  <Sparkles size={12} className="text-amber-500" />
-                  <span>{isJa ? 'プリセット' : 'Presets'}</span>
-                  <ChevronDown size={11} className="text-slate-400" />
-                </button>
-
-                {isPresetOpen && (
-                  <div className="absolute left-0 top-full mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-2xl py-1 z-50 text-xs">
-                    {Object.entries(PRESETS).map(([key, preset]) => (
-                      <button
-                        key={key}
-                        onClick={() => handleApplyPreset(key)}
-                        className="w-full text-left px-3 py-1.5 hover:bg-indigo-50 hover:text-indigo-600 transition-colors flex items-center justify-between"
-                      >
-                        <span>{isJa ? preset.labelJa : preset.labelEn}</span>
-                        <span className="text-[10px] text-slate-400 font-mono">({preset.cols.length})</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
               {/* Add Column Button */}
               <button
                 onClick={handleAddColumn}
-                className="px-2 py-1 text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1"
-                title={isJa ? "縦列を追加" : "Add Column"}
+                className="px-2 py-1 text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
+                title={isJa ? "Phase列を追加" : "Add Phase Column"}
               >
                 <Plus size={13} />
                 <span>{isJa ? "列を追加" : "Add Column"}</span>
+              </button>
+
+              {/* Reset Custom Phases (Names & Count) Button */}
+              <button
+                onClick={handleResetCustomColumns}
+                className="px-2 py-1 text-[11px] font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
+                title={isJa ? "列名・列数を初期値（Phase 1〜5）にリセット" : "Reset phases configuration (names and count) to default (Phase 1-5)"}
+              >
+                <RefreshCw size={12} className="text-slate-500" />
+                <span>{isJa ? "列構成リセット" : "Reset Phases"}</span>
               </button>
             </div>
           )}
@@ -1816,14 +1935,14 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </span>
           </button>
 
-          {/* Reset Column Widths Button */}
+          {/* Reset All Column Widths Button */}
           <button
             onClick={handleResetColumnWidths}
             className="px-2.5 py-1 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
-            title={isJa ? "列幅を初期設定にリセット" : "Reset column widths to default"}
+            title={isJa ? "プロジェクト、ToDo、フェーズの全列幅を初期値にリセット" : "Reset all column widths to default"}
           >
-            <RotateCcw size={12} className="text-slate-500 shrink-0" />
-            <span>{isJa ? "リセット" : "Reset"}</span>
+            <ArrowLeftRight size={12} className="text-slate-500 shrink-0" />
+            <span>{isJa ? "列幅リセット" : "Reset Widths"}</span>
           </button>
 
           {/* ToDo List (Unscheduled) Column Toggle */}
@@ -1965,8 +2084,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             title={isJa ? "サブプロジェクトをここにドロップすると最上位プロジェクト化できます" : "Drop subproject here to make it a top-level project"}
           >
             <div className="flex items-center gap-1.5 min-w-0 flex-1">
-              <span className="truncate">{isJa ? 'プロジェクト / レーン' : 'Projects / Lanes'}</span>
-              <span className="text-[10px] text-slate-400 font-mono">({projectTree.length})</span>
+              <span className="truncate">{isJa ? 'プロジェクトレーン' : 'Project Lanes'}</span>
             </div>
 
             {/* Quick Add Project Folder Button */}
@@ -2004,11 +2122,31 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
           {/* ToDo List Column Header */}
           {showUnscheduledColumn && (
-            <div className="w-36 sm:w-44 shrink-0 px-2.5 py-2 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between">
-              <span className="flex items-center gap-1.5 font-bold">
-                <ListTodo size={13} className="text-amber-600" />
-                {isJa ? 'ToDo リスト' : 'ToDo List'}
+            <div 
+              style={{ width: `${todoColWidth}px` }}
+              className="shrink-0 px-2.5 py-2 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between relative group/todocol"
+            >
+              <span className="flex items-center gap-1.5 font-bold truncate">
+                <ListTodo size={13} className="text-amber-600 shrink-0" />
+                <span className="truncate">{isJa ? 'ToDo リスト' : 'ToDo List'}</span>
               </span>
+
+              {/* Draggable resize handle on right edge */}
+              <div
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleStartTodoResize(e.clientX);
+                }}
+                onTouchStart={(e) => {
+                  e.stopPropagation();
+                  handleStartTodoResize(e.touches[0].clientX);
+                }}
+                className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-amber-500/50 active:bg-amber-600 transition-colors z-40 flex items-center justify-center group-hover/todocol:bg-amber-300/60"
+                title={isJa ? "ドラッグしてToDoリスト列幅を調整" : "Drag to resize ToDo list column width"}
+              >
+                <div className="w-0.5 h-3.5 bg-amber-400 rounded-full" />
+              </div>
             </div>
           )}
 
@@ -2065,15 +2203,17 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </div>
           ) : (
             /* Custom Abstract Columns Header */
-            <div className="flex flex-1 min-w-max">
+            <div className="flex flex-1 min-w-max" style={{ width: `${totalCustomGridWidth + 48}px` }}>
               {customColumns.map(col => {
                 const isEditing = editingColumnId === col.id;
+                const colWidth = getCustomColWidth(col.id);
+                const stepWidth = isGridEnabled && stageSubdivisions > 1 ? colWidth / stageSubdivisions : colWidth;
 
                 return (
                   <div
                     key={col.id}
-                    style={{ width: `${customColWidth}px` }}
-                    className="shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative"
+                    style={{ width: `${colWidth}px` }}
+                    className="shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative select-none"
                   >
                     <div className="px-2 py-1.5 flex items-center justify-between">
                       {isEditing ? (
@@ -2104,7 +2244,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           >
                             {col.label}
                           </span>
-                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity mr-2">
                             <button
                               onClick={() => {
                                 setEditingColumnId(col.id);
@@ -2135,15 +2275,32 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         {Array.from({ length: stageSubdivisions }).map((_, sIdx) => (
                           <div
                             key={sIdx}
-                            style={{ width: `${customSubSlotWidth}px` }}
+                            style={{ width: `${stepWidth}px` }}
                             className="text-center py-0.5 truncate select-none"
                             title={`Step ${sIdx + 1}`}
                           >
-                            S{sIdx + 1}
+                            Step {sIdx + 1}
                           </div>
                         ))}
                       </div>
                     )}
+
+                    {/* Draggable resize handle on right edge */}
+                    <div
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleStartCustomColResize(col.id, e.clientX);
+                      }}
+                      onTouchStart={(e) => {
+                        e.stopPropagation();
+                        handleStartCustomColResize(col.id, e.touches[0].clientX);
+                      }}
+                      className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-30 flex items-center justify-center group-hover:bg-slate-300/60"
+                      title={isJa ? `ドラッグして「${col.label}」の列幅を調整` : `Drag to resize ${col.label} column width`}
+                    >
+                      <div className="w-0.5 h-3.5 bg-slate-400 rounded-full" />
+                    </div>
                   </div>
                 );
               })}
@@ -2152,7 +2309,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 onClick={handleAddColumn}
                 className="w-12 shrink-0 border-r border-slate-200 flex items-center justify-center text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
-                title={isJa ? "新しい列を追加" : "Add new column"}
+                title={isJa ? "新しいPhase列を追加" : "Add new Phase column"}
               >
                 <Plus size={14} />
               </button>
@@ -2181,8 +2338,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               return !getTaskCurrentColumnId(t, customColumns);
             }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
 
-            // Fine grid task placements and calculated dynamic lane height for calendar mode
-            const { placed, laneHeight } = getPlacedTasksForProject(projectTasks);
+            // Fine grid task placements and dynamic lane height for calendar and custom stages
+            const { placed: calendarPlaced, laneHeight: calendarLaneHeight } = getPlacedTasksForProject(projectTasks);
+            const { placed: customPlaced, laneHeight: customLaneHeight } = getPlacedCustomTasksForProject(projectTasks);
+            const placed = calendarPlaced;
+            const laneHeight = timelineMode === 'calendar' ? calendarLaneHeight : customLaneHeight;
 
             return (
               <div 
@@ -2242,16 +2402,52 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
                     <Folder size={13} className={cn("shrink-0 transition-colors", project.level === 0 ? "text-indigo-600" : "text-amber-500")} />
 
-                    <span className="text-xs truncate font-mono tracking-tight flex-1 min-w-0" title={project.fullPath}>
-                      {project.name}
-                    </span>
+                    {renamingItem?.type === 'folder' && renamingItem.idOrPath === project.fullPath ? (
+                      <form 
+                        onSubmit={handleRenameSubmit} 
+                        onClick={(e) => e.stopPropagation()} 
+                        className="flex-1 min-w-0 mr-1"
+                      >
+                        <input
+                          autoFocus
+                          type="text"
+                          value={renameInputValue}
+                          onChange={(e) => setRenameInputValue(e.target.value)}
+                          onBlur={handleRenameSubmit}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') setRenamingItem(null);
+                          }}
+                          className="w-full bg-white border border-indigo-500 rounded px-1.5 py-0.5 text-xs outline-none shadow-2xs font-mono font-normal text-slate-800 focus:ring-1 focus:ring-indigo-400"
+                        />
+                      </form>
+                    ) : (
+                      <span 
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          startRenaming('folder', project.fullPath, project.name);
+                        }}
+                        className="text-xs truncate font-mono tracking-tight flex-1 min-w-0" 
+                        title={isJa ? `${project.fullPath} (選択してEnterまたはダブルクリックで名前変更)` : `${project.fullPath} (Select & Enter or double-click to rename)`}
+                      >
+                        {project.name}
+                      </span>
+                    )}
                   </div>
 
-                  {/* Task counter, subfolder add, and quick task add buttons */}
+                  {/* Subfolder add, rename, and quick task add buttons */}
                   <div className="flex items-center gap-1 shrink-0 ml-1">
-                    <span className="text-[10px] font-mono text-slate-400 px-1 py-0.5 bg-slate-100 rounded">
-                      {project.tasks.length}
-                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startRenaming('folder', project.fullPath, project.name);
+                      }}
+                      className="hidden group-hover/lane:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                      title={isJa ? 'フォルダ名を変更' : 'Rename folder'}
+                    >
+                      <Edit2 size={11} />
+                    </button>
                     <button
                       type="button"
                       onClick={(e) => {
@@ -2301,9 +2497,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           columnId: null 
                         } as any)}
                         className={cn(
-                          "w-36 sm:w-44 shrink-0 p-1.5 border-r border-slate-200/80 bg-amber-50/20 flex flex-col gap-1 min-h-[56px] transition-colors relative",
+                          "shrink-0 p-1.5 border-r border-slate-200/80 bg-amber-50/20 flex flex-col gap-1 min-h-[56px] transition-colors relative",
                           dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === 'backlog' && "bg-amber-100/70 border-2 border-dashed border-amber-500"
                         )}
+                        style={{ width: `${todoColWidth}px` }}
                       >
                         {/* Task items in unscheduled */}
                         {unscheduledTasks.map((task) => renderTaskChip(task))}
@@ -2456,99 +2653,144 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         )}
                       </div>
                     ) : (
-                      /* Custom Abstract Columns Cells */
-                      <div className="flex flex-1 min-w-max">
-                        {customColumns.map(col => {
-                          const colKey = col.id;
-                          const isDragOver = dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === colKey;
+                      /* Custom Abstract Columns / Stages Grid Lane (Dates pattern without dates) */
+                      <div 
+                        style={{ width: `${totalCustomGridWidth + 48}px`, height: `${laneHeight}px`, minHeight: '56px' }}
+                        className="relative flex-1 shrink-0 select-none bg-white"
+                      >
+                        {/* Background Phase & Step Grid Slots */}
+                        <div className="absolute inset-0 flex pointer-events-auto">
+                          {customColumns.map((col) => {
+                            const effectiveSubs = isGridEnabled ? stageSubdivisions : 1;
+                            const colWidth = getCustomColWidth(col.id);
+                            const stepWidth = colWidth / effectiveSubs;
 
-                          // Find tasks matching this custom column using per-preset resolver
-                          const cellTasks = projectTasks.filter(t => getTaskCurrentColumnId(t, customColumns) === col.id)
-                            .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+                            return (
+                              <div
+                                key={col.id}
+                                style={{ width: `${colWidth}px` }}
+                                className="flex divide-x divide-slate-100/80 border-r border-slate-300 h-full shrink-0"
+                              >
+                                {Array.from({ length: effectiveSubs }).map((_, sIdx) => {
+                                  const slotKey = `custom-${project.fullPath}-${col.id}-${sIdx}`;
+                                  const isDragOver = dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === slotKey;
+
+                                  return (
+                                    <div
+                                      key={sIdx}
+                                      style={{ width: `${stepWidth}px` }}
+                                      onDragOver={(e) => {
+                                        e.preventDefault();
+                                        setDragOverCell({ project: project.fullPath, slotKey });
+                                      }}
+                                      onDragLeave={() => setDragOverCell(null)}
+                                      onDrop={(e) => {
+                                        e.preventDefault();
+                                        setDragOverCell(null);
+                                        handleCustomGridDrop(e, project.fullPath, col.id, sIdx);
+                                      }}
+                                      onDoubleClick={(e) => {
+                                        e.stopPropagation();
+                                        setQuickAddCell({
+                                          project: project.fullPath,
+                                          slotKey,
+                                          type: 'custom',
+                                          columnId: col.id,
+                                          stepIdx: sIdx
+                                        });
+                                        setQuickAddTitle('');
+                                      }}
+                                      className={cn(
+                                        "h-full transition-colors relative group/slot cursor-pointer shrink-0",
+                                        isDragOver && "bg-indigo-100 border-2 border-dashed border-indigo-500",
+                                        "hover:bg-indigo-50/30"
+                                      )}
+                                      title={isJa 
+                                        ? `${col.label} (Step ${sIdx + 1}) - ダブルクリックでタスク追加 / ドラッグして配置` 
+                                        : `${col.label} (Step ${sIdx + 1}) - Double-click to add task / Drag to place`}
+                                    />
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+
+                          {/* End of columns Add Button Filler in Lane */}
+                          <div 
+                            onClick={handleAddColumn}
+                            className="w-12 shrink-0 border-r border-slate-200/60 bg-slate-50/20 hover:bg-indigo-50/40 cursor-pointer flex items-center justify-center text-slate-300 hover:text-indigo-600 transition-colors"
+                            title={isJa ? "新しいPhase列を追加" : "Add new Phase column"}
+                          >
+                            <Plus size={13} />
+                          </div>
+                        </div>
+
+                        {/* Placed Task Chips on Custom Stages Grid */}
+                        <div className="absolute inset-0 pointer-events-none">
+                          {customPlaced.map(({ task, startPx, widthPx, topPx }) => (
+                            <div
+                              key={task.id}
+                              style={{
+                                position: 'absolute',
+                                left: `${startPx}px`,
+                                top: `${topPx}px`,
+                                width: `${widthPx}px`,
+                                pointerEvents: 'auto'
+                              }}
+                            >
+                              {renderTaskChip(task)}
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Quick Add Form in clicked custom grid slot */}
+                        {quickAddCell?.project === project.fullPath && quickAddCell?.type === 'custom' && (() => {
+                          let offsetLeft = 0;
+                          const targetIdx = customColumns.findIndex(c => c.id === quickAddCell.columnId);
+                          if (targetIdx !== -1) {
+                            for (let i = 0; i < targetIdx; i++) {
+                              offsetLeft += getCustomColWidth(customColumns[i].id);
+                            }
+                            const targetColWidth = getCustomColWidth(quickAddCell.columnId!);
+                            const targetSubs = isGridEnabled ? stageSubdivisions : 1;
+                            offsetLeft += (quickAddCell.stepIdx ?? 0) * (targetColWidth / targetSubs);
+                          }
 
                           return (
                             <div
-                              key={col.id}
-                              style={{ width: `${customColWidth}px` }}
-                              onDragOver={(e) => {
-                                e.preventDefault();
-                                setDragOverCell({ project: project.fullPath, slotKey: colKey });
+                              style={{
+                                position: 'absolute',
+                                left: `${Math.min(Math.max(0, totalCustomGridWidth - 220), offsetLeft)}px`,
+                                top: '4px',
+                                width: '210px',
+                                zIndex: 40
                               }}
-                              onDragLeave={() => setDragOverCell(null)}
-                              onDrop={(e) => handleCellDrop(e, project.fullPath, { type: 'custom', columnId: col.id })}
-                              onDoubleClick={() => {
-                                setQuickAddCell({ 
-                                  project: project.fullPath, 
-                                  slotKey: colKey, 
-                                  type: 'custom', 
-                                  columnId: col.id 
-                                });
-                                setQuickAddTitle('');
-                              }}
-                              className={cn(
-                                "shrink-0 p-1.5 border-r border-slate-100 flex flex-col gap-1 min-h-[56px] transition-colors relative group/cell",
-                                isDragOver && "bg-indigo-100 border-2 border-dashed border-indigo-500"
-                              )}
+                              className="bg-white p-1 rounded-lg shadow-xl border border-indigo-400 pointer-events-auto"
+                              onClick={(e) => e.stopPropagation()}
                             >
-                              {/* Background fine grid division lines when Grid is enabled */}
-                              {isGridEnabled && stageSubdivisions > 1 && (
-                                <div className="absolute inset-0 pointer-events-none flex divide-x divide-slate-100/80 border-r border-slate-200/60">
-                                  {Array.from({ length: stageSubdivisions }).map((_, sIdx) => (
-                                    <div key={sIdx} style={{ width: `${customSubSlotWidth}px` }} className="h-full" />
-                                  ))}
-                                </div>
-                              )}
-
-                              {/* Render Task Chips sorted in sequence */}
-                              <div className="relative z-10 flex flex-col gap-1 w-full">
-                                {cellTasks.map((task) => renderTaskChip(task))}
-                              </div>
-
-                              {/* Quick Add input in custom cell */}
-                              {quickAddCell?.project === project.fullPath && quickAddCell?.slotKey === colKey ? (
-                                <form onSubmit={handleQuickAddSubmit} className="mt-1 relative z-20">
-                                  <input
-                                    autoFocus
-                                    type="text"
-                                    placeholder={isJa ? "タスク名..." : "Task name..."}
-                                    value={quickAddTitle}
-                                    onChange={(e) => setQuickAddTitle(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      e.stopPropagation();
-                                      if (e.key === 'Escape') {
-                                        setQuickAddCell(null);
-                                        setQuickAddTitle('');
-                                      }
-                                    }}
-                                    onBlur={() => {
-                                      if (!quickAddTitle.trim()) setQuickAddCell(null);
-                                    }}
-                                    className="w-full bg-white border border-indigo-300 rounded px-1.5 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
-                                  />
-                                </form>
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    setQuickAddCell({ 
-                                      project: project.fullPath, 
-                                      slotKey: colKey, 
-                                      type: 'custom', 
-                                      columnId: col.id 
-                                    });
-                                    setQuickAddTitle('');
+                              <form onSubmit={handleQuickAddSubmit}>
+                                <input
+                                  autoFocus
+                                  type="text"
+                                  placeholder={isJa ? "タスク名を入力..." : "Task name..."}
+                                  value={quickAddTitle}
+                                  onChange={(e) => setQuickAddTitle(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    e.stopPropagation();
+                                    if (e.key === 'Escape') {
+                                      setQuickAddCell(null);
+                                      setQuickAddTitle('');
+                                    }
                                   }}
-                                  className="w-full py-0.5 rounded text-[10px] text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 transition-colors opacity-0 group-hover/cell:opacity-100 mt-auto flex items-center justify-center gap-0.5 relative z-20"
-                                  title={isJa ? 'この列にタスク作成' : 'Add task in this column'}
-                                >
-                                  <Plus size={11} />
-                                </button>
-                              )}
+                                  onBlur={() => {
+                                    if (!quickAddTitle.trim()) setQuickAddCell(null);
+                                  }}
+                                  className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
+                                />
+                              </form>
                             </div>
                           );
-                        })}
-
-                        {/* Filler space matching header Add button */}
-                        <div className="w-12 shrink-0 border-r border-slate-100 bg-slate-50/20" />
+                        })()}
                       </div>
                     )}
                   </>
@@ -2613,11 +2855,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 if (!customFolders.includes(fullPath)) {
                   saveCustomFolders([...customFolders, fullPath]);
                 }
-                // Auto expand parent if collapsed
-                if (targetParentFolder && collapsedProjectPaths.has(targetParentFolder)) {
+                // Auto expand parent and all its ancestors if collapsed
+                if (targetParentFolder) {
                   setCollapsedProjectPaths(prev => {
                     const next = new Set(prev);
-                    next.delete(targetParentFolder);
+                    const parts = targetParentFolder.split('/');
+                    let cur = '';
+                    parts.forEach(p => {
+                      cur = cur ? `${cur}/${p}` : p;
+                      next.delete(cur);
+                    });
                     return next;
                   });
                 }
@@ -2751,13 +2998,41 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" title="Focus" />
         )}
 
-        {/* Task Title */}
-        <span className={cn(
-          "truncate flex-1 text-[11px] leading-tight",
-          task.isDone && "line-through opacity-75"
-        )}>
-          {task.title}
-        </span>
+        {/* Task Title or Inline Rename Input */}
+        {renamingItem?.type === 'task' && renamingItem.idOrPath === task.id ? (
+          <form 
+            onSubmit={handleRenameSubmit} 
+            onClick={(e) => e.stopPropagation()} 
+            className="flex-1 min-w-0 my-[-2px]"
+          >
+            <input
+              autoFocus
+              type="text"
+              value={renameInputValue}
+              onChange={(e) => setRenameInputValue(e.target.value)}
+              onBlur={handleRenameSubmit}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Escape') setRenamingItem(null);
+              }}
+              className="w-full bg-white text-slate-900 border border-indigo-400 rounded px-1.5 py-0.5 text-[11px] leading-tight outline-none shadow-xs font-sans font-normal focus:ring-1 focus:ring-indigo-400"
+            />
+          </form>
+        ) : (
+          <span 
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              startRenaming('task', task.id, task.title);
+            }}
+            className={cn(
+              "truncate flex-1 text-[11px] leading-tight cursor-text",
+              task.isDone && "line-through opacity-75"
+            )}
+            title={isJa ? `${task.title} (選択してEnterまたはダブルクリックで名前変更)` : `${task.title} (Select & Enter or double-click to rename)`}
+          >
+            {task.title}
+          </span>
+        )}
 
         {/* Approaching Deadline Highlight (Yellow clock mark, Red if overdue - icon only so title remains clear) */}
         {!task.isDone && deadlineAlert && (
