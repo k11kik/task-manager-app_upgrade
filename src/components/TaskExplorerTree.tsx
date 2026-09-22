@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { flushSync } from 'react-dom';
 import { 
   Folder, 
   FolderOpen, 
@@ -41,7 +42,7 @@ interface TaskExplorerTreeProps {
   tasks: Task[];
   activeTaskId: string | null;
   openTaskIds: string[];
-  onSelectTask: (taskId: string) => void;
+  onSelectTask: (taskId: string, isPermanent?: boolean) => void;
   onAddTask: (taskData: { title: string; project: string; deadline?: number; isAllDay?: boolean; notes?: string }) => Promise<void>;
   onToggleDone: (taskId: string) => void;
   onToggleStar: (taskId: string) => void;
@@ -871,10 +872,12 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const { path, type } = creatingInFolder;
     const value = inlineInputValue.trim();
 
-    // Immediately clear inline creation input so no ghost file flashes
-    setCreatingInFolder(null);
-    setInlineInputValue('');
+    // Immediately clear inline creation input synchronously using flushSync so no ghost file flashes
     isSubmittingCreateRef.current = true;
+    flushSync(() => {
+      setCreatingInFolder(null);
+      setInlineInputValue('');
+    });
 
     try {
       if (type === 'folder') {
@@ -1344,6 +1347,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 value={inlineInputValue}
                 onChange={(e) => setInlineInputValue(e.target.value)}
                 onBlur={() => {
+                  if (isSubmittingCreateRef.current) return;
                   // Auto cancel if empty on blur as requested!
                   if (!inlineInputValue.trim()) {
                     setCreatingInFolder(null);
@@ -1357,6 +1361,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                   if (e.key === 'Escape') {
                     setCreatingInFolder(null);
                     setInlineInputValue('');
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleCreateSubmit();
                   }
                 }}
                 className="w-full bg-white border border-indigo-400 rounded px-1.5 py-0.5 text-xs outline-none ring-1 ring-indigo-400/30 shadow-2xs font-sans"
@@ -1440,8 +1447,16 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             setSelectedFolderPaths(new Set());
             setSelectedKey(itemKey);
             setLastSelectedKey(itemKey);
-            onSelectTask(task.id);
+            onSelectTask(task.id, false);
           }
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          (window as any).__navforActivePane = 'explorer';
+          treeRef.current?.focus();
+          setSelectedKey(itemKey);
+          setLastSelectedKey(itemKey);
+          onSelectTask(task.id, true);
         }}
         className={cn(
           "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-pointer transition-all select-none outline-none",
@@ -1830,6 +1845,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 value={inlineInputValue}
                 onChange={(e) => setInlineInputValue(e.target.value)}
                 onBlur={() => {
+                  if (isSubmittingCreateRef.current) return;
                   if (!inlineInputValue.trim()) {
                     setCreatingInFolder(null);
                     setInlineInputValue('');
@@ -1842,6 +1858,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                   if (e.key === 'Escape') {
                     setCreatingInFolder(null);
                     setInlineInputValue('');
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleCreateSubmit();
                   }
                 }}
                 className="w-full bg-white border border-indigo-400 rounded px-1.5 py-0.5 text-xs outline-none ring-1 ring-indigo-400/30 shadow-2xs font-sans"

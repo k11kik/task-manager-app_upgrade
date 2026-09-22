@@ -131,7 +131,7 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "3.1.6";
+  const APP_VERSION = "3.1.7";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -240,7 +240,11 @@ export default function App() {
     }
   }, [openTaskIds, activeTabTaskId]);
 
-  const handleOpenTaskInTab = (taskId: string) => {
+  const [lastOpenEvent, setLastOpenEvent] = useState<{ taskId: string; isPermanent: boolean; timestamp: number } | null>(null);
+
+  const handleOpenTaskInTab = (taskId: string, isPermanent = false) => {
+    if (!taskId) return;
+    setLastOpenEvent({ taskId, isPermanent, timestamp: Date.now() });
     setOpenTaskIds(prev => {
       if (prev.includes(taskId)) return prev;
       return [...prev, taskId];
@@ -3480,11 +3484,23 @@ export default function App() {
                     />
                   </div>
 
-                  {/* Task Detail Pane (Right side, resizable, appears when task selected) */}
-                  {activeTabTaskId && (
-                    <TaskDetailPane
-                      task={tasks.find(t => t.id === activeTabTaskId) || null}
-                      onClose={() => setActiveTabTaskId(null)}
+                  {/* Task Detail Pane (Right side, resizable, tabbed & split like VS Code) */}
+                  {(activeTabTaskId || openTaskIds.length > 0) && (
+                    <TaskTabsDetail
+                      tasks={tasks}
+                      activeTaskId={activeTabTaskId}
+                      openTaskIds={openTaskIds}
+                      lastOpenEvent={lastOpenEvent}
+                      onSelectTask={(id, isPermanent) => {
+                        setActiveTabTaskId(id);
+                        if (isPermanent) {
+                          setLastOpenEvent({ taskId: id, isPermanent: true, timestamp: Date.now() });
+                        }
+                      }}
+                      onClose={() => {
+                        setActiveTabTaskId(null);
+                        setOpenTaskIds([]);
+                      }}
                       onUpdateTask={updateTask}
                       onMoveTask={moveTask}
                       onDeleteTask={deleteTask}

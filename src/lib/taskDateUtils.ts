@@ -8,7 +8,7 @@ import { Task } from '../types';
  * 3. Or a date range between startDate and deadline
  * 4. Recurrence rules (繰り返し: daily, every X days, weekly, every X weeks)
  */
-export function isTaskOccurringOnDate(task: Task, targetDate: Date): boolean {
+export function isTaskOccurringOnDate(task: Task, targetDate: Date, includeRecurrence: boolean = true): boolean {
   const targetTime = targetDate.getTime();
   const targetDayStart = startOfDay(targetDate).getTime();
 
@@ -34,8 +34,8 @@ export function isTaskOccurringOnDate(task: Task, targetDate: Date): boolean {
   }
 
   // 4. Recurrence logic
-  if (task.recurrence && task.recurrence.type !== 'none') {
-    const originMs = task.startDate || task.deadline;
+  if (includeRecurrence && task.recurrence && task.recurrence.type !== 'none') {
+    const originMs = task.startDate || task.deadline || task.createdAt;
     if (!originMs) return false;
 
     const originDate = new Date(originMs);

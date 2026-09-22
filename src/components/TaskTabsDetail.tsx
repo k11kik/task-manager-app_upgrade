@@ -22,9 +22,10 @@ import {
   Check, 
   Plus,
   ArrowRight,
-  PinOff
+  PinOff,
+  Repeat
 } from 'lucide-react';
-import { Task, Category } from '../types';
+import { Task, Category, RecurrenceType } from '../types';
 import { cn } from '../lib/utils';
 import { format } from 'date-fns';
 
@@ -78,6 +79,7 @@ interface SinglePaneProps {
   onSplitDown: () => void;
   onClosePane?: () => void;
   onMoveTabToPane?: (taskId: string, targetPaneId: number) => void;
+  onMoveTabBetweenPanes?: (sourcePaneId: number, taskId: string, targetPaneId: number, targetIndex?: number) => void;
   availablePaneIds?: number[];
   onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   onMoveTask: (taskId: string, category: Category) => void;
@@ -88,6 +90,9 @@ interface SinglePaneProps {
   onDuplicateTask?: (task: Task) => void;
   t: (key: string) => string;
 }
+
+// Tracks currently active tab drag across panes
+let activeDragTabInfo: { taskId: string; sourcePaneId: number } | null = null;
 
 const SinglePane: React.FC<SinglePaneProps> = ({
   pane,
@@ -106,6 +111,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   onSplitDown,
   onClosePane,
   onMoveTabToPane,
+  onMoveTabBetweenPanes,
   availablePaneIds = [],
   onUpdateTask,
   onMoveTask,
@@ -131,13 +137,47 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   // Form local editing states
   const [title, setTitle] = useState('');
   const [notes, setNotes] = useState('');
+  const [startDateVal, setStartDateVal] = useState('');
+  const [startTimeVal, setStartTimeVal] = useState('09:00');
   const [deadlineDate, setDeadlineDate] = useState('');
   const [deadlineTime, setDeadlineTime] = useState('18:00');
+  const [recurrenceType, setRecurrenceType] = useState<RecurrenceType>('none');
+  const [recurrenceInterval, setRecurrenceInterval] = useState<number>(1);
+  const [recurrenceEndDate, setRecurrenceEndDate] = useState('');
   const [isAllDay, setIsAllDay] = useState(false);
   const [urls, setUrls] = useState<string[]>([]);
   const [newUrlInput, setNewUrlInput] = useState('');
   const [isSavedNotice, setIsSavedNotice] = useState(false);
   const [isExpandedNotesOpen, setIsExpandedNotesOpen] = useState(false);
+
+  // Drag and Drop Tab states
+  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
+  const [dropSlot, setDropSlot] = useState<number | null>(null);
+  const [isOverTabBar, setIsOverTabBar] = useState(false);
+  const [isOverPane, setIsOverPane] = useState(false);
+
+  // Helper to determine drop slot (0 <= slot <= openTasks.length)
+  const calculateDropSlot = (e: React.DragEvent<HTMLElement>, tabIdx: number) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (!rect.width) return tabIdx;
+    const isRight = (e.clientX - rect.left) > (rect.width / 2);
+    return isRight ? tabIdx + 1 : tabIdx;
+  };
+
+  // Global dragend cleanup listener
+  useEffect(() => {
+    const handleGlobalDragEnd = () => {
+      activeDragTabInfo = null;
+      setIsOverPane(false);
+      setIsOverTabBar(false);
+      setDropSlot(null);
+      setDraggingTaskId(null);
+    };
+    window.addEventListener('dragend', handleGlobalDragEnd);
+    return () => {
+      window.removeEventListener('dragend', handleGlobalDragEnd);
+    };
+  }, []);
 
   // Sync state whenever activeTask changes
   useEffect(() => {
@@ -146,6 +186,14 @@ const SinglePane: React.FC<SinglePaneProps> = ({
       setNotes(activeTask.notes || '');
       setUrls(activeTask.urls || []);
       setIsAllDay(activeTask.isAllDay || false);
+      if (activeTask.startDate) {
+        const sd = new Date(activeTask.startDate);
+        setStartDateVal(format(sd, 'yyyy-MM-dd'));
+        setStartTimeVal(format(sd, 'HH:mm'));
+      } else {
+        setStartDateVal('');
+        setStartTimeVal('09:00');
+      }
       if (activeTask.deadline) {
         const d = new Date(activeTask.deadline);
         setDeadlineDate(format(d, 'yyyy-MM-dd'));
@@ -153,6 +201,19 @@ const SinglePane: React.FC<SinglePaneProps> = ({
       } else {
         setDeadlineDate('');
         setDeadlineTime('18:00');
+      }
+      if (activeTask.recurrence && activeTask.recurrence.type !== 'none') {
+        setRecurrenceType(activeTask.recurrence.type);
+        setRecurrenceInterval(activeTask.recurrence.interval ?? 1);
+        if (activeTask.recurrence.endDate) {
+          setRecurrenceEndDate(format(new Date(activeTask.recurrence.endDate), 'yyyy-MM-dd'));
+        } else {
+          setRecurrenceEndDate('');
+        }
+      } else {
+        setRecurrenceType('none');
+        setRecurrenceInterval(1);
+        setRecurrenceEndDate('');
       }
     }
   }, [activeTask?.id, activeTask?.updatedAt]);
@@ -178,6 +239,26 @@ const SinglePane: React.FC<SinglePaneProps> = ({
     triggerSaveNotice();
   };
 
+  const handleStartDateCommit = (dateStr: string, timeStr: string, allDay: boolean) => {
+    if (!activeTask) return;
+    onPinTab(activeTask.id); // Promotes to permanent on edit
+    if (!dateStr) {
+      onUpdateTask(activeTask.id, { startDate: undefined });
+      triggerSaveNotice();
+      return;
+    }
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const d = new Date(year, month - 1, day);
+    if (allDay) {
+      d.setHours(0, 0, 0, 0);
+    } else {
+      const [h, m] = timeStr.split(':').map(Number);
+      d.setHours(h || 9, m || 0, 0, 0);
+    }
+    onUpdateTask(activeTask.id, { startDate: d.getTime() });
+    triggerSaveNotice();
+  };
+
   const handleDeadlineCommit = (dateStr: string, timeStr: string, allDay: boolean) => {
     if (!activeTask) return;
     onPinTab(activeTask.id); // Promotes to permanent on edit
@@ -195,6 +276,30 @@ const SinglePane: React.FC<SinglePaneProps> = ({
       d.setHours(h || 18, m || 0, 0, 0);
     }
     onUpdateTask(activeTask.id, { deadline: d.getTime(), isAllDay: allDay });
+    triggerSaveNotice();
+  };
+
+  const handleRecurrenceCommit = (type: RecurrenceType, intervalVal: number, endDateStr: string) => {
+    if (!activeTask) return;
+    onPinTab(activeTask.id); // Promotes to permanent on edit
+    if (type === 'none') {
+      onUpdateTask(activeTask.id, { recurrence: undefined });
+      triggerSaveNotice();
+      return;
+    }
+    let endTimestamp: number | undefined = undefined;
+    if (endDateStr) {
+      const [y, m, d] = endDateStr.split('-').map(Number);
+      const ed = new Date(y, m - 1, d, 23, 59, 59, 999);
+      endTimestamp = ed.getTime();
+    }
+    onUpdateTask(activeTask.id, {
+      recurrence: {
+        type,
+        interval: Math.max(1, intervalVal),
+        endDate: endTimestamp
+      }
+    });
     triggerSaveNotice();
   };
 
@@ -226,25 +331,207 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   return (
     <div 
       onClick={onFocus}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes('application/json') || e.dataTransfer.types.includes('text/plain')) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          // Same pane: do NOT highlight or show "Move tab to this pane"
+          if (activeDragTabInfo && activeDragTabInfo.sourcePaneId === pane.id) {
+            if (isOverPane) setIsOverPane(false);
+            return;
+          }
+          if (!isOverPane) setIsOverPane(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+          setIsOverPane(false);
+        }
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsOverPane(false);
+        setDropSlot(null);
+        setDraggingTaskId(null);
+        activeDragTabInfo = null;
+        setIsOverTabBar(false);
+
+        try {
+          const raw = e.dataTransfer.getData('application/json');
+          if (raw) {
+            const data = JSON.parse(raw);
+            if (data.type === 'task-tab-drag' && data.taskId) {
+              // Ignore drop on own pane body to avoid accidental reordering
+              if (data.sourcePaneId === pane.id) return;
+              onMoveTabBetweenPanes?.(data.sourcePaneId, data.taskId, pane.id);
+              return;
+            }
+          }
+        } catch (err) {
+          console.error('Drop error', err);
+        }
+        const textId = e.dataTransfer.getData('text/plain');
+        if (textId && onMoveTabBetweenPanes) {
+          onMoveTabBetweenPanes(pane.id, textId, pane.id);
+        }
+      }}
       className={cn(
         "flex-1 h-full min-h-0 flex flex-col bg-white overflow-hidden transition-all relative border border-slate-200/80 rounded-lg",
-        isActivePane && layout !== 'single' && "ring-2 ring-indigo-500/60 border-indigo-400"
+        isActivePane && layout !== 'single' && "ring-2 ring-indigo-500/60 border-indigo-400",
+        isOverPane && layout !== 'single' && activeDragTabInfo?.sourcePaneId !== pane.id && "ring-2 ring-indigo-500 bg-indigo-50/20"
       )}
     >
+      {/* Visual Drop Overlay ONLY when dragging across different split panes */}
+      {isOverPane && layout !== 'single' && activeDragTabInfo?.sourcePaneId !== pane.id && (
+        <div className="absolute inset-0 z-50 bg-indigo-600/10 backdrop-blur-[1px] border-2 border-dashed border-indigo-500 rounded-lg flex flex-col items-center justify-center gap-2 pointer-events-none transition-all">
+          <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md">
+            <FileText size={20} />
+          </div>
+          <span className="text-xs font-bold text-indigo-900 bg-white/95 px-3.5 py-1.5 rounded-full shadow-xs border border-indigo-200">
+            {isJa ? 'この領域にタブを移動' : 'Move tab to this pane'}
+          </span>
+        </div>
+      )}
+
       {/* Tab Bar (VS Code style) */}
       <div className={cn(
         "flex items-center justify-between border-b select-none custom-scrollbar shrink-0 h-9 transition-colors",
         isActivePane ? "bg-slate-100/95 border-slate-300" : "bg-slate-50 border-slate-200"
       )}>
         {/* Scrollable Tabs */}
-        <div className="flex items-center h-full flex-1 overflow-x-auto custom-scrollbar min-w-0">
-          {openTasks.map(task => {
+        <div 
+          className={cn(
+            "flex items-center h-full flex-1 overflow-x-auto custom-scrollbar min-w-0 transition-colors",
+            isOverTabBar && "bg-indigo-50/50"
+          )}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'move';
+            if (!isOverTabBar) setIsOverTabBar(true);
+            if (e.target === e.currentTarget) {
+              setDropSlot(openTasks.length);
+            }
+          }}
+          onDragLeave={(e) => {
+            e.stopPropagation();
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+              setIsOverTabBar(false);
+              setDropSlot(null);
+            }
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsOverTabBar(false);
+            setDropSlot(null);
+            setDraggingTaskId(null);
+            activeDragTabInfo = null;
+            setIsOverPane(false);
+
+            // Dropping on the empty tab bar space inserts at the end of the tabs!
+            const targetIndex = openTasks.length;
+
+            try {
+              const raw = e.dataTransfer.getData('application/json');
+              if (raw) {
+                const data = JSON.parse(raw);
+                if (data.type === 'task-tab-drag' && data.taskId) {
+                  onMoveTabBetweenPanes?.(data.sourcePaneId, data.taskId, pane.id, targetIndex);
+                  return;
+                }
+              }
+            } catch (err) {
+              console.error('Drop error', err);
+            }
+            const textId = e.dataTransfer.getData('text/plain');
+            if (textId && onMoveTabBetweenPanes) {
+              onMoveTabBetweenPanes(pane.id, textId, pane.id, targetIndex);
+            }
+          }}
+        >
+          {openTasks.map((task, idx) => {
             const isActive = task.id === pane.activeTaskId;
             const isPreview = task.id === pane.previewTaskId;
+            const isBeingDragged = draggingTaskId === task.id;
 
             return (
               <div
                 key={task.id}
+                draggable
+                onDragStart={(e) => {
+                  activeDragTabInfo = { taskId: task.id, sourcePaneId: pane.id };
+                  e.dataTransfer.setData('application/json', JSON.stringify({
+                    type: 'task-tab-drag',
+                    taskId: task.id,
+                    sourcePaneId: pane.id
+                  }));
+                  e.dataTransfer.setData('text/plain', task.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  setDraggingTaskId(task.id);
+                }}
+                onDragEnd={() => {
+                  activeDragTabInfo = null;
+                  setDraggingTaskId(null);
+                  setDropSlot(null);
+                  setIsOverPane(false);
+                  setIsOverTabBar(false);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  e.dataTransfer.dropEffect = 'move';
+
+                  // If dragging over itself in the same pane, don't show insertion line
+                  if (activeDragTabInfo?.sourcePaneId === pane.id && activeDragTabInfo?.taskId === task.id) {
+                    if (dropSlot !== null) setDropSlot(null);
+                    return;
+                  }
+
+                  const slot = calculateDropSlot(e, idx);
+                  if (dropSlot !== slot) {
+                    setDropSlot(slot);
+                  }
+                }}
+                onDragLeave={(e) => {
+                  e.stopPropagation();
+                  // Only clear if actually leaving the tab element (not moving into child elements)
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                    if (dropSlot === idx || dropSlot === idx + 1) {
+                      setDropSlot(null);
+                    }
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+
+                  // Compute targetIndex directly and accurately from drop mouse position
+                  const targetIndex = calculateDropSlot(e, idx);
+
+                  setDropSlot(null);
+                  setDraggingTaskId(null);
+                  activeDragTabInfo = null;
+                  setIsOverPane(false);
+                  setIsOverTabBar(false);
+
+                  try {
+                    const raw = e.dataTransfer.getData('application/json');
+                    if (raw) {
+                      const data = JSON.parse(raw);
+                      if (data.type === 'task-tab-drag' && data.taskId) {
+                        onMoveTabBetweenPanes?.(data.sourcePaneId, data.taskId, pane.id, targetIndex);
+                        return;
+                      }
+                    }
+                  } catch (err) {
+                    console.error('Drop error', err);
+                  }
+                  const textId = e.dataTransfer.getData('text/plain');
+                  if (textId && onMoveTabBetweenPanes) {
+                    onMoveTabBetweenPanes(pane.id, textId, pane.id, targetIndex);
+                  }
+                }}
                 onClick={(e) => {
                   e.stopPropagation();
                   onFocus();
@@ -263,16 +550,25 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                   }
                 }}
                 className={cn(
-                  "group relative flex items-center gap-1.5 px-3 h-full border-r border-slate-200/90 text-xs cursor-pointer transition-colors max-w-[200px] shrink-0",
+                  "group relative flex items-center gap-1.5 px-3 h-full border-r border-slate-200/90 text-xs cursor-grab active:cursor-grabbing select-none transition-all max-w-[200px] shrink-0",
                   isActive
                     ? "bg-white text-slate-900 border-t-2 border-t-indigo-600 font-semibold shadow-2xs"
                     : "text-slate-600 hover:bg-slate-200/70 hover:text-slate-900",
-                  isPreview && "italic"
+                  isPreview && "italic",
+                  isBeingDragged && "opacity-40 scale-95 border-dashed border-indigo-400"
                 )}
                 title={isPreview 
-                  ? `${task.project} > ${task.title} (${isJa ? 'プレビュー - ダブルクリックで固定' : 'Preview - double click to pin'})` 
-                  : `${task.project} > ${task.title}`}
+                  ? `${task.project} > ${task.title} (${isJa ? 'プレビュー - ダブルクリックで固定 / ドラッグで移動' : 'Preview - double click to pin / drag to move'})` 
+                  : `${task.project} > ${task.title} (${isJa ? 'ドラッグして領域間・タブ間を移動' : 'Drag to move tab'})`}
               >
+                {/* Insertion line indicator */}
+                {dropSlot === idx && (
+                  <div className="absolute left-0 top-0 bottom-0 w-1 bg-indigo-600 z-30 pointer-events-none rounded-r shadow-xs animate-pulse" />
+                )}
+                {dropSlot === idx + 1 && idx === openTasks.length - 1 && (
+                  <div className="absolute right-0 top-0 bottom-0 w-1 bg-indigo-600 z-30 pointer-events-none rounded-l shadow-xs animate-pulse" />
+                )}
+
                 {/* Status Dot / Indicator */}
                 {task.isDone ? (
                   <CheckCircle2 size={12} className="text-emerald-500 shrink-0 not-italic" />
@@ -318,9 +614,16 @@ const SinglePane: React.FC<SinglePaneProps> = ({
             );
           })}
 
+          {/* Drop indicator at the end of the tabs when dragging over empty space */}
+          {isOverTabBar && (dropSlot === null || dropSlot === openTasks.length) && openTasks.length > 0 && (
+            <div className="h-6 px-2 mx-1 border border-dashed border-indigo-400 bg-indigo-50/70 rounded flex items-center justify-center text-[10px] text-indigo-600 font-semibold shrink-0 animate-pulse pointer-events-none">
+              ＋ {isJa ? '右端に追加' : 'Insert at end'}
+            </div>
+          )}
+
           {openTasks.length === 0 && (
             <div className="px-3 text-xs text-slate-400 italic">
-              {isJa ? 'タブなし' : 'No tabs'}
+              {isJa ? 'タブなし (ここにドロップ可能)' : 'No tabs (drop here)'}
             </div>
           )}
         </div>
@@ -517,61 +820,204 @@ const SinglePane: React.FC<SinglePaneProps> = ({
               </button>
             </div>
 
-            {/* Deadline */}
-            <div className="space-y-1">
-              <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                <CalendarIcon size={12} className="text-slate-400" />
-                <span>{isJa ? '締切 / 期日' : 'Deadline'}</span>
-              </label>
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="date"
-                  value={deadlineDate}
-                  onChange={(e) => {
-                    setDeadlineDate(e.target.value);
-                    handleDeadlineCommit(e.target.value, deadlineTime, isAllDay);
-                  }}
-                  className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500 transition-colors"
-                />
-                {!isAllDay && (
+            {/* When (Start Date), Deadline & Recurrence */}
+            <div className="space-y-2 p-2.5 bg-slate-50/70 border border-slate-200/80 rounded-xl">
+              {/* Start Date: いつ */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                    <Clock size={12} className="text-indigo-500" />
+                    <span>{isJa ? 'いつ (開始日)' : 'When (Start Date)'}</span>
+                  </label>
+                  {startDateVal && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStartDateVal('');
+                        handleStartDateCommit('', startTimeVal, isAllDay);
+                      }}
+                      className="text-[10px] text-slate-400 hover:text-red-500 px-1 py-0.5 hover:bg-slate-100 rounded transition-colors"
+                      title={isJa ? '開始日をクリア' : 'Clear start date'}
+                    >
+                      {isJa ? 'クリア' : 'Clear'}
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
                   <input
-                    type="time"
-                    value={deadlineTime}
-                    disabled={!deadlineDate}
+                    type="date"
+                    value={startDateVal}
                     onChange={(e) => {
-                      setDeadlineTime(e.target.value);
-                      handleDeadlineCommit(deadlineDate, e.target.value, isAllDay);
+                      setStartDateVal(e.target.value);
+                      handleStartDateCommit(e.target.value, startTimeVal, isAllDay);
                     }}
-                    className="w-20 bg-slate-50 border border-slate-200 rounded-lg px-1.5 py-1 text-xs text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-40"
+                    className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
                   />
-                )}
-                {deadlineDate && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDeadlineDate('');
-                      handleDeadlineCommit('', deadlineTime, isAllDay);
-                    }}
-                    className="text-[11px] text-slate-400 hover:text-red-500 px-1 py-1 hover:bg-slate-100 rounded transition-colors"
-                    title={isJa ? '締切をクリア' : 'Clear'}
-                  >
-                    {isJa ? 'クリア' : 'Clear'}
-                  </button>
-                )}
+                  {!isAllDay && (
+                    <input
+                      type="time"
+                      value={startTimeVal}
+                      disabled={!startDateVal}
+                      onChange={(e) => {
+                        setStartTimeVal(e.target.value);
+                        handleStartDateCommit(startDateVal, e.target.value, isAllDay);
+                      }}
+                      className="w-20 bg-white border border-slate-200 rounded-lg px-1.5 py-1 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-40"
+                    />
+                  )}
+                </div>
               </div>
+
+              {/* Deadline: 締切 */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                    <CalendarIcon size={12} className="text-amber-500" />
+                    <span>{isJa ? '締切 / 期日' : 'Deadline'}</span>
+                  </label>
+                  {deadlineDate && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeadlineDate('');
+                        handleDeadlineCommit('', deadlineTime, isAllDay);
+                      }}
+                      className="text-[10px] text-slate-400 hover:text-red-500 px-1 py-0.5 hover:bg-slate-100 rounded transition-colors"
+                      title={isJa ? '締切をクリア' : 'Clear deadline'}
+                    >
+                      {isJa ? 'クリア' : 'Clear'}
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="date"
+                    value={deadlineDate}
+                    onChange={(e) => {
+                      setDeadlineDate(e.target.value);
+                      handleDeadlineCommit(e.target.value, deadlineTime, isAllDay);
+                    }}
+                    className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
+                  />
+                  {!isAllDay && (
+                    <input
+                      type="time"
+                      value={deadlineTime}
+                      disabled={!deadlineDate}
+                      onChange={(e) => {
+                        setDeadlineTime(e.target.value);
+                        handleDeadlineCommit(deadlineDate, e.target.value, isAllDay);
+                      }}
+                      className="w-20 bg-white border border-slate-200 rounded-lg px-1.5 py-1 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-40"
+                    />
+                  )}
+                </div>
+              </div>
+
+              {/* All-day Checkbox */}
               <div className="flex items-center gap-2 pt-0.5">
-                <label className="flex items-center gap-1 text-[11px] text-slate-500 cursor-pointer select-none">
+                <label className="flex items-center gap-1.5 text-[11px] font-medium text-slate-600 cursor-pointer select-none">
                   <input
                     type="checkbox"
                     checked={isAllDay}
                     onChange={(e) => {
                       setIsAllDay(e.target.checked);
                       handleDeadlineCommit(deadlineDate, deadlineTime, e.target.checked);
+                      if (startDateVal) {
+                        handleStartDateCommit(startDateVal, startTimeVal, e.target.checked);
+                      }
                     }}
                     className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 scale-90"
                   />
-                  <span>{isJa ? '終日タスク' : 'All day'}</span>
+                  <span>{isJa ? '終日設定' : 'All day'}</span>
                 </label>
+              </div>
+
+              {/* Recurrence: 繰り返し */}
+              <div className="pt-2 border-t border-slate-200/80 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                    <Repeat size={12} className="text-indigo-600" />
+                    <span>{isJa ? '繰り返し' : 'Repeat'}</span>
+                  </label>
+                  {recurrenceType !== 'none' && (
+                    <span className="text-[10px] text-indigo-600 font-semibold bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-100">
+                      {isJa ? '繰り返し有効' : 'Active'}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={recurrenceType}
+                    onChange={(e) => {
+                      const newType = e.target.value as RecurrenceType;
+                      setRecurrenceType(newType);
+                      handleRecurrenceCommit(newType, recurrenceInterval, recurrenceEndDate);
+                    }}
+                    className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
+                  >
+                    <option value="none">{isJa ? 'なし' : 'None'}</option>
+                    <option value="daily">{isJa ? '毎日' : 'Every day'}</option>
+                    <option value="every_x_days">{isJa ? 'X日ごと' : 'Every X days'}</option>
+                    <option value="weekly">{isJa ? '毎週' : 'Every week'}</option>
+                    <option value="every_x_weeks">{isJa ? 'X週ごと' : 'Every X weeks'}</option>
+                  </select>
+
+                  {/* Interval number for every_x_days and every_x_weeks */}
+                  {(recurrenceType === 'every_x_days' || recurrenceType === 'every_x_weeks') && (
+                    <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg px-2 py-0.5">
+                      <input
+                        type="number"
+                        min="1"
+                        max="365"
+                        value={recurrenceInterval}
+                        onChange={(e) => {
+                          const val = Math.max(1, parseInt(e.target.value, 10) || 1);
+                          setRecurrenceInterval(val);
+                          handleRecurrenceCommit(recurrenceType, val, recurrenceEndDate);
+                        }}
+                        className="w-10 text-xs text-slate-800 font-bold text-center outline-none"
+                      />
+                      <span className="text-[10px] text-slate-500 font-medium">
+                        {recurrenceType === 'every_x_days' 
+                          ? (isJa ? '日ごと' : 'days') 
+                          : (isJa ? '週ごと' : 'weeks')}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Recurrence End Date if active */}
+                {recurrenceType !== 'none' && (
+                  <div className="flex items-center justify-between gap-1.5 pt-1 text-[11px] text-slate-500">
+                    <span className="text-[10px] shrink-0 font-medium">{isJa ? '終了日 (任意):' : 'End date:'}</span>
+                    <div className="flex items-center gap-1 flex-1 max-w-[170px]">
+                      <input
+                        type="date"
+                        value={recurrenceEndDate}
+                        onChange={(e) => {
+                          setRecurrenceEndDate(e.target.value);
+                          handleRecurrenceCommit(recurrenceType, recurrenceInterval, e.target.value);
+                        }}
+                        className="flex-1 bg-white border border-slate-200 rounded-lg px-1.5 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
+                      />
+                      {recurrenceEndDate && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRecurrenceEndDate('');
+                            handleRecurrenceCommit(recurrenceType, recurrenceInterval, '');
+                          }}
+                          className="text-[10px] text-slate-400 hover:text-red-500 px-1 py-0.5"
+                          title={isJa ? '終了日をクリア' : 'Clear'}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -752,7 +1198,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
             {isJa ? 'タスクが選択されていません' : 'No task selected'}
           </h4>
           <p className="text-[11px] text-slate-400 max-w-xs leading-relaxed">
-            {isJa ? 'エクスプローラー等からタスクをクリックして開きます' : 'Click a task to open'}
+            {isJa ? 'エクスプローラー等から開くか、他の領域からタブをドラッグ＆ドロップできます' : 'Click a task to open, or drag a tab from another pane'}
           </p>
         </div>
       )}
@@ -857,28 +1303,53 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     }
   }, [layout, panes, splitXRatio, splitYRatio]);
 
-  // Synchronize incoming activeTaskId from props (e.g. from Explorer, Timeline, Focus click)
+  // Synchronize incoming activeTaskId & lastOpenEvent from props (e.g. from Explorer, Timeline, Focus click)
   const prevActiveTaskIdRef = useRef<string | null>(null);
+  const prevEventTimeRef = useRef<number>(0);
+
   useEffect(() => {
     if (!activeTaskId) return;
-    if (prevActiveTaskIdRef.current === activeTaskId) return;
+
+    const isSameTask = prevActiveTaskIdRef.current === activeTaskId;
+    const isNewEvent = lastOpenEvent && lastOpenEvent.timestamp !== prevEventTimeRef.current;
+    
+    if (isSameTask && !isNewEvent) return;
+
     prevActiveTaskIdRef.current = activeTaskId;
+    if (lastOpenEvent) {
+      prevEventTimeRef.current = lastOpenEvent.timestamp;
+    }
+
+    const isPermanent = Boolean(lastOpenEvent?.taskId === activeTaskId && lastOpenEvent.isPermanent);
 
     // Apply to current active pane
     setPanes(prevPanes => {
       return prevPanes.map(p => {
         if (p.id !== activePaneId) return p;
 
-        // If task is already open in this pane, just activate it
+        // If task is already open in this pane:
         if (p.openTaskIds.includes(activeTaskId)) {
           return {
             ...p,
-            activeTaskId: activeTaskId
+            activeTaskId: activeTaskId,
+            // If requested as permanent, pin it (clear previewTaskId if it was this task)
+            previewTaskId: isPermanent && p.previewTaskId === activeTaskId ? null : p.previewTaskId
           };
         }
 
         // If not open:
-        // Check if there is currently a preview task that hasn't been edited
+        if (isPermanent) {
+          // Open permanently: do not overwrite existing preview tab, append as permanent
+          return {
+            ...p,
+            openTaskIds: [...p.openTaskIds, activeTaskId],
+            activeTaskId: activeTaskId,
+            // previewTaskId unchanged
+          };
+        }
+
+        // If preview mode:
+        // Check if there is currently a preview task that hasn't been edited/pinned
         if (p.previewTaskId && p.openTaskIds.includes(p.previewTaskId)) {
           // Replace the preview tab with this new task!
           const nextOpen = p.openTaskIds.map(id => id === p.previewTaskId ? activeTaskId : id);
@@ -890,7 +1361,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
           };
         }
 
-        // Otherwise append as preview tab
+        // Otherwise append as new preview tab
         return {
           ...p,
           openTaskIds: [...p.openTaskIds, activeTaskId],
@@ -899,7 +1370,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
         };
       });
     });
-  }, [activeTaskId, activePaneId]);
+  }, [activeTaskId, lastOpenEvent, activePaneId]);
 
   // Auto close detail pane if all panes have no open tabs
   useEffect(() => {
@@ -972,13 +1443,27 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     }));
   };
 
-  // Move tab from one pane to another
-  const handleMoveTabToPane = (sourcePaneId: number, taskId: string, targetPaneId: number) => {
+  // Move tab between panes (or reorder within same pane)
+  const handleMoveTabBetweenPanes = (sourcePaneId: number, taskId: string, targetPaneId: number, targetIndex?: number) => {
     setPanes(prev => {
       const src = prev.find(p => p.id === sourcePaneId);
       if (!src) return prev;
 
-      // Remove from source
+      // Moving within the same pane (reordering tabs)
+      if (sourcePaneId === targetPaneId) {
+        const currentIdx = src.openTaskIds.indexOf(taskId);
+        if (currentIdx === -1) return prev;
+        const newOpen = src.openTaskIds.filter(id => id !== taskId);
+        let insertIdx = targetIndex !== undefined ? targetIndex : newOpen.length;
+        if (targetIndex !== undefined && targetIndex > currentIdx) {
+          insertIdx = targetIndex - 1;
+        }
+        insertIdx = Math.max(0, Math.min(newOpen.length, insertIdx));
+        newOpen.splice(insertIdx, 0, taskId);
+        return prev.map(p => p.id === sourcePaneId ? { ...p, openTaskIds: newOpen, activeTaskId: taskId } : p);
+      }
+
+      // Moving across different panes
       const srcNextOpen = src.openTaskIds.filter(id => id !== taskId);
       const srcIdx = src.openTaskIds.indexOf(taskId);
       const srcNextActive = src.activeTaskId === taskId ? (srcNextOpen[srcIdx] || srcNextOpen[srcIdx - 1] || null) : src.activeTaskId;
@@ -993,7 +1478,10 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
           };
         }
         if (p.id === targetPaneId) {
-          const tgtNextOpen = p.openTaskIds.includes(taskId) ? p.openTaskIds : [...p.openTaskIds, taskId];
+          let tgtNextOpen = p.openTaskIds.filter(id => id !== taskId);
+          let insertIdx = targetIndex !== undefined ? targetIndex : tgtNextOpen.length;
+          insertIdx = Math.max(0, Math.min(tgtNextOpen.length, insertIdx));
+          tgtNextOpen.splice(insertIdx, 0, taskId);
           return {
             ...p,
             openTaskIds: tgtNextOpen,
@@ -1007,58 +1495,164 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     setActivePaneId(targetPaneId);
   };
 
+  const handleMoveTabToPane = (sourcePaneId: number, taskId: string, targetPaneId: number) => {
+    handleMoveTabBetweenPanes(sourcePaneId, taskId, targetPaneId);
+  };
+
+  // Single Pane Action
+  const handleSingleLayout = () => {
+    setLayout('single');
+    const currentTask = panes[activePaneId]?.activeTaskId || activeTaskId;
+    if (currentTask && (!panes[0].activeTaskId || !panes[0].openTaskIds.includes(currentTask))) {
+      setPanes(prev => prev.map(p => {
+        if (p.id === 0) {
+          const nextOpen = p.openTaskIds.includes(currentTask) ? p.openTaskIds : [...p.openTaskIds, currentTask];
+          return { ...p, openTaskIds: nextOpen, activeTaskId: currentTask };
+        }
+        return p;
+      }));
+    }
+    setActivePaneId(0);
+  };
+
   // Split Right Action
-  const handleSplitRight = (sourcePaneId: number) => {
-    const srcPane = panes.find(p => p.id === sourcePaneId);
-    const taskToClone = srcPane?.activeTaskId;
+  const handleSplitRight = (sourcePaneId?: number) => {
+    const srcId = sourcePaneId !== undefined ? sourcePaneId : activePaneId;
+    const srcPane = panes.find(p => p.id === srcId);
+    const taskToClone = srcPane?.activeTaskId || activeTaskId;
 
     if (layout === 'single') {
       setLayout('split-right');
-      // If pane 1 is empty, copy current active task
-      if (taskToClone && panes[1].openTaskIds.length === 0) {
-        setPanes(prev => prev.map(p => p.id === 1 ? { ...p, openTaskIds: [taskToClone], activeTaskId: taskToClone, previewTaskId: null } : p));
-      }
+      // Pane 0 keeps its current tabs (e.g. Task-A, Task-B)
+      // Newly created Pane 1 gets ONLY 1 tab with the currently selected task
+      setPanes(prev => prev.map(p => {
+        if (p.id === 1) {
+          return {
+            ...p,
+            openTaskIds: taskToClone ? [taskToClone] : [],
+            activeTaskId: taskToClone || null,
+            previewTaskId: null
+          };
+        }
+        return p;
+      }));
       setActivePaneId(1);
     } else if (layout === 'split-down') {
       // Elevate to 2x2 grid!
       setLayout('grid-2x2');
-      if (taskToClone && panes[1].openTaskIds.length === 0) {
-        setPanes(prev => prev.map(p => p.id === 1 ? { ...p, openTaskIds: [taskToClone], activeTaskId: taskToClone, previewTaskId: null } : p));
-      }
+      const targetPane = srcId === 2 ? 3 : 1;
+      setPanes(prev => prev.map(p => {
+        if (p.id === targetPane) {
+          return {
+            ...p,
+            openTaskIds: taskToClone ? [taskToClone] : [],
+            activeTaskId: taskToClone || null,
+            previewTaskId: null
+          };
+        }
+        return p;
+      }));
+      setActivePaneId(targetPane);
+    } else {
+      // If already split-right or in grid-2x2, set pane 1 to active task
+      setLayout('split-right');
+      setPanes(prev => prev.map(p => {
+        if (p.id === 1) {
+          return {
+            ...p,
+            openTaskIds: taskToClone ? [taskToClone] : [],
+            activeTaskId: taskToClone || null,
+            previewTaskId: null
+          };
+        }
+        return p;
+      }));
       setActivePaneId(1);
-    }
-    // Expand overall width if too narrow for 2 columns
-    if (width < 720) {
-      onWidthChange(Math.min(window.innerWidth - 300, 840));
     }
   };
 
   // Split Down Action
-  const handleSplitDown = (sourcePaneId: number) => {
-    const srcPane = panes.find(p => p.id === sourcePaneId);
-    const taskToClone = srcPane?.activeTaskId;
+  const handleSplitDown = (sourcePaneId?: number) => {
+    const srcId = sourcePaneId !== undefined ? sourcePaneId : activePaneId;
+    const srcPane = panes.find(p => p.id === srcId);
+    const taskToClone = srcPane?.activeTaskId || activeTaskId;
 
     if (layout === 'single') {
       setLayout('split-down');
-      // Put task into pane 1 or 2
-      const targetPane = 2; // Bottom-left
-      if (taskToClone && panes[targetPane].openTaskIds.length === 0) {
-        setPanes(prev => prev.map(p => p.id === targetPane ? { ...p, openTaskIds: [taskToClone], activeTaskId: taskToClone, previewTaskId: null } : p));
-      }
-      setActivePaneId(targetPane);
+      // Pane 0 keeps its current tabs (e.g. Task-A, Task-B)
+      // Newly created Pane 2 (bottom) gets ONLY 1 tab with the currently selected task
+      setPanes(prev => prev.map(p => {
+        if (p.id === 2) {
+          return {
+            ...p,
+            openTaskIds: taskToClone ? [taskToClone] : [],
+            activeTaskId: taskToClone || null,
+            previewTaskId: null
+          };
+        }
+        return p;
+      }));
+      setActivePaneId(2);
     } else if (layout === 'split-right') {
       // Elevate to 2x2 grid!
       setLayout('grid-2x2');
-      const targetPane = sourcePaneId === 0 ? 2 : 3;
-      if (taskToClone && panes[targetPane].openTaskIds.length === 0) {
-        setPanes(prev => prev.map(p => p.id === targetPane ? { ...p, openTaskIds: [taskToClone], activeTaskId: taskToClone, previewTaskId: null } : p));
-      }
+      const targetPane = srcId === 1 ? 3 : 2;
+      setPanes(prev => prev.map(p => {
+        if (p.id === targetPane) {
+          return {
+            ...p,
+            openTaskIds: taskToClone ? [taskToClone] : [],
+            activeTaskId: taskToClone || null,
+            previewTaskId: null
+          };
+        }
+        return p;
+      }));
       setActivePaneId(targetPane);
+    } else {
+      // If already split-down or grid-2x2, set pane 2 to active task
+      setLayout('split-down');
+      setPanes(prev => prev.map(p => {
+        if (p.id === 2) {
+          return {
+            ...p,
+            openTaskIds: taskToClone ? [taskToClone] : [],
+            activeTaskId: taskToClone || null,
+            previewTaskId: null
+          };
+        }
+        return p;
+      }));
+      setActivePaneId(2);
     }
-    // Expand overall width if needed
-    if (width < 600) {
-      onWidthChange(Math.min(window.innerWidth - 300, 720));
-    }
+  };
+
+  // Grid 2x2 Action (4分割の場合はどこかの領域にTask-Aを表示したら残りはNo Task表示)
+  const handleGrid2X2 = () => {
+    const srcPane = panes.find(p => p.id === activePaneId);
+    const taskToClone = srcPane?.activeTaskId || activeTaskId;
+
+    setLayout('grid-2x2');
+    setPanes(prev => prev.map(p => {
+      if (p.id === 0) {
+        // Pane 0 displays the active task (and keeps existing tabs if present)
+        const nextOpen = p.openTaskIds.length > 0 ? p.openTaskIds : (taskToClone ? [taskToClone] : []);
+        return {
+          ...p,
+          openTaskIds: nextOpen,
+          activeTaskId: taskToClone || nextOpen[0] || null,
+          previewTaskId: null
+        };
+      }
+      // Remaining 3 panes show No Task
+      return {
+        ...p,
+        openTaskIds: [],
+        activeTaskId: null,
+        previewTaskId: null
+      };
+    }));
+    setActivePaneId(0);
   };
 
   // Close Pane Action
@@ -1066,9 +1660,15 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     if (layout === 'single') return;
 
     if (layout === 'split-right') {
+      if (closingPaneId === 0 && panes[1].openTaskIds.length > 0) {
+        setPanes(prev => prev.map(p => p.id === 0 ? { ...panes[1], id: 0 } : p));
+      }
       setLayout('single');
       setActivePaneId(0);
     } else if (layout === 'split-down') {
+      if (closingPaneId === 0 && panes[2].openTaskIds.length > 0) {
+        setPanes(prev => prev.map(p => p.id === 0 ? { ...panes[2], id: 0 } : p));
+      }
       setLayout('single');
       setActivePaneId(0);
     } else if (layout === 'grid-2x2') {
@@ -1102,7 +1702,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     const handleMouseMove = (ev: MouseEvent) => {
       if (!isResizingWidthRef.current) return;
       const newWidth = window.innerWidth - ev.clientX;
-      const minW = layout === 'grid-2x2' ? 520 : layout !== 'single' ? 440 : 320;
+      const minW = 280;
       const maxW = Math.max(minW, window.innerWidth - 240);
       if (newWidth >= minW && newWidth <= maxW) {
         onWidthChange(newWidth);
@@ -1201,7 +1801,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
             <div className="flex items-center bg-slate-100 rounded p-0.5 ml-2 gap-0.5">
               <button
                 type="button"
-                onClick={() => setLayout('single')}
+                onClick={handleSingleLayout}
                 className={cn(
                   "p-1 rounded transition-colors",
                   layout === 'single' ? "bg-white text-indigo-600 shadow-2xs font-bold" : "text-slate-500 hover:text-slate-800"
@@ -1212,10 +1812,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setLayout('split-right');
-                  if (width < 720) onWidthChange(Math.min(window.innerWidth - 300, 840));
-                }}
+                onClick={() => handleSplitRight()}
                 className={cn(
                   "p-1 rounded transition-colors",
                   layout === 'split-right' ? "bg-white text-indigo-600 shadow-2xs font-bold" : "text-slate-500 hover:text-slate-800"
@@ -1226,10 +1823,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setLayout('split-down');
-                  if (width < 600) onWidthChange(Math.min(window.innerWidth - 300, 720));
-                }}
+                onClick={() => handleSplitDown()}
                 className={cn(
                   "p-1 rounded transition-colors",
                   layout === 'split-down' ? "bg-white text-indigo-600 shadow-2xs font-bold" : "text-slate-500 hover:text-slate-800"
@@ -1240,10 +1834,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setLayout('grid-2x2');
-                  if (width < 800) onWidthChange(Math.min(window.innerWidth - 300, 960));
-                }}
+                onClick={handleGrid2X2}
                 className={cn(
                   "p-1 rounded transition-colors",
                   layout === 'grid-2x2' ? "bg-white text-indigo-600 shadow-2xs font-bold" : "text-slate-500 hover:text-slate-800"
@@ -1286,6 +1877,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               onCloseAllTabs={() => handleCloseAllTabsInPane(0)}
               onSplitRight={() => handleSplitRight(0)}
               onSplitDown={() => handleSplitDown(0)}
+              onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
               onUpdateTask={onUpdateTask}
               onMoveTask={onMoveTask}
               onDeleteTask={onDeleteTask}
@@ -1321,6 +1913,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onSplitDown={() => handleSplitDown(0)}
                   onClosePane={() => handleClosePane(0)}
                   onMoveTabToPane={(id, tgt) => handleMoveTabToPane(0, id, tgt)}
+                  onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                   availablePaneIds={[1]}
                   onUpdateTask={onUpdateTask}
                   onMoveTask={onMoveTask}
@@ -1363,6 +1956,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onSplitDown={() => handleSplitDown(1)}
                   onClosePane={() => handleClosePane(1)}
                   onMoveTabToPane={(id, tgt) => handleMoveTabToPane(1, id, tgt)}
+                  onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                   availablePaneIds={[0]}
                   onUpdateTask={onUpdateTask}
                   onMoveTask={onMoveTask}
@@ -1401,6 +1995,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onSplitDown={() => handleSplitDown(0)}
                   onClosePane={() => handleClosePane(0)}
                   onMoveTabToPane={(id, tgt) => handleMoveTabToPane(0, id, tgt)}
+                  onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                   availablePaneIds={[2]}
                   onUpdateTask={onUpdateTask}
                   onMoveTask={onMoveTask}
@@ -1443,6 +2038,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onSplitDown={() => handleSplitDown(2)}
                   onClosePane={() => handleClosePane(2)}
                   onMoveTabToPane={(id, tgt) => handleMoveTabToPane(2, id, tgt)}
+                  onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                   availablePaneIds={[0]}
                   onUpdateTask={onUpdateTask}
                   onMoveTask={onMoveTask}
@@ -1487,6 +2083,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onSplitDown={() => handleSplitDown(0)}
                     onClosePane={() => handleClosePane(0)}
                     onMoveTabToPane={(id, tgt) => handleMoveTabToPane(0, id, tgt)}
+                    onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                     availablePaneIds={[1, 2, 3]}
                     onUpdateTask={onUpdateTask}
                     onMoveTask={onMoveTask}
@@ -1530,6 +2127,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onSplitDown={() => handleSplitDown(1)}
                     onClosePane={() => handleClosePane(1)}
                     onMoveTabToPane={(id, tgt) => handleMoveTabToPane(1, id, tgt)}
+                    onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                     availablePaneIds={[0, 2, 3]}
                     onUpdateTask={onUpdateTask}
                     onMoveTask={onMoveTask}
@@ -1579,6 +2177,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onSplitDown={() => handleSplitDown(2)}
                     onClosePane={() => handleClosePane(2)}
                     onMoveTabToPane={(id, tgt) => handleMoveTabToPane(2, id, tgt)}
+                    onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                     availablePaneIds={[0, 1, 3]}
                     onUpdateTask={onUpdateTask}
                     onMoveTask={onMoveTask}
@@ -1622,6 +2221,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onSplitDown={() => handleSplitDown(3)}
                     onClosePane={() => handleClosePane(3)}
                     onMoveTabToPane={(id, tgt) => handleMoveTabToPane(3, id, tgt)}
+                    onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
                     availablePaneIds={[0, 1, 2]}
                     onUpdateTask={onUpdateTask}
                     onMoveTask={onMoveTask}

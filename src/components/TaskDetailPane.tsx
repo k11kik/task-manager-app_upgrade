@@ -18,9 +18,10 @@ import {
   Folder,
   Zap,
   Maximize2,
-  FileText
+  FileText,
+  Repeat
 } from 'lucide-react';
-import { Task, Category } from '../types';
+import { Task, Category, RecurrenceType } from '../types';
 import { cn } from '../lib/utils';
 import { format } from 'date-fns';
 
@@ -62,8 +63,13 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
   // Form local editing states
   const [title, setTitle] = useState('');
   const [notes, setNotes] = useState('');
+  const [startDateVal, setStartDateVal] = useState('');
+  const [startTimeVal, setStartTimeVal] = useState('09:00');
   const [deadlineDate, setDeadlineDate] = useState('');
   const [deadlineTime, setDeadlineTime] = useState('18:00');
+  const [recurrenceType, setRecurrenceType] = useState<RecurrenceType>('none');
+  const [recurrenceInterval, setRecurrenceInterval] = useState<number>(1);
+  const [recurrenceEndDate, setRecurrenceEndDate] = useState('');
   const [isAllDay, setIsAllDay] = useState(false);
   const [urls, setUrls] = useState<string[]>([]);
   const [newUrlInput, setNewUrlInput] = useState('');
@@ -91,6 +97,14 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
       setNotes(task.notes || '');
       setUrls(task.urls || []);
       setIsAllDay(task.isAllDay || false);
+      if (task.startDate) {
+        const sd = new Date(task.startDate);
+        setStartDateVal(format(sd, 'yyyy-MM-dd'));
+        setStartTimeVal(format(sd, 'HH:mm'));
+      } else {
+        setStartDateVal('');
+        setStartTimeVal('09:00');
+      }
       if (task.deadline) {
         const d = new Date(task.deadline);
         setDeadlineDate(format(d, 'yyyy-MM-dd'));
@@ -98,6 +112,19 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
       } else {
         setDeadlineDate('');
         setDeadlineTime('18:00');
+      }
+      if (task.recurrence && task.recurrence.type !== 'none') {
+        setRecurrenceType(task.recurrence.type);
+        setRecurrenceInterval(task.recurrence.interval ?? 1);
+        if (task.recurrence.endDate) {
+          setRecurrenceEndDate(format(new Date(task.recurrence.endDate), 'yyyy-MM-dd'));
+        } else {
+          setRecurrenceEndDate('');
+        }
+      } else {
+        setRecurrenceType('none');
+        setRecurrenceInterval(1);
+        setRecurrenceEndDate('');
       }
     }
   }, [task?.id, task?.updatedAt]);
@@ -148,6 +175,24 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
     triggerSaveNotice();
   };
 
+  const handleStartDateCommit = (dateStr: string, timeStr: string, allDay: boolean) => {
+    if (!dateStr) {
+      onUpdateTask(task.id, { startDate: undefined });
+      triggerSaveNotice();
+      return;
+    }
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const d = new Date(year, month - 1, day);
+    if (allDay) {
+      d.setHours(0, 0, 0, 0);
+    } else {
+      const [h, m] = timeStr.split(':').map(Number);
+      d.setHours(h || 9, m || 0, 0, 0);
+    }
+    onUpdateTask(task.id, { startDate: d.getTime() });
+    triggerSaveNotice();
+  };
+
   const handleDeadlineCommit = (dateStr: string, timeStr: string, allDay: boolean) => {
     if (!dateStr) {
       onUpdateTask(task.id, { deadline: undefined, isAllDay: allDay });
@@ -163,6 +208,28 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
       d.setHours(h || 18, m || 0, 0, 0);
     }
     onUpdateTask(task.id, { deadline: d.getTime(), isAllDay: allDay });
+    triggerSaveNotice();
+  };
+
+  const handleRecurrenceCommit = (type: RecurrenceType, intervalVal: number, endDateStr: string) => {
+    if (type === 'none') {
+      onUpdateTask(task.id, { recurrence: undefined });
+      triggerSaveNotice();
+      return;
+    }
+    let endTimestamp: number | undefined = undefined;
+    if (endDateStr) {
+      const [y, m, d] = endDateStr.split('-').map(Number);
+      const ed = new Date(y, m - 1, d, 23, 59, 59, 999);
+      endTimestamp = ed.getTime();
+    }
+    onUpdateTask(task.id, {
+      recurrence: {
+        type,
+        interval: Math.max(1, intervalVal),
+        endDate: endTimestamp
+      }
+    });
     triggerSaveNotice();
   };
 
@@ -327,61 +394,202 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
             </button>
           </div>
 
-          {/* Deadline Setting */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
-              <CalendarIcon size={13} className="text-slate-400" />
-              <span>{isJa ? '締切 / 期日' : 'Deadline'}</span>
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                type="date"
-                value={deadlineDate}
-                onChange={(e) => {
-                  setDeadlineDate(e.target.value);
-                  handleDeadlineCommit(e.target.value, deadlineTime, isAllDay);
-                }}
-                className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500 transition-colors"
-              />
-              {!isAllDay && (
+          {/* When (Start Date), Deadline & Recurrence */}
+          <div className="space-y-2.5 p-3 bg-slate-50/70 border border-slate-200/80 rounded-xl">
+            {/* Start Date: いつ */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                  <Clock size={13} className="text-indigo-500" />
+                  <span>{isJa ? 'いつ (開始日)' : 'When (Start Date)'}</span>
+                </label>
+                {startDateVal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStartDateVal('');
+                      handleStartDateCommit('', startTimeVal, isAllDay);
+                    }}
+                    className="text-xs text-slate-400 hover:text-red-500 px-1 py-0.5 hover:bg-slate-100 rounded transition-colors"
+                    title={isJa ? '開始日をクリア' : 'Clear start date'}
+                  >
+                    {isJa ? 'クリア' : 'Clear'}
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
                 <input
-                  type="time"
-                  value={deadlineTime}
-                  disabled={!deadlineDate}
+                  type="date"
+                  value={startDateVal}
                   onChange={(e) => {
-                    setDeadlineTime(e.target.value);
-                    handleDeadlineCommit(deadlineDate, e.target.value, isAllDay);
+                    setStartDateVal(e.target.value);
+                    handleStartDateCommit(e.target.value, startTimeVal, isAllDay);
                   }}
-                  className="w-24 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-40"
+                  className="flex-1 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
                 />
-              )}
-              {deadlineDate && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDeadlineDate('');
-                    handleDeadlineCommit('', deadlineTime, isAllDay);
-                  }}
-                  className="text-xs text-slate-400 hover:text-red-500 px-1.5 py-1 hover:bg-slate-100 rounded transition-colors"
-                  title={isJa ? '締切をクリア' : 'Clear deadline'}
-                >
-                  {isJa ? 'クリア' : 'Clear'}
-                </button>
-              )}
+                {!isAllDay && (
+                  <input
+                    type="time"
+                    value={startTimeVal}
+                    disabled={!startDateVal}
+                    onChange={(e) => {
+                      setStartTimeVal(e.target.value);
+                      handleStartDateCommit(startDateVal, e.target.value, isAllDay);
+                    }}
+                    className="w-24 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-40"
+                  />
+                )}
+              </div>
             </div>
+
+            {/* Deadline: 締切 */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                  <CalendarIcon size={13} className="text-amber-500" />
+                  <span>{isJa ? '締切 / 期日' : 'Deadline'}</span>
+                </label>
+                {deadlineDate && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeadlineDate('');
+                      handleDeadlineCommit('', deadlineTime, isAllDay);
+                    }}
+                    className="text-xs text-slate-400 hover:text-red-500 px-1 py-0.5 hover:bg-slate-100 rounded transition-colors"
+                    title={isJa ? '締切をクリア' : 'Clear deadline'}
+                  >
+                    {isJa ? 'クリア' : 'Clear'}
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={deadlineDate}
+                  onChange={(e) => {
+                    setDeadlineDate(e.target.value);
+                    handleDeadlineCommit(e.target.value, deadlineTime, isAllDay);
+                  }}
+                  className="flex-1 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
+                />
+                {!isAllDay && (
+                  <input
+                    type="time"
+                    value={deadlineTime}
+                    disabled={!deadlineDate}
+                    onChange={(e) => {
+                      setDeadlineTime(e.target.value);
+                      handleDeadlineCommit(deadlineDate, e.target.value, isAllDay);
+                    }}
+                    className="w-24 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-40"
+                  />
+                )}
+              </div>
+            </div>
+
+            {/* All-day Checkbox */}
             <div className="flex items-center gap-2 pt-0.5">
-              <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
+              <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600 cursor-pointer select-none">
                 <input
                   type="checkbox"
                   checked={isAllDay}
                   onChange={(e) => {
                     setIsAllDay(e.target.checked);
                     handleDeadlineCommit(deadlineDate, deadlineTime, e.target.checked);
+                    if (startDateVal) {
+                      handleStartDateCommit(startDateVal, startTimeVal, e.target.checked);
+                    }
                   }}
                   className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                 />
-                <span>{isJa ? '終日タスク' : 'All day'}</span>
+                <span>{isJa ? '終日設定' : 'All day'}</span>
               </label>
+            </div>
+
+            {/* Recurrence: 繰り返し */}
+            <div className="pt-2 border-t border-slate-200/80 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                  <Repeat size={13} className="text-indigo-600" />
+                  <span>{isJa ? '繰り返し' : 'Repeat'}</span>
+                </label>
+                {recurrenceType !== 'none' && (
+                  <span className="text-[10px] text-indigo-600 font-semibold bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-100">
+                    {isJa ? '繰り返し有効' : 'Active'}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <select
+                  value={recurrenceType}
+                  onChange={(e) => {
+                    const newType = e.target.value as RecurrenceType;
+                    setRecurrenceType(newType);
+                    handleRecurrenceCommit(newType, recurrenceInterval, recurrenceEndDate);
+                  }}
+                  className="flex-1 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
+                >
+                  <option value="none">{isJa ? 'なし' : 'None'}</option>
+                  <option value="daily">{isJa ? '毎日' : 'Every day'}</option>
+                  <option value="every_x_days">{isJa ? 'X日ごと' : 'Every X days'}</option>
+                  <option value="weekly">{isJa ? '毎週' : 'Every week'}</option>
+                  <option value="every_x_weeks">{isJa ? 'X週ごと' : 'Every X weeks'}</option>
+                </select>
+
+                {(recurrenceType === 'every_x_days' || recurrenceType === 'every_x_weeks') && (
+                  <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg px-2 py-1">
+                    <input
+                      type="number"
+                      min="1"
+                      max="365"
+                      value={recurrenceInterval}
+                      onChange={(e) => {
+                        const val = Math.max(1, parseInt(e.target.value, 10) || 1);
+                        setRecurrenceInterval(val);
+                        handleRecurrenceCommit(recurrenceType, val, recurrenceEndDate);
+                      }}
+                      className="w-10 text-xs text-slate-800 font-bold text-center outline-none"
+                    />
+                    <span className="text-xs text-slate-500 font-medium">
+                      {recurrenceType === 'every_x_days' 
+                        ? (isJa ? '日ごと' : 'days') 
+                        : (isJa ? '週ごと' : 'weeks')}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {recurrenceType !== 'none' && (
+                <div className="flex items-center justify-between gap-2 pt-1 text-xs text-slate-500">
+                  <span className="text-xs shrink-0 font-medium">{isJa ? '終了日 (任意):' : 'End date:'}</span>
+                  <div className="flex items-center gap-1 flex-1 max-w-[180px]">
+                    <input
+                      type="date"
+                      value={recurrenceEndDate}
+                      onChange={(e) => {
+                        setRecurrenceEndDate(e.target.value);
+                        handleRecurrenceCommit(recurrenceType, recurrenceInterval, e.target.value);
+                      }}
+                      className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
+                    />
+                    {recurrenceEndDate && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRecurrenceEndDate('');
+                          handleRecurrenceCommit(recurrenceType, recurrenceInterval, '');
+                        }}
+                        className="text-xs text-slate-400 hover:text-red-500 px-1 py-0.5"
+                        title={isJa ? '終了日をクリア' : 'Clear'}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

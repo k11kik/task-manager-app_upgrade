@@ -29,12 +29,14 @@ import {
   RefreshCw,
   ListTodo,
   RotateCcw,
+  Repeat,
   LayoutGrid,
   ArrowLeftRight
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn } from '../lib/utils';
 import { format, addDays, subDays, startOfDay, isSameDay, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
+import { isTaskOccurringOnDate } from '../lib/taskDateUtils';
 
 export interface CustomTimelineColumn {
   id: string;
@@ -113,7 +115,7 @@ export const getTaskDeadlineAlert = (deadline?: number, isDone?: boolean, isJa: 
 interface ProjectTimelineViewProps {
   tasks: Task[];
   activeTaskId: string | null;
-  onSelectTask: (taskId: string) => void;
+  onSelectTask: (taskId: string, isPermanent?: boolean) => void;
   onUpdateTask?: (taskId: string, updates: Partial<Task>) => void;
   onScheduleTask?: (taskId: string, deadline?: number) => void;
   onMoveTaskFolder?: (taskId: string, newProject: string) => void;
@@ -588,6 +590,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   } | null>(null);
 
   // Quick inline task creation in timeline cell
+  const isSubmittingQuickAddRef = useRef(false);
   const [quickAddCell, setQuickAddCell] = useState<{ 
     project: string; 
     slotKey: string; 
@@ -1056,11 +1059,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     return visibleProjectTree.map((project, pIdx) => {
       const projectTasks = project.tasks;
 
-      // Unscheduled tasks (ToDo list)
+      // Unscheduled tasks (ToDo list) - Sorted: Active (A-Z), then Done (A-Z)
       const unscheduled = (showUnscheduledColumn 
         ? projectTasks.filter(t => timelineMode === 'calendar' ? !t.deadline : !getTaskCurrentColumnId(t, customColumns))
         : []
-      ).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+      ).sort((a, b) => {
+        const aDone = Boolean(a.isDone);
+        const bDone = Boolean(b.isDone);
+        if (aDone !== bDone) return aDone ? 1 : -1;
+        return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+      });
 
       // Scheduled / column tasks
       let scheduled: Task[] = [];
@@ -1761,28 +1769,36 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  const handleQuickAddSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleQuickAddSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (isSubmittingQuickAddRef.current) return;
     if (!quickAddCell || !quickAddTitle.trim()) {
       setQuickAddCell(null);
       setQuickAddTitle('');
       return;
     }
 
-    const { project, type, dateMs, columnId } = quickAddCell;
+    const cell = quickAddCell;
+    const title = quickAddTitle.trim();
+    isSubmittingQuickAddRef.current = true;
 
-    await onAddTask({
-      title: quickAddTitle.trim(),
-      project,
-      deadline: type === 'calendar' ? dateMs : undefined,
-      timelineColumn: type === 'custom' ? columnId : undefined,
-      timelineStep: type === 'custom' ? (quickAddCell.stepIdx ?? 0) : undefined,
-      isAllDay: true,
-      order: Date.now() % 10000
-    });
-
+    // Immediately clear quick add so no ghost duplicate card or input flashes while creating
     setQuickAddCell(null);
     setQuickAddTitle('');
+
+    try {
+      await onAddTask({
+        title,
+        project: cell.project,
+        deadline: cell.type === 'calendar' ? cell.dateMs : undefined,
+        timelineColumn: cell.type === 'custom' ? cell.columnId : undefined,
+        timelineStep: cell.type === 'custom' ? (cell.stepIdx ?? 0) : undefined,
+        isAllDay: true,
+        order: Date.now() % 10000
+      });
+    } finally {
+      isSubmittingQuickAddRef.current = false;
+    }
   };
 
   return (
@@ -2333,16 +2349,29 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             }).length;
 
             // Unscheduled tasks (no deadline in calendar mode, no timelineColumn in current preset for custom mode)
+            // Sorted: Active (A-Z), then Done (A-Z) as requested
             const unscheduledTasks = projectTasks.filter(t => {
               if (timelineMode === 'calendar') return !t.deadline;
               return !getTaskCurrentColumnId(t, customColumns);
-            }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+            }).sort((a, b) => {
+              const aDone = Boolean(a.isDone);
+              const bDone = Boolean(b.isDone);
+              if (aDone !== bDone) return aDone ? 1 : -1;
+              return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+            });
 
             // Fine grid task placements and dynamic lane height for calendar and custom stages
             const { placed: calendarPlaced, laneHeight: calendarLaneHeight } = getPlacedTasksForProject(projectTasks);
             const { placed: customPlaced, laneHeight: customLaneHeight } = getPlacedCustomTasksForProject(projectTasks);
             const placed = calendarPlaced;
-            const laneHeight = timelineMode === 'calendar' ? calendarLaneHeight : customLaneHeight;
+
+            // Calculate minimum height required for unscheduled tasks column
+            const unscheduledEstimatedHeight = showUnscheduledColumn && unscheduledTasks.length > 0
+              ? Math.max(56, unscheduledTasks.length * 34 + 14 + (quickAddCell?.project === project.fullPath && quickAddCell?.slotKey === 'backlog' ? 42 : 0))
+              : 56;
+
+            const gridContentHeight = timelineMode === 'calendar' ? calendarLaneHeight : customLaneHeight;
+            const laneHeight = Math.max(56, gridContentHeight, unscheduledEstimatedHeight);
 
             return (
               <div 
@@ -2368,9 +2397,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     }
                   }}
                   onDrop={(e) => handleProjectHeaderDrop(e, project.fullPath)}
-                  style={{ width: `${projectColWidth}px`, paddingLeft: `${Math.max(4, indentPx + 4)}px` }}
+                  style={{ width: `${projectColWidth}px`, minHeight: `${laneHeight}px`, paddingLeft: `${Math.max(4, indentPx + 4)}px` }}
                   className={cn(
-                    "shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-center justify-between bg-white sticky left-0 z-20 select-none transition-colors cursor-grab active:cursor-grabbing group/lane",
+                    "shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-center justify-between bg-white sticky left-0 z-20 select-none transition-colors cursor-grab active:cursor-grabbing group/lane self-stretch min-h-[56px]",
                     project.level === 0 ? "font-bold text-slate-800" : "font-medium text-slate-600",
                     dragOverProjectHeader === project.fullPath && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset",
                     (selectedFolderPath === project.fullPath || selectedKey === `folder:${project.fullPath}`) && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset"
@@ -2497,10 +2526,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           columnId: null 
                         } as any)}
                         className={cn(
-                          "shrink-0 p-1.5 border-r border-slate-200/80 bg-amber-50/20 flex flex-col gap-1 min-h-[56px] transition-colors relative",
+                          "shrink-0 p-1.5 border-r border-slate-200/80 bg-amber-50/20 flex flex-col gap-1 min-h-[56px] transition-colors relative self-stretch",
                           dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === 'backlog' && "bg-amber-100/70 border-2 border-dashed border-amber-500"
                         )}
-                        style={{ width: `${todoColWidth}px` }}
+                        style={{ width: `${todoColWidth}px`, minHeight: `${laneHeight}px` }}
                       >
                         {/* Task items in unscheduled */}
                         {unscheduledTasks.map((task) => renderTaskChip(task))}
@@ -2522,6 +2551,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 }
                               }}
                               onBlur={() => {
+                                if (isSubmittingQuickAddRef.current) return;
                                 if (!quickAddTitle.trim()) setQuickAddCell(null);
                               }}
                               className="w-full bg-white border border-indigo-300 rounded px-1.5 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
@@ -2535,8 +2565,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     {timelineMode === 'calendar' ? (
                       /* Calendar Fine Grid Lane */
                       <div 
-                        style={{ width: `${totalGridWidth}px`, height: `${laneHeight}px`, minHeight: '56px' }}
-                        className="relative flex-1 shrink-0 select-none bg-white"
+                        style={{ width: `${totalGridWidth}px`, minHeight: `${laneHeight}px` }}
+                        className="relative flex-1 shrink-0 select-none bg-white self-stretch"
                       >
                         {/* Vertical Grid Lines & Droppable / Double-Clickable Slots */}
                         <div className="absolute inset-0 flex pointer-events-auto">
@@ -2644,6 +2674,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                   }
                                 }}
                                 onBlur={() => {
+                                  if (isSubmittingQuickAddRef.current) return;
                                   if (!quickAddTitle.trim()) setQuickAddCell(null);
                                 }}
                                 className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
@@ -2655,8 +2686,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     ) : (
                       /* Custom Abstract Columns / Stages Grid Lane (Dates pattern without dates) */
                       <div 
-                        style={{ width: `${totalCustomGridWidth + 48}px`, height: `${laneHeight}px`, minHeight: '56px' }}
-                        className="relative flex-1 shrink-0 select-none bg-white"
+                        style={{ width: `${totalCustomGridWidth + 48}px`, minHeight: `${laneHeight}px` }}
+                        className="relative flex-1 shrink-0 select-none bg-white self-stretch"
                       >
                         {/* Background Phase & Step Grid Slots */}
                         <div className="absolute inset-0 flex pointer-events-auto">
@@ -2718,7 +2749,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           {/* End of columns Add Button Filler in Lane */}
                           <div 
                             onClick={handleAddColumn}
-                            className="w-12 shrink-0 border-r border-slate-200/60 bg-slate-50/20 hover:bg-indigo-50/40 cursor-pointer flex items-center justify-center text-slate-300 hover:text-indigo-600 transition-colors"
+                            className="w-12 shrink-0 border-r border-slate-200/60 bg-slate-50/20 hover:bg-indigo-50/40 cursor-pointer flex items-center justify-center text-slate-300 hover:text-indigo-600 transition-colors h-full"
                             title={isJa ? "新しいPhase列を追加" : "Add new Phase column"}
                           >
                             <Plus size={13} />
@@ -2783,6 +2814,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                     }
                                   }}
                                   onBlur={() => {
+                                    if (isSubmittingQuickAddRef.current) return;
                                     if (!quickAddTitle.trim()) setQuickAddCell(null);
                                   }}
                                   className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
@@ -2956,8 +2988,15 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           (window as any).__navforActivePane = 'timeline';
           setSelectedKey(`task:${task.id}`);
           setSelectedFolderPath(null);
-          onSelectTask(task.id);
+          onSelectTask(task.id, false);
           e.currentTarget.focus();
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          (window as any).__navforActivePane = 'timeline';
+          setSelectedKey(`task:${task.id}`);
+          setSelectedFolderPath(null);
+          onSelectTask(task.id, true);
         }}
         className={cn(
           "group/chip relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-grab active:cursor-grabbing transition-all shadow-2xs border select-none outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
