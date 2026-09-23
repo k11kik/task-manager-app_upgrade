@@ -52,6 +52,41 @@ service cloud.firestore {
       allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
     }
 
+    // Folder Metadata Security
+    match /folders/{folderId} {
+      function isValidFolder(data) {
+        return data.userId == request.auth.uid 
+          && data.path is string && data.path.size() <= 200
+          && (!('name' in data) || data.name is string)
+          && (!('section' in data) || data.section is string)
+          && (!('category' in data) || data.category in ['Focus', 'Archive', 'Trash'])
+          && (!('createdAt' in data) || data.createdAt is number)
+          && (!('updatedAt' in data) || data.updatedAt is number)
+          && (!('isDone' in data) || data.isDone is bool)
+          && (!('notes' in data) || (data.notes is string && data.notes.size() <= 10000))
+          && (!('deadline' in data) || (data.deadline is number || data.deadline == null))
+          && (!('startDate' in data) || (data.startDate is number || data.startDate == null))
+          && (!('urls' in data) || (data.urls is list))
+          && (!('isStarred' in data) || (data.isStarred is bool))
+          && (!('isPinned' in data) || (data.isPinned is bool))
+          && (!('isAllDay' in data) || (data.isAllDay is bool));
+      }
+
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      
+      allow create: if isSignedIn() 
+        && isValidFolder(request.resource.data)
+        && request.resource.data.userId == request.auth.uid;
+        
+      allow update: if isSignedIn() 
+        && resource.data.userId == request.auth.uid
+        && isValidFolder(request.resource.data)
+        && request.resource.data.userId == resource.data.userId;
+        
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
     // Settings Security
     match /settings/{userId} {
       function isValidSettings(data) {

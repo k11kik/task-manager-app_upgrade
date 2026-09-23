@@ -38,12 +38,39 @@
         "archiveInactiveToTrashDays": { "type": "number" }
       },
       "required": ["userId", "urgentLimit", "archiveThresholdDays", "warningThreshold", "criticalThreshold", "isLocalBackupEnabled", "localBackupPath", "language"]
+    },
+    "Folder": {
+      "title": "Folder",
+      "description": "Folder metadata including deadlines, stars, and pins",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "path": { "type": "string" },
+        "name": { "type": "string" },
+        "section": { "type": "string" },
+        "category": { "type": "string", "enum": ["Focus", "Archive", "Trash"] },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "isDone": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "urls": { "type": "array", "items": { "type": "string", "format": "uri" } },
+        "isStarred": { "type": "boolean" },
+        "isPinned": { "type": "boolean" },
+        "isAllDay": { "type": "boolean" },
+        "deadline": { "type": "number" },
+        "startDate": { "type": "number" }
+      },
+      "required": ["userId", "path", "category"]
     }
   },
   "firestore": {
     "/tasks/{taskId}": {
       "schema": "Task",
       "description": "Collection of tasks"
+    },
+    "/folders/{folderId}": {
+      "schema": "Folder",
+      "description": "Collection of folders"
     },
     "/settings/{userId}": {
       "schema": "UserSettings",

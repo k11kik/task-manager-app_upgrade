@@ -21,7 +21,7 @@ import {
   FileText,
   Repeat
 } from 'lucide-react';
-import { Task, Category, RecurrenceType } from '../types';
+import { Task, Category, RecurrenceType, TaskRecurrence } from '../types';
 import { cn } from '../lib/utils';
 import { format } from 'date-fns';
 
@@ -223,12 +223,13 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
       const ed = new Date(y, m - 1, d, 23, 59, 59, 999);
       endTimestamp = ed.getTime();
     }
+    const recurrenceRule: TaskRecurrence = {
+      type,
+      interval: Math.max(1, intervalVal),
+      ...(endTimestamp !== undefined ? { endDate: endTimestamp } : {})
+    };
     onUpdateTask(task.id, {
-      recurrence: {
-        type,
-        interval: Math.max(1, intervalVal),
-        endDate: endTimestamp
-      }
+      recurrence: recurrenceRule
     });
     triggerSaveNotice();
   };

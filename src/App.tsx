@@ -52,7 +52,8 @@ import {
   Layers,
   CalendarDays,
   Lock,
-  ShieldAlert
+  ShieldAlert,
+  Repeat
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DragDropContext, Droppable, Draggable as DraggableDnd } from '@hello-pangea/dnd';
@@ -82,6 +83,7 @@ import {
 import { ja, fr, enUS } from 'date-fns/locale';
 import { Category, Task } from './types';
 import { cn, formatDate } from './lib/utils';
+import { isTaskOccurringOnDate } from './lib/taskDateUtils';
 import { auth, db, signIn, logOut } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { AuthModal } from './components/AuthModal';
@@ -131,7 +133,7 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "3.1.7";
+  const APP_VERSION = "3.1.8";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -227,6 +229,32 @@ export default function App() {
     }
   };
 
+  const [isDetailPaneVisible, setIsDetailPaneVisible] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('navfor_detail_visible') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+
+  const handleMinimizeDetailPane = () => {
+    setIsDetailPaneVisible(false);
+    try {
+      localStorage.setItem('navfor_detail_visible', 'false');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleExpandDetailPane = () => {
+    setIsDetailPaneVisible(true);
+    try {
+      localStorage.setItem('navfor_detail_visible', 'true');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(() => {
     try {
       localStorage.setItem('navfor_open_tabs', JSON.stringify(openTaskIds));
@@ -250,6 +278,12 @@ export default function App() {
       return [...prev, taskId];
     });
     setActiveTabTaskId(taskId);
+    setIsDetailPaneVisible(true);
+    try {
+      localStorage.setItem('navfor_detail_visible', 'true');
+    } catch (e) {
+      console.error(e);
+    }
     if (viewMode !== 'dashboard') {
       setViewMode('dashboard');
     }
@@ -273,6 +307,21 @@ export default function App() {
   const handleCloseAllTabs = () => {
     setOpenTaskIds([]);
     setActiveTabTaskId(null);
+    setIsDetailPaneVisible(false);
+    try {
+      localStorage.setItem('navfor_open_tabs', '[]');
+      localStorage.removeItem('navfor_active_tab');
+      localStorage.setItem('navfor_detail_visible', 'false');
+      const emptyPanes = [
+        { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+        { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+        { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+        { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      ];
+      localStorage.setItem('navfor_editor_panes', JSON.stringify(emptyPanes));
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const handleExplorerWidthChange = (w: number) => {
@@ -1797,6 +1846,23 @@ export default function App() {
     }
   };
 
+  const sanitizeForFirestore = (val: any): any => {
+    if (val === null || val === undefined) return val;
+    if (Array.isArray(val)) {
+      return val.map(sanitizeForFirestore).filter(x => x !== undefined);
+    }
+    if (typeof val === 'object' && !(val instanceof Date) && val.constructor?.name === 'Object') {
+      const cleaned: Record<string, any> = {};
+      for (const [k, v] of Object.entries(val)) {
+        if (v !== undefined) {
+          cleaned[k] = sanitizeForFirestore(v);
+        }
+      }
+      return cleaned;
+    }
+    return val;
+  };
+
   const updateTask = async (id: string, updates: Partial<Task>) => {
     if (!user) return;
     pushToHistory();
@@ -1807,7 +1873,7 @@ export default function App() {
           if (v === undefined) {
             firestoreUpdates[k] = deleteField();
           } else {
-            firestoreUpdates[k] = v;
+            firestoreUpdates[k] = sanitizeForFirestore(v);
           }
         }
         await updateDoc(doc(db, 'tasks', id), firestoreUpdates);
@@ -3485,7 +3551,7 @@ export default function App() {
                   </div>
 
                   {/* Task Detail Pane (Right side, resizable, tabbed & split like VS Code) */}
-                  {(activeTabTaskId || openTaskIds.length > 0) && (
+                  {isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
                     <TaskTabsDetail
                       tasks={tasks}
                       activeTaskId={activeTabTaskId}
@@ -3497,10 +3563,10 @@ export default function App() {
                           setLastOpenEvent({ taskId: id, isPermanent: true, timestamp: Date.now() });
                         }
                       }}
-                      onClose={() => {
-                        setActiveTabTaskId(null);
-                        setOpenTaskIds([]);
-                      }}
+                      onClose={handleMinimizeDetailPane}
+                      onMinimize={handleMinimizeDetailPane}
+                      onCloseAllTabs={handleCloseAllTabs}
+                      onOpenTaskIdsChange={setOpenTaskIds}
                       onUpdateTask={updateTask}
                       onMoveTask={moveTask}
                       onDeleteTask={deleteTask}
@@ -3514,6 +3580,29 @@ export default function App() {
                       onWidthChange={handleDetailPaneWidthChange}
                       t={t}
                     />
+                  )}
+
+                  {/* Collapsed Detail Pane Bar when minimized with open tabs */}
+                  {!isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
+                    <div className="h-full shrink-0 flex flex-col items-center py-2 px-1 bg-slate-50/90 border-l border-slate-200 select-none w-10 transition-all z-10">
+                      <button
+                        type="button"
+                        onClick={handleExpandDetailPane}
+                        className="p-1.5 hover:bg-slate-200 text-slate-600 hover:text-indigo-600 rounded-md transition-colors"
+                        title={settings.language === 'ja' ? '詳細ペインを展開 (タブを復元)' : 'Expand Detail Pane (restore tabs)'}
+                      >
+                        <FileText size={16} />
+                      </button>
+                      <div
+                        onClick={handleExpandDetailPane}
+                        className="mt-6 flex-1 cursor-pointer flex flex-col items-center justify-start text-slate-400 hover:text-indigo-600 transition-colors w-full"
+                        title={settings.language === 'ja' ? '詳細ペインを展開 (タブを復元)' : 'Expand Detail Pane (restore tabs)'}
+                      >
+                        <span className="text-[10px] font-black tracking-widest uppercase [writing-mode:vertical-lr] select-none">
+                          {settings.language === 'ja' ? 'タスク詳細' : 'TASK DETAIL'} ({openTaskIds.length})
+                        </span>
+                      </div>
+                    </div>
                   )}
                 </div>
               ) : viewMode === 'calendar' ? (
@@ -4544,23 +4633,25 @@ const TaskCard: React.FC<TaskCardProps> = ({
 function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t: Task) => void; t: (key: string) => string; locale: any }) {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [calendarMode, setCalendarMode] = useState<'year' | 'month' | 'week' | 'day'>('month');
+  const [showRecurrence, setShowRecurrence] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_calendar_show_recurrence');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const ignoreScrollChange = useRef(true); 
   const isTransitioning = useRef(false);
 
-  const tasksWithDeadlines = useMemo(() => tasks.filter(t => t.deadline && t.category !== 'Trash'), [tasks]);
-
-  const tasksByDate = useMemo(() => {
-    const map: Record<string, Task[]> = {};
-    tasksWithDeadlines.forEach(t => {
-      if (t.deadline) {
-        const d = format(t.deadline, 'yyyy-MM-dd');
-        if (!map[d]) map[d] = [];
-        map[d].push(t);
-      }
-    });
-    return map;
-  }, [tasksWithDeadlines]);
+  // Active tasks for calendar: anything not in Trash that has a deadline, startDate, or recurrence
+  const activeCalendarTasks = useMemo(() => {
+    return tasks.filter(t => 
+      t.category !== 'Trash' && 
+      (typeof t.deadline === 'number' || typeof t.startDate === 'number' || (t.recurrence && t.recurrence.type !== 'none'))
+    );
+  }, [tasks]);
 
   const navigate = (direction: 'prev' | 'next') => {
     ignoreScrollChange.current = false;
@@ -4583,6 +4674,8 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
     setCurrentDate(new Date());
     setTimeout(() => { isTransitioning.current = false; }, 500);
   };
+
+  const isJa = locale?.code?.startsWith('ja');
 
   return (
     <div className="h-full flex flex-col bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
@@ -4618,6 +4711,29 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
              calendarMode === 'week' ? `W${format(startOfWeek(currentDate, { locale }), 'w', { locale })} ${format(startOfWeek(currentDate, { locale }), 'MMM d', { locale })}` :
              format(currentDate, 'MMM d, yyyy', { locale })}
           </h2>
+
+          {/* Recurrence Toggle (繰り返しを表示する/しない) */}
+          <label 
+            className="flex items-center gap-1.5 px-2 md:px-2.5 py-1 md:py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-[8px] md:text-[10px] font-bold text-slate-700 cursor-pointer select-none transition-colors"
+            title={isJa ? "繰り返しのタスクを表示するか切り替えます" : "Toggle display of repeating tasks"}
+          >
+            <input
+              type="checkbox"
+              checked={showRecurrence}
+              onChange={(e) => {
+                const nextVal = e.target.checked;
+                setShowRecurrence(nextVal);
+                try {
+                  localStorage.setItem('navfor_calendar_show_recurrence', String(nextVal));
+                } catch {}
+              }}
+              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 scale-90"
+            />
+            <Repeat size={12} className={showRecurrence ? "text-indigo-600 shrink-0" : "text-slate-400 shrink-0"} />
+            <span className="hidden sm:inline">{isJa ? '繰り返しを表示' : 'Show Repeats'}</span>
+            <span className="sm:hidden">{isJa ? '繰返' : 'Repeat'}</span>
+          </label>
+
           <div className="flex items-center gap-1.5 md:gap-2">
             <button 
               onClick={goToToday}
@@ -4644,7 +4760,8 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
             scrollContainerRef={scrollContainerRef} 
             ignoreScrollChange={ignoreScrollChange}
             currentDate={currentDate} 
-            tasksByDate={tasksByDate} 
+            tasks={activeCalendarTasks}
+            showRecurrence={showRecurrence}
             onDateSelect={(d) => { setCurrentDate(d); setCalendarMode('month'); }} 
             onYearChange={setCurrentDate} 
             locale={locale}
@@ -4655,7 +4772,8 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
             scrollContainerRef={scrollContainerRef} 
             ignoreScrollChange={ignoreScrollChange}
             currentDate={currentDate} 
-            tasksByDate={tasksByDate} 
+            tasks={activeCalendarTasks}
+            showRecurrence={showRecurrence}
             onEdit={onEdit} 
             onDateSelect={(d) => { setCurrentDate(d); setCalendarMode('day'); }} 
             onMonthChange={setCurrentDate} 
@@ -4663,17 +4781,29 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
           />
         )}
         {calendarMode === 'week' && (
-          <WeekView currentDate={currentDate} tasks={tasksWithDeadlines} onEdit={onEdit} locale={locale} />
+          <WeekView 
+            currentDate={currentDate} 
+            tasks={activeCalendarTasks} 
+            showRecurrence={showRecurrence}
+            onEdit={onEdit} 
+            locale={locale} 
+          />
         )}
         {calendarMode === 'day' && (
-          <DayView currentDate={currentDate} tasks={tasksWithDeadlines} onEdit={onEdit} locale={locale} />
+          <DayView 
+            currentDate={currentDate} 
+            tasks={activeCalendarTasks} 
+            showRecurrence={showRecurrence}
+            onEdit={onEdit} 
+            locale={locale} 
+          />
         )}
       </div>
     </div>
   );
 }
 
-const YearGrid = React.memo(({ yearDate, tasksByDate, onDateSelect, locale }: { yearDate: Date; tasksByDate: Record<string, Task[]>; onDateSelect: (d: Date) => void; locale: any }) => {
+const YearGrid = React.memo(({ yearDate, tasks, showRecurrence, onDateSelect, locale }: { yearDate: Date; tasks: Task[]; showRecurrence: boolean; onDateSelect: (d: Date) => void; locale: any }) => {
   const year = yearDate.getFullYear();
   const monthsData = useMemo(() => {
     const months = eachMonthOfInterval({
@@ -4685,12 +4815,16 @@ const YearGrid = React.memo(({ yearDate, tasksByDate, onDateSelect, locale }: { 
       const days = eachDayOfInterval({
         start: startOfMonth(month),
         end: endOfMonth(month)
-      }).map(day => ({
-        date: day,
-        key: format(day, 'yyyy-MM-dd'),
-        dayNum: format(day, 'd'),
-        isToday: isSameDay(day, today)
-      }));
+      }).map(day => {
+        const dayTasksCount = tasks.filter(t => isTaskOccurringOnDate(t, day, showRecurrence)).length;
+        return {
+          date: day,
+          key: format(day, 'yyyy-MM-dd'),
+          dayNum: format(day, 'd'),
+          isToday: isSameDay(day, today),
+          count: dayTasksCount
+        };
+      });
       return {
         month,
         monthName: format(month, 'MMMM', { locale }),
@@ -4698,7 +4832,7 @@ const YearGrid = React.memo(({ yearDate, tasksByDate, onDateSelect, locale }: { 
         days
       };
     });
-  }, [yearDate, locale]);
+  }, [yearDate, tasks, showRecurrence, locale]);
 
   const weekdays = useMemo(() => {
     const start = startOfWeek(new Date(), { locale });
@@ -4724,24 +4858,21 @@ const YearGrid = React.memo(({ yearDate, tasksByDate, onDateSelect, locale }: { 
               {Array.from({ length: mData.emptyDays }).map((_, i) => (
                 <div key={`empty-${i}`} />
               ))}
-              {mData.days.map(dayInfo => {
-                const dayTasks = tasksByDate[dayInfo.key] || [];
-                return (
-                  <div 
-                    key={dayInfo.key}
-                    className={cn(
-                      "w-6 h-6 flex items-center justify-center rounded-full transition-all cursor-pointer",
-                      dayTasks.length > 5 ? "bg-red-500 text-white" :
-                      dayTasks.length > 2 ? "bg-amber-400 text-slate-800" :
-                      dayTasks.length > 0 ? "bg-indigo-100 text-indigo-600" :
-                      dayInfo.isToday ? "border border-indigo-500 text-indigo-500" : "text-slate-400 hover:bg-slate-100"
-                    )}
-                    onClick={() => onDateSelect(dayInfo.date)}
-                  >
-                    {dayInfo.dayNum}
-                  </div>
-                );
-              })}
+              {mData.days.map(dayInfo => (
+                <div 
+                  key={dayInfo.key}
+                  className={cn(
+                    "w-6 h-6 flex items-center justify-center rounded-full transition-all cursor-pointer",
+                    dayInfo.count > 5 ? "bg-red-500 text-white" :
+                    dayInfo.count > 2 ? "bg-amber-400 text-slate-800" :
+                    dayInfo.count > 0 ? "bg-indigo-100 text-indigo-600" :
+                    dayInfo.isToday ? "border border-indigo-500 text-indigo-500" : "text-slate-400 hover:bg-slate-100"
+                  )}
+                  onClick={() => onDateSelect(dayInfo.date)}
+                >
+                  {dayInfo.dayNum}
+                </div>
+              ))}
             </div>
           </div>
         ))}
@@ -4750,7 +4881,7 @@ const YearGrid = React.memo(({ yearDate, tasksByDate, onDateSelect, locale }: { 
   );
 });
 
-function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasksByDate, onDateSelect, onYearChange, locale }: { scrollContainerRef: React.RefObject<HTMLDivElement>; ignoreScrollChange: React.RefObject<boolean>; currentDate: Date; tasksByDate: Record<string, Task[]>; onDateSelect: (d: Date) => void; onYearChange: (d: Date) => void; locale: any }) {
+function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, showRecurrence, onDateSelect, onYearChange, locale }: { scrollContainerRef: React.RefObject<HTMLDivElement>; ignoreScrollChange: React.RefObject<boolean>; currentDate: Date; tasks: Task[]; showRecurrence: boolean; onDateSelect: (d: Date) => void; onYearChange: (d: Date) => void; locale: any }) {
   const lastReportedYear = useRef(currentDate.getFullYear().toString());
   const isInitialScrollDone = useRef(false);
 
@@ -4801,9 +4932,7 @@ function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasksBy
       return false;
     };
 
-    // Try immediately after layout
     if (!scrollToTarget()) {
-      // If failed, try with delay
       const timer = setTimeout(scrollToTarget, 100);
       return () => clearTimeout(timer);
     }
@@ -4831,7 +4960,8 @@ function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasksBy
         <YearGrid 
             key={yearDate.toString()} 
             yearDate={yearDate} 
-            tasksByDate={tasksByDate} 
+            tasks={tasks} 
+            showRecurrence={showRecurrence}
             onDateSelect={onDateSelect} 
             locale={locale}
         />
@@ -4840,7 +4970,7 @@ function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasksBy
   );
 }
 
-const MonthGrid = React.memo(({ monthDate, tasksByDate, onEdit, onDateSelect, locale }: { monthDate: Date; tasksByDate: Record<string, Task[]>; onEdit: (t: Task) => void; onDateSelect: (d: Date) => void; locale: any }) => {
+const MonthGrid = React.memo(({ monthDate, tasks, showRecurrence, onEdit, onDateSelect, locale }: { monthDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; onDateSelect: (d: Date) => void; locale: any }) => {
   const weeks = useMemo(() => {
     const start = startOfWeek(startOfMonth(monthDate), { locale });
     const end = endOfWeek(endOfMonth(monthDate), { locale });
@@ -4852,12 +4982,13 @@ const MonthGrid = React.memo(({ monthDate, tasksByDate, onEdit, onDateSelect, lo
         key: format(day, 'yyyy-MM-dd'),
         isCurrentMonth: isSameMonth(day, monthDate),
         isToday: isSameDay(day, new Date()),
-        dayNum: format(day, 'd')
+        dayNum: format(day, 'd'),
+        tasks: tasks.filter(t => isTaskOccurringOnDate(t, day, showRecurrence))
       }));
       chunked.push(week);
     }
     return chunked;
-  }, [monthDate, locale]);
+  }, [monthDate, tasks, showRecurrence, locale]);
 
   return (
     <div className="flex flex-col mb-8" data-month={format(monthDate, 'yyyy-MM')}>
@@ -4870,8 +5001,7 @@ const MonthGrid = React.memo(({ monthDate, tasksByDate, onEdit, onDateSelect, lo
         {weeks.map((week, weekIdx) => (
           <div key={weekIdx} className="grid grid-cols-7">
             {week.map(dayInfo => {
-              const dayTasks = tasksByDate[dayInfo.key] || [];
-              const { date, isCurrentMonth, isToday, dayNum } = dayInfo;
+              const { date, isCurrentMonth, isToday, dayNum, tasks: dayTasks } = dayInfo;
 
               return (
                 <div 
@@ -4901,20 +5031,23 @@ const MonthGrid = React.memo(({ monthDate, tasksByDate, onEdit, onDateSelect, lo
                   <div className="flex-1 flex flex-col gap-0.5 overflow-hidden">
                     {dayTasks.slice(0, 5).map(task => (
                       <button
-                        key={task.id}
+                        key={`${task.id}_${dayInfo.key}`}
                         onClick={(e) => { e.stopPropagation(); onEdit(task); }}
                         className={cn(
-                          "text-[8px] font-bold text-left px-1.5 py-0.5 rounded border truncate transition-all",
+                          "text-[8px] font-bold text-left px-1.5 py-0.5 rounded border truncate transition-all flex items-center gap-1",
                           task.isDone ? "opacity-30 line-through bg-slate-100" : 
                           task.category === 'Urgent' ? "bg-red-50 border-red-100 text-red-700 hover:bg-red-100" :
                           "bg-indigo-50 border-indigo-100 text-indigo-700 hover:bg-white"
                         )}
                       >
-                        <span className="opacity-40 font-mono mr-0.5">[{task.project}]</span>
-                        {!task.isAllDay && task.deadline && (
-                          <span className="opacity-60 font-mono mr-1 text-[7px]">{format(task.deadline, 'HH:mm')}</span>
+                        <span className="opacity-40 font-mono shrink-0">[{task.project}]</span>
+                        {!task.isAllDay && (task.deadline || task.startDate) && (
+                          <span className="opacity-60 font-mono text-[7px] shrink-0">{format(task.startDate || task.deadline!, 'HH:mm')}</span>
                         )}
-                        {task.title}
+                        {task.recurrence && task.recurrence.type !== 'none' && (
+                          <Repeat size={9} className="shrink-0 text-indigo-500" />
+                        )}
+                        <span className="truncate">{task.title}</span>
                       </button>
                     ))}
                     {dayTasks.length > 5 && (
@@ -4936,7 +5069,7 @@ const MonthGrid = React.memo(({ monthDate, tasksByDate, onEdit, onDateSelect, lo
   );
 });
 
-function MonthView({ scrollContainerRef, ignoreScrollChange, currentDate, tasksByDate, onEdit, onDateSelect, onMonthChange, locale }: { scrollContainerRef: React.RefObject<HTMLDivElement>; ignoreScrollChange: React.RefObject<boolean>; currentDate: Date; tasksByDate: Record<string, Task[]>; onEdit: (t: Task) => void; onDateSelect: (d: Date) => void; onMonthChange: (d: Date) => void; locale: any }) {
+function MonthView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, showRecurrence, onEdit, onDateSelect, onMonthChange, locale }: { scrollContainerRef: React.RefObject<HTMLDivElement>; ignoreScrollChange: React.RefObject<boolean>; currentDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; onDateSelect: (d: Date) => void; onMonthChange: (d: Date) => void; locale: any }) {
   const isInitialScrollDone = useRef(false);
   const lastReportedMonth = useRef(format(currentDate, 'yyyy-MM'));
 
@@ -5028,7 +5161,8 @@ function MonthView({ scrollContainerRef, ignoreScrollChange, currentDate, tasksB
           <MonthGrid 
               key={month.toString()} 
               monthDate={month} 
-              tasksByDate={tasksByDate} 
+              tasks={tasks} 
+              showRecurrence={showRecurrence}
               onEdit={onEdit} 
               onDateSelect={onDateSelect} 
               locale={locale}
@@ -5039,7 +5173,7 @@ function MonthView({ scrollContainerRef, ignoreScrollChange, currentDate, tasksB
   );
 }
 
-function WeekView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; tasks: Task[]; onEdit: (t: Task) => void; locale: any }) {
+function WeekView({ currentDate, tasks, showRecurrence, onEdit, locale }: { currentDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; locale: any }) {
   const weekDays = useMemo(() => {
     const start = startOfWeek(currentDate, { locale });
     const end = endOfWeek(currentDate, { locale });
@@ -5050,7 +5184,7 @@ function WeekView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; t
     <div className="h-full flex flex-col min-w-[700px]">
       <div className="grid grid-cols-7 h-full">
         {weekDays.map(day => {
-          const dayTasks = tasks.filter(t => isSameDay(t.deadline || 0, day));
+          const dayTasks = tasks.filter(t => isTaskOccurringOnDate(t, day, showRecurrence));
           const isToday = isSameDay(day, new Date());
 
           return (
@@ -5070,7 +5204,7 @@ function WeekView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; t
               <div className="flex-1 p-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar">
                 {dayTasks.map(task => (
                   <button
-                    key={task.id}
+                    key={`${task.id}_${day.toISOString()}`}
                     onClick={() => onEdit(task)}
                     className={cn(
                       "p-3 rounded-xl border text-[10px] font-bold text-left transition-all hover:translate-y-[-1px] hover:shadow-md",
@@ -5081,7 +5215,12 @@ function WeekView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; t
                   >
                     <div className="flex items-center justify-between mb-1 opacity-50 font-mono text-[8px]">
                       <span>{task.project}</span>
-                      {!task.isAllDay && format(task.deadline!, 'HH:mm')}
+                      <div className="flex items-center gap-1">
+                        {task.recurrence && task.recurrence.type !== 'none' && (
+                          <Repeat size={9} className="text-indigo-500" />
+                        )}
+                        {!task.isAllDay && (task.deadline || task.startDate) && format(task.startDate || task.deadline!, 'HH:mm')}
+                      </div>
                     </div>
                     <div className={cn(task.isDone && "line-through")}>
                       {task.title}
@@ -5102,8 +5241,8 @@ function WeekView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; t
   );
 }
 
-function DayView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; tasks: Task[]; onEdit: (t: Task) => void; locale: any }) {
-  const dayTasks = tasks.filter(t => isSameDay(t.deadline || 0, currentDate));
+function DayView({ currentDate, tasks, showRecurrence, onEdit, locale }: { currentDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; locale: any }) {
+  const dayTasks = tasks.filter(t => isTaskOccurringOnDate(t, currentDate, showRecurrence));
   
   return (
     <div className="max-w-4xl mx-auto p-8 lg:p-12">
@@ -5119,9 +5258,9 @@ function DayView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; ta
       </div>
 
       <div className="space-y-4">
-        {dayTasks.sort((a,b) => (a.deadline || 0) - (b.deadline || 0)).map(task => (
+        {dayTasks.sort((a,b) => (a.startDate || a.deadline || 0) - (b.startDate || b.deadline || 0)).map(task => (
           <button
-            key={task.id}
+            key={`${task.id}_${currentDate.toISOString()}`}
             onClick={() => onEdit(task)}
             className={cn(
               "w-full flex items-center gap-6 p-6 rounded-3xl border transition-all text-left group",
@@ -5133,13 +5272,21 @@ function DayView({ currentDate, tasks, onEdit, locale }: { currentDate: Date; ta
               "w-16 text-xs font-black tabular-nums text-slate-400 py-2 border-r flex items-center justify-center shrink-0",
               !task.isAllDay && "text-indigo-600"
             )}>
-              {task.isAllDay ? 'All Day' : format(task.deadline!, 'HH:mm')}
+              {task.isAllDay ? 'All Day' : format(task.startDate || task.deadline!, 'HH:mm')}
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-[10px] font-extrabold text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded leading-none shrink-0 truncate max-w-[100px]">
                   [{task.project}]
                 </span>
+                {task.recurrence && task.recurrence.type !== 'none' && (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-600 bg-indigo-50/80 px-1.5 py-0.5 rounded">
+                    <Repeat size={10} />
+                    <span>
+                      {task.recurrence.type === 'daily' ? '毎日' : task.recurrence.type === 'every_x_days' ? `${task.recurrence.interval || 1}日ごと` : task.recurrence.type === 'weekly' ? '毎週' : `${task.recurrence.interval || 1}週ごと`}
+                    </span>
+                  </span>
+                )}
                 {task.isStarred && <Star size={12} className="text-amber-500 fill-amber-500" />}
               </div>
               <h3 className={cn("text-lg font-bold text-slate-800 leading-tight", task.isDone && "line-through text-slate-400")}>{task.title}</h3>

@@ -37,3 +37,22 @@ export interface TaskHistory {
   action: string;
   timestamp: number;
 }
+
+export interface FolderMeta {
+  path: string; // e.g. "General", "Marketing", "Marketing/Design"
+  section: string; // Workspace section, e.g. "General"
+  title?: string;
+  name?: string;
+  isStarred?: boolean;
+  isPinned?: boolean;
+  isDone?: boolean;
+  startDate?: number; // timestamp
+  deadline?: number; // timestamp
+  isAllDay?: boolean;
+  recurrence?: TaskRecurrence;
+  notes?: string;
+  urls?: string[];
+  category?: Category; // 'Focus' | 'Archive' | 'Trash'
+  createdAt?: number;
+  updatedAt?: number;
+}

@@ -837,16 +837,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       const nonDoneTasks = project.tasks.filter(t => !t.isDone);
       const sorted = [...nonDoneTasks].sort((a, b) => {
         if (timelineMode === 'calendar') {
-          const aHas = typeof a.deadline === 'number';
-          const bHas = typeof b.deadline === 'number';
+          const aHas = typeof a.deadline === 'number' || typeof a.startDate === 'number' || (a.recurrence && a.recurrence.type !== 'none');
+          const bHas = typeof b.deadline === 'number' || typeof b.startDate === 'number' || (b.recurrence && b.recurrence.type !== 'none');
           if (!aHas && !bHas) {
             return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
           }
           // Timeline tasks (> ToDo tasks) come first!
           if (aHas && !bHas) return -1;
           if (!aHas && bHas) return 1;
-          const aD = startOfDay(new Date(a.deadline!)).getTime();
-          const bD = startOfDay(new Date(b.deadline!)).getTime();
+          const aD = startOfDay(new Date(a.startDate || a.deadline || a.createdAt)).getTime();
+          const bD = startOfDay(new Date(b.startDate || b.deadline || b.createdAt)).getTime();
           if (aD !== bD) return aD - bD;
           return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
         } else {
@@ -880,33 +880,91 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     endPx: number;
     rowIdx: number;
     topPx: number;
+    occurrenceKey: string;
   }
 
-  // Calculate layout of tasks for a project lane on the fine grid
+  // Calculate layout of tasks for a project lane on the fine grid (Timeline Dates mode)
   const getPlacedTasksForProject = (projectTasks: Task[]) => {
-    const scheduled = projectTasks.filter(t => typeof t.deadline === 'number');
-
-    scheduled.sort((a, b) => {
-      const aTime = a.startDate || a.deadline!;
-      const bTime = b.startDate || b.deadline!;
-      return aTime - bTime || (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
-    });
-
     const placed: PlacedTask[] = [];
     const rowEndPx: number[] = [];
 
-    scheduled.forEach(task => {
-      const startMs = task.startDate && task.startDate < task.deadline! 
-        ? task.startDate 
-        : task.deadline!;
-      const endMs = task.deadline!;
+    // Separate into scheduled tasks (with deadline, startDate, or recurrence)
+    const scheduled = projectTasks.filter(t => 
+      typeof t.deadline === 'number' || 
+      typeof t.startDate === 'number' || 
+      (t.recurrence && t.recurrence.type !== 'none')
+    );
 
+    interface CandidateItem {
+      task: Task;
+      startMs: number;
+      endMs: number;
+      occurrenceKey: string;
+    }
+
+    const items: CandidateItem[] = [];
+
+    scheduled.forEach(task => {
+      if (task.recurrence && task.recurrence.type !== 'none') {
+        // Evaluate recurrence across the visible window dates
+        for (let d = 0; d < daysCount; d++) {
+          const dayDate = addDays(windowStartDate, d);
+          if (isTaskOccurringOnDate(task, dayDate, true)) {
+            let startMs = dayDate.getTime();
+            let endMs = dayDate.getTime() + 86400000;
+            if (!task.isAllDay && (task.startDate || task.deadline)) {
+              const refDate = new Date(task.startDate || task.deadline!);
+              const hours = refDate.getHours();
+              const mins = refDate.getMinutes();
+              startMs = dayDate.getTime() + hours * 3600000 + mins * 60000;
+              endMs = startMs + Math.max(slotDurationMs, 3600000);
+            }
+            items.push({
+              task,
+              startMs,
+              endMs,
+              occurrenceKey: `${task.id}_rec_${format(dayDate, 'yyyy-MM-dd')}`
+            });
+          }
+        }
+      } else {
+        // Non-recurring task with deadline, startDate, or both
+        const hasStart = typeof task.startDate === 'number';
+        const hasEnd = typeof task.deadline === 'number';
+        let startMs: number;
+        let endMs: number;
+
+        if (hasStart && hasEnd && task.startDate! < task.deadline!) {
+          startMs = task.startDate!;
+          endMs = task.deadline!;
+        } else if (hasEnd) {
+          startMs = task.deadline!;
+          endMs = task.deadline!;
+        } else if (hasStart) {
+          startMs = task.startDate!;
+          endMs = task.startDate!;
+        } else {
+          return;
+        }
+
+        items.push({
+          task,
+          startMs,
+          endMs,
+          occurrenceKey: `${task.id}_single`
+        });
+      }
+    });
+
+    items.sort((a, b) => a.startMs - b.startMs || (a.task.order ?? 0) - (b.task.order ?? 0) || a.task.createdAt - b.task.createdAt);
+
+    items.forEach(({ task, startMs, endMs, occurrenceKey }) => {
       const startSlotIdx = (startMs - timelineStartMs) / slotDurationMs;
       const endSlotIdx = (endMs - timelineStartMs) / slotDurationMs;
 
       const startPx = Math.max(0, startSlotIdx * slotWidth);
       let widthPx: number;
-      if (task.startDate && task.startDate < task.deadline!) {
+      if (task.startDate && task.deadline && task.startDate < task.deadline && (!task.recurrence || task.recurrence.type === 'none')) {
         const spanPx = (endSlotIdx - startSlotIdx) * slotWidth;
         widthPx = Math.max(120, spanPx);
       } else {
@@ -928,7 +986,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         widthPx,
         endPx,
         rowIdx,
-        topPx
+        topPx,
+        occurrenceKey
       });
     });
 
@@ -1061,7 +1120,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
       // Unscheduled tasks (ToDo list) - Sorted: Active (A-Z), then Done (A-Z)
       const unscheduled = (showUnscheduledColumn 
-        ? projectTasks.filter(t => timelineMode === 'calendar' ? !t.deadline : !getTaskCurrentColumnId(t, customColumns))
+        ? projectTasks.filter(t => timelineMode === 'calendar' ? (!t.deadline && !t.startDate && (!t.recurrence || t.recurrence.type === 'none')) : !getTaskCurrentColumnId(t, customColumns))
         : []
       ).sort((a, b) => {
         const aDone = Boolean(a.isDone);
@@ -1073,10 +1132,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       // Scheduled / column tasks
       let scheduled: Task[] = [];
       if (timelineMode === 'calendar') {
-        scheduled = projectTasks.filter(t => typeof t.deadline === 'number')
+        scheduled = projectTasks.filter(t => typeof t.deadline === 'number' || typeof t.startDate === 'number' || (t.recurrence && t.recurrence.type !== 'none'))
           .sort((a, b) => {
-            const aTime = a.startDate || a.deadline!;
-            const bTime = b.startDate || b.deadline!;
+            const aTime = a.startDate || a.deadline || 0;
+            const bTime = b.startDate || b.deadline || 0;
             return aTime - bTime || (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
           });
       } else {
@@ -2348,10 +2407,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               return p === project.fullPath || p.startsWith(project.fullPath + '/');
             }).length;
 
-            // Unscheduled tasks (no deadline in calendar mode, no timelineColumn in current preset for custom mode)
+            // Unscheduled tasks (no deadline/startDate/recurrence in calendar mode, no timelineColumn in current preset for custom mode)
             // Sorted: Active (A-Z), then Done (A-Z) as requested
             const unscheduledTasks = projectTasks.filter(t => {
-              if (timelineMode === 'calendar') return !t.deadline;
+              if (timelineMode === 'calendar') return !t.deadline && !t.startDate && (!t.recurrence || t.recurrence.type === 'none');
               return !getTaskCurrentColumnId(t, customColumns);
             }).sort((a, b) => {
               const aDone = Boolean(a.isDone);
@@ -2630,9 +2689,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
                         {/* Placed Task Chips on Fine Grid */}
                         <div className="absolute inset-0 pointer-events-none">
-                          {placed.map(({ task, startPx, widthPx, topPx }) => (
+                          {placed.map(({ task, startPx, widthPx, topPx, occurrenceKey }) => (
                             <div
-                              key={task.id}
+                              key={occurrenceKey}
                               style={{
                                 position: 'absolute',
                                 left: `${startPx}px`,
@@ -3087,6 +3146,22 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   ? (deadlineAlert.isOverdue ? "text-red-300" : "text-amber-300")
                   : (deadlineAlert.isOverdue ? "text-red-500" : "text-amber-500")
               )} 
+            />
+          </span>
+        )}
+
+        {/* Recurrence icon badge */}
+        {task.recurrence && task.recurrence.type !== 'none' && (
+          <span
+            className="shrink-0 inline-flex items-center justify-center ml-0.5"
+            title={isJa ? `繰り返し (${task.recurrence.type === 'daily' ? '毎日' : task.recurrence.type === 'every_x_days' ? `${task.recurrence.interval || 1}日ごと` : task.recurrence.type === 'weekly' ? '毎週' : `${task.recurrence.interval || 1}週ごと`})` : `Repeats: ${task.recurrence.type}`}
+          >
+            <Repeat
+              size={11}
+              className={cn(
+                "shrink-0",
+                isSelected && !task.isDone ? "text-indigo-200" : "text-indigo-600"
+              )}
             />
           </span>
         )}

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   X, 
+  Minus,
   CheckCircle2, 
   Circle, 
   Star, 
@@ -23,9 +24,10 @@ import {
   Plus,
   ArrowRight,
   PinOff,
-  Repeat
+  Repeat,
+  XSquare
 } from 'lucide-react';
-import { Task, Category, RecurrenceType } from '../types';
+import { Task, Category, RecurrenceType, TaskRecurrence } from '../types';
 import { cn } from '../lib/utils';
 import { format } from 'date-fns';
 
@@ -45,6 +47,9 @@ export interface TaskTabsDetailProps {
   lastOpenEvent?: { taskId: string; isPermanent: boolean; timestamp: number } | null;
   onSelectTask: (taskId: string, isPermanent?: boolean) => void;
   onClose: () => void;
+  onMinimize?: () => void;
+  onCloseAllTabs?: () => void;
+  onOpenTaskIdsChange?: (openTaskIds: string[]) => void;
   onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   onMoveTask: (taskId: string, category: Category) => void;
   onDeleteTask: (taskId: string) => void;
@@ -74,7 +79,7 @@ interface SinglePaneProps {
   onDoubleClickTab: (taskId: string) => void;
   onPinTab: (taskId: string) => void;
   onCloseTab: (taskId: string) => void;
-  onCloseAllTabs: () => void;
+  onCloseAllTabs?: () => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
   onClosePane?: () => void;
@@ -293,12 +298,13 @@ const SinglePane: React.FC<SinglePaneProps> = ({
       const ed = new Date(y, m - 1, d, 23, 59, 59, 999);
       endTimestamp = ed.getTime();
     }
+    const recurrenceRule: TaskRecurrence = {
+      type,
+      interval: Math.max(1, intervalVal),
+      ...(endTimestamp !== undefined ? { endDate: endTimestamp } : {})
+    };
     onUpdateTask(activeTask.id, {
-      recurrence: {
-        type,
-        interval: Math.max(1, intervalVal),
-        endDate: endTimestamp
-      }
+      recurrence: recurrenceRule
     });
     triggerSaveNotice();
   };
@@ -1216,6 +1222,9 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   lastOpenEvent,
   onSelectTask,
   onClose,
+  onMinimize,
+  onCloseAllTabs,
+  onOpenTaskIdsChange,
   onUpdateTask,
   onMoveTask,
   onDeleteTask,
@@ -1252,20 +1261,47 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 
   // Panes state
   const [panes, setPanes] = useState<EditorPaneState[]>(() => {
+    const currentValidIds = new Set<string>(
+      openTaskIds.length > 0 ? openTaskIds : (activeTaskId ? [activeTaskId] : [])
+    );
+
     try {
       const saved = localStorage.getItem('navfor_editor_panes');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length >= 4) {
-          return parsed;
+          // Check if any tab in saved panes matches currentValidIds
+          const anyValid = parsed.some((p: EditorPaneState) =>
+            p.openTaskIds && p.openTaskIds.some((id: string) => currentValidIds.has(id))
+          );
+
+          if (anyValid) {
+            return parsed.map((p: EditorPaneState) => {
+              const filteredOpen = (p.openTaskIds || []).filter((id: string) => currentValidIds.has(id));
+              const nextActive = (p.activeTaskId && currentValidIds.has(p.activeTaskId))
+                ? p.activeTaskId
+                : (filteredOpen[0] || null);
+              const nextPreview = (p.previewTaskId && currentValidIds.has(p.previewTaskId))
+                ? p.previewTaskId
+                : null;
+              return {
+                ...p,
+                openTaskIds: filteredOpen,
+                activeTaskId: nextActive,
+                previewTaskId: nextPreview
+              };
+            });
+          }
         }
       }
     } catch (e) {
       console.error(e);
     }
-    // Default 4 slots
+
+    // Default 4 slots containing only the currently requested task(s)
+    const initialOpen = openTaskIds.length > 0 ? openTaskIds : (activeTaskId ? [activeTaskId] : []);
     return [
-      { id: 0, openTaskIds: openTaskIds.length > 0 ? openTaskIds : (activeTaskId ? [activeTaskId] : []), activeTaskId: activeTaskId, previewTaskId: activeTaskId },
+      { id: 0, openTaskIds: initialOpen, activeTaskId: activeTaskId || initialOpen[0] || null, previewTaskId: activeTaskId },
       { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
       { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
       { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
@@ -1375,10 +1411,26 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   // Auto close detail pane if all panes have no open tabs
   useEffect(() => {
     const totalTabs = panes.reduce((acc, p) => acc + p.openTaskIds.length, 0);
-    if (totalTabs === 0 && !activeTaskId) {
+    if (totalTabs === 0) {
+      const emptyPanes: EditorPaneState[] = [
+        { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+        { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+        { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+        { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      ];
+      try {
+        localStorage.setItem('navfor_open_tabs', '[]');
+        localStorage.removeItem('navfor_active_tab');
+        localStorage.setItem('navfor_editor_panes', JSON.stringify(emptyPanes));
+      } catch (e) {
+        console.error(e);
+      }
+      if (onOpenTaskIdsChange) {
+        onOpenTaskIdsChange([]);
+      }
       onClose();
     }
-  }, [panes, activeTaskId, onClose]);
+  }, [panes, onClose, onOpenTaskIdsChange]);
 
   // Handle Tab Selection within a pane
   const handleSelectTabInPane = (paneId: number, taskId: string) => {
@@ -1413,34 +1465,75 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 
   // Close a single tab in a pane
   const handleCloseTabInPane = (paneId: number, taskId: string) => {
-    setPanes(prev => prev.map(p => {
-      if (p.id !== paneId) return p;
-      const nextOpen = p.openTaskIds.filter(id => id !== taskId);
-      let nextActive = p.activeTaskId;
-      if (p.activeTaskId === taskId) {
-        const closedIdx = p.openTaskIds.indexOf(taskId);
-        nextActive = nextOpen[closedIdx] || nextOpen[closedIdx - 1] || null;
+    setPanes(prev => {
+      const nextPanes = prev.map(p => {
+        if (p.id !== paneId) return p;
+        const nextOpen = p.openTaskIds.filter(id => id !== taskId);
+        let nextActive = p.activeTaskId;
+        if (p.activeTaskId === taskId) {
+          const closedIdx = p.openTaskIds.indexOf(taskId);
+          nextActive = nextOpen[closedIdx] || nextOpen[closedIdx - 1] || null;
+        }
+        return {
+          ...p,
+          openTaskIds: nextOpen,
+          activeTaskId: nextActive,
+          previewTaskId: p.previewTaskId === taskId ? null : p.previewTaskId
+        };
+      });
+
+      const remainingIds = Array.from(new Set(nextPanes.flatMap(p => p.openTaskIds)));
+      if (onOpenTaskIdsChange) {
+        onOpenTaskIdsChange(remainingIds);
       }
-      return {
-        ...p,
-        openTaskIds: nextOpen,
-        activeTaskId: nextActive,
-        previewTaskId: p.previewTaskId === taskId ? null : p.previewTaskId
-      };
-    }));
+      return nextPanes;
+    });
   };
 
   // Close all tabs in a pane
   const handleCloseAllTabsInPane = (paneId: number) => {
-    setPanes(prev => prev.map(p => {
-      if (p.id !== paneId) return p;
-      return {
-        ...p,
-        openTaskIds: [],
-        activeTaskId: null,
-        previewTaskId: null
-      };
-    }));
+    setPanes(prev => {
+      const nextPanes = prev.map(p => {
+        if (p.id !== paneId) return p;
+        return {
+          ...p,
+          openTaskIds: [],
+          activeTaskId: null,
+          previewTaskId: null
+        };
+      });
+
+      const remainingIds = Array.from(new Set(nextPanes.flatMap(p => p.openTaskIds)));
+      if (onOpenTaskIdsChange) {
+        onOpenTaskIdsChange(remainingIds);
+      }
+      return nextPanes;
+    });
+  };
+
+  // Close all tabs across all panes and close Task Detail
+  const handleCloseAllTabs = () => {
+    const emptyPanes: EditorPaneState[] = [
+      { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+    ];
+    setPanes(emptyPanes);
+    try {
+      localStorage.setItem('navfor_open_tabs', '[]');
+      localStorage.removeItem('navfor_active_tab');
+      localStorage.setItem('navfor_editor_panes', JSON.stringify(emptyPanes));
+    } catch (e) {
+      console.error(e);
+    }
+    if (onOpenTaskIdsChange) {
+      onOpenTaskIdsChange([]);
+    }
+    if (onCloseAllTabs) {
+      onCloseAllTabs();
+    }
+    onClose();
   };
 
   // Move tab between panes (or reorder within same pane)
@@ -1846,12 +1939,24 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-0.5">
+            {/* 1. Minimize / Hide Detail Pane (keeps tabs intact) */}
             <button
               type="button"
-              onClick={onClose}
-              className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-800 rounded transition-colors"
-              title={isJa ? '詳細ペインを閉じる' : 'Close detail pane'}
+              onClick={onMinimize || onClose}
+              className="p-1 hover:bg-slate-100 text-slate-400 hover:text-slate-700 rounded transition-colors"
+              title={isJa ? '詳細ペインを最小化 (タブを保持)' : 'Minimize detail pane (keep tabs)'}
+              aria-label={isJa ? '詳細ペインを最小化' : 'Minimize detail pane'}
+            >
+              <Minus size={15} />
+            </button>
+            {/* 2. Close All Tabs (clears tabs and closes Task Detail) */}
+            <button
+              type="button"
+              onClick={handleCloseAllTabs}
+              className="p-1 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded transition-colors"
+              title={isJa ? 'すべてのタブを閉じる (タブを消去して閉じる)' : 'Close all tabs (clear tabs and close)'}
+              aria-label={isJa ? 'すべてのタブを閉じる' : 'Close all tabs'}
             >
               <X size={15} />
             </button>
@@ -1874,7 +1979,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               onDoubleClickTab={(id) => handleDoubleClickTabInPane(0, id)}
               onPinTab={(id) => handlePinTabInPane(0, id)}
               onCloseTab={(id) => handleCloseTabInPane(0, id)}
-              onCloseAllTabs={() => handleCloseAllTabsInPane(0)}
+              onCloseAllTabs={handleCloseAllTabs}
               onSplitRight={() => handleSplitRight(0)}
               onSplitDown={() => handleSplitDown(0)}
               onMoveTabBetweenPanes={handleMoveTabBetweenPanes}
@@ -1908,7 +2013,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onDoubleClickTab={(id) => handleDoubleClickTabInPane(0, id)}
                   onPinTab={(id) => handlePinTabInPane(0, id)}
                   onCloseTab={(id) => handleCloseTabInPane(0, id)}
-                  onCloseAllTabs={() => handleCloseAllTabsInPane(0)}
+                  onCloseAllTabs={handleCloseAllTabs}
                   onSplitRight={() => handleSplitRight(0)}
                   onSplitDown={() => handleSplitDown(0)}
                   onClosePane={() => handleClosePane(0)}
@@ -1951,7 +2056,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onDoubleClickTab={(id) => handleDoubleClickTabInPane(1, id)}
                   onPinTab={(id) => handlePinTabInPane(1, id)}
                   onCloseTab={(id) => handleCloseTabInPane(1, id)}
-                  onCloseAllTabs={() => handleCloseAllTabsInPane(1)}
+                  onCloseAllTabs={handleCloseAllTabs}
                   onSplitRight={() => handleSplitRight(1)}
                   onSplitDown={() => handleSplitDown(1)}
                   onClosePane={() => handleClosePane(1)}
@@ -1990,7 +2095,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onDoubleClickTab={(id) => handleDoubleClickTabInPane(0, id)}
                   onPinTab={(id) => handlePinTabInPane(0, id)}
                   onCloseTab={(id) => handleCloseTabInPane(0, id)}
-                  onCloseAllTabs={() => handleCloseAllTabsInPane(0)}
+                  onCloseAllTabs={handleCloseAllTabs}
                   onSplitRight={() => handleSplitRight(0)}
                   onSplitDown={() => handleSplitDown(0)}
                   onClosePane={() => handleClosePane(0)}
@@ -2033,7 +2138,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onDoubleClickTab={(id) => handleDoubleClickTabInPane(2, id)}
                   onPinTab={(id) => handlePinTabInPane(2, id)}
                   onCloseTab={(id) => handleCloseTabInPane(2, id)}
-                  onCloseAllTabs={() => handleCloseAllTabsInPane(2)}
+                  onCloseAllTabs={handleCloseAllTabs}
                   onSplitRight={() => handleSplitRight(2)}
                   onSplitDown={() => handleSplitDown(2)}
                   onClosePane={() => handleClosePane(2)}
@@ -2078,7 +2183,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onDoubleClickTab={(id) => handleDoubleClickTabInPane(0, id)}
                     onPinTab={(id) => handlePinTabInPane(0, id)}
                     onCloseTab={(id) => handleCloseTabInPane(0, id)}
-                    onCloseAllTabs={() => handleCloseAllTabsInPane(0)}
+                    onCloseAllTabs={handleCloseAllTabs}
                     onSplitRight={() => handleSplitRight(0)}
                     onSplitDown={() => handleSplitDown(0)}
                     onClosePane={() => handleClosePane(0)}
@@ -2122,7 +2227,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onDoubleClickTab={(id) => handleDoubleClickTabInPane(1, id)}
                     onPinTab={(id) => handlePinTabInPane(1, id)}
                     onCloseTab={(id) => handleCloseTabInPane(1, id)}
-                    onCloseAllTabs={() => handleCloseAllTabsInPane(1)}
+                    onCloseAllTabs={handleCloseAllTabs}
                     onSplitRight={() => handleSplitRight(1)}
                     onSplitDown={() => handleSplitDown(1)}
                     onClosePane={() => handleClosePane(1)}
@@ -2172,7 +2277,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onDoubleClickTab={(id) => handleDoubleClickTabInPane(2, id)}
                     onPinTab={(id) => handlePinTabInPane(2, id)}
                     onCloseTab={(id) => handleCloseTabInPane(2, id)}
-                    onCloseAllTabs={() => handleCloseAllTabsInPane(2)}
+                    onCloseAllTabs={handleCloseAllTabs}
                     onSplitRight={() => handleSplitRight(2)}
                     onSplitDown={() => handleSplitDown(2)}
                     onClosePane={() => handleClosePane(2)}
@@ -2216,7 +2321,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onDoubleClickTab={(id) => handleDoubleClickTabInPane(3, id)}
                     onPinTab={(id) => handlePinTabInPane(3, id)}
                     onCloseTab={(id) => handleCloseTabInPane(3, id)}
-                    onCloseAllTabs={() => handleCloseAllTabsInPane(3)}
+                    onCloseAllTabs={handleCloseAllTabs}
                     onSplitRight={() => handleSplitRight(3)}
                     onSplitDown={() => handleSplitDown(3)}
                     onClosePane={() => handleClosePane(3)}
