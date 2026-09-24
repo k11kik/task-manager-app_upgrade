@@ -81,8 +81,9 @@ import {
   eachMonthOfInterval
 } from 'date-fns';
 import { ja, fr, enUS } from 'date-fns/locale';
-import { Category, Task } from './types';
+import { Category, Task, FolderMeta } from './types';
 import { cn, formatDate } from './lib/utils';
+import { getParentFolderDeadline } from './lib/folderDeadlineUtils';
 import { isTaskOccurringOnDate } from './lib/taskDateUtils';
 import { auth, db, signIn, logOut } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
@@ -133,7 +134,7 @@ const THEME_CATEGORIES = [
 ];
 
 export default function App() {
-  const APP_VERSION = "3.1.8";
+  const APP_VERSION = "3.1.9";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -151,6 +152,14 @@ export default function App() {
   }, []);
 
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [folderMetas, setFolderMetas] = useState<Record<string, FolderMeta>>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_folder_metas');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProject, setSelectedProject] = useState<string>('All');
   const [newTaskTitle, setNewTaskTitle] = useState('');
@@ -1227,16 +1236,17 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // Tasks Sync
+  // Tasks & Folders Sync
   useEffect(() => {
     if (!user) {
       // When not signed in, ensure folders and tasks are completely empty
       setTasks([]);
+      setFolderMetas({});
       return;
     }
 
     const tasksQuery = query(collection(db, 'tasks'), where('userId', '==', user.uid));
-    const unsubscribe = onSnapshot(tasksQuery, (snapshot) => {
+    const unsubscribeTasks = onSnapshot(tasksQuery, (snapshot) => {
       const taskList: Task[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
@@ -1249,7 +1259,29 @@ export default function App() {
       console.warn("Tasks listener notice:", err.message);
     });
 
-    return () => unsubscribe();
+    const foldersQuery = query(collection(db, 'folders'), where('userId', '==', user.uid));
+    const unsubscribeFolders = onSnapshot(foldersQuery, (snapshot) => {
+      const metasMap: Record<string, FolderMeta> = {};
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        if (data.userId === user.uid) {
+          const p = data.path || doc.id;
+          metasMap[p] = {
+            path: p,
+            section: data.section || 'General',
+            ...data
+          } as FolderMeta;
+        }
+      });
+      setFolderMetas(metasMap);
+    }, (err) => {
+      console.warn("Folders listener notice:", err.message);
+    });
+
+    return () => {
+      unsubscribeTasks();
+      unsubscribeFolders();
+    };
   }, [user, settings.archiveThresholdDays]);
 
   // Migration Helper
@@ -1317,6 +1349,15 @@ export default function App() {
       localStorage.setItem('navfor_local_tasks', JSON.stringify(newTasks));
     } catch (e) {
       console.error('Failed to save to local storage', e);
+    }
+  };
+
+  const syncLocalFolderMetas = (newMetas: Record<string, FolderMeta>) => {
+    setFolderMetas(newMetas);
+    try {
+      localStorage.setItem('navfor_folder_metas', JSON.stringify(newMetas));
+    } catch (e) {
+      console.error('Failed to save folder metas to local storage', e);
     }
   };
 
@@ -1865,6 +1906,24 @@ export default function App() {
 
   const updateTask = async (id: string, updates: Partial<Task>) => {
     if (!user) return;
+
+    if (updates.deadline) {
+      const currentTask = tasks.find(t => t.id === id);
+      const targetProj = updates.project || currentTask?.project;
+      if (targetProj) {
+        const parentLimit = getParentFolderDeadline(targetProj, folderMetas, true);
+        if (parentLimit !== undefined && updates.deadline > parentLimit) {
+          setMessage({
+            text: settings.language === 'ja'
+              ? '親フォルダの締切以降は設定できません'
+              : "Cannot set deadline after parent folder's deadline",
+            type: 'error'
+          });
+          return;
+        }
+      }
+    }
+
     pushToHistory();
     if (user) {
       try {
@@ -2124,6 +2183,200 @@ export default function App() {
     }
   };
 
+  const updateFolderMeta = async (path: string, updates: Partial<FolderMeta>) => {
+    if (!path) return;
+    const current = folderMetas[path] || { path, section: activeSection, category: 'Focus' };
+    const sanitizedLocal: FolderMeta = {
+      ...current,
+      ...updates,
+      path,
+      section: current.section || activeSection,
+      updatedAt: Date.now()
+    };
+    for (const k of Object.keys(updates)) {
+      if ((updates as any)[k] === undefined) {
+        delete (sanitizedLocal as any)[k];
+      }
+    }
+
+    const nextMap = {
+      ...folderMetas,
+      [path]: sanitizedLocal
+    };
+    setFolderMetas(nextMap);
+
+    if (user) {
+      try {
+        const folderDocId = `${user.uid}_${encodeURIComponent(path).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        const firestoreUpdates: Record<string, any> = {
+          path,
+          section: sanitizedLocal.section || activeSection,
+          userId: user.uid,
+          updatedAt: Date.now()
+        };
+        for (const [k, v] of Object.entries(updates)) {
+          if (v === undefined) {
+            firestoreUpdates[k] = deleteField();
+          } else {
+            firestoreUpdates[k] = sanitizeForFirestore(v);
+          }
+        }
+        await setDoc(doc(db, 'folders', folderDocId), firestoreUpdates, { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `folders/${path}`);
+      }
+    } else {
+      syncLocalFolderMetas(nextMap);
+    }
+  };
+
+  const handleToggleFolderStar = (path: string) => {
+    const current = folderMetas[path];
+    updateFolderMeta(path, { isStarred: !current?.isStarred });
+  };
+
+  const handleToggleFolderPin = (path: string) => {
+    const current = folderMetas[path];
+    updateFolderMeta(path, { isPinned: !current?.isPinned });
+  };
+
+  const handleArchiveFolder = async (folderPath: string) => {
+    if (!folderPath) return;
+    pushToHistory();
+
+    const isInsideFolder = (p: string) => p === folderPath || p.startsWith(folderPath + '/');
+    const affectedTasks = tasks.filter(t => isInsideFolder(t.project));
+    const now = Date.now();
+
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        affectedTasks.forEach(t => {
+          batch.update(doc(db, 'tasks', t.id), { category: 'Archive', updatedAt: now });
+        });
+
+        // Update folder meta and all subfolder metas
+        const currentMetas: Record<string, FolderMeta> = { ...folderMetas };
+        if (!currentMetas[folderPath]) {
+          currentMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Archive' };
+        }
+        (Object.entries(currentMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
+          if (isInsideFolder(p)) {
+            const folderDocId = `${user.uid}_${encodeURIComponent(p).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+            batch.set(doc(db, 'folders', folderDocId), {
+              ...meta,
+              category: 'Archive',
+              userId: user.uid,
+              updatedAt: now
+            }, { merge: true });
+          }
+        });
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => isInsideFolder(t.project) ? { ...t, category: 'Archive', updatedAt: now } : t));
+      const nextMetas = { ...folderMetas };
+      if (!nextMetas[folderPath]) {
+        nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Archive' };
+      }
+      Object.keys(nextMetas).forEach(p => {
+        if (isInsideFolder(p)) {
+          nextMetas[p] = { ...nextMetas[p], category: 'Archive', updatedAt: now };
+        }
+      });
+      syncLocalFolderMetas(nextMetas);
+    }
+
+    setMessage({
+      text: settings.language === 'ja'
+        ? `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をアーカイブしました。`
+        : `Archived folder "${folderPath}" and ${affectedTasks.length} tasks.`,
+      type: 'info'
+    });
+  };
+
+  const handleTrashFolder = async (folderPath: string) => {
+    if (!folderPath) return;
+    pushToHistory();
+
+    const isInsideFolder = (p: string) => p === folderPath || p.startsWith(folderPath + '/');
+    const affectedTasks = tasks.filter(t => isInsideFolder(t.project));
+    const now = Date.now();
+
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        affectedTasks.forEach(t => {
+          batch.update(doc(db, 'tasks', t.id), { category: 'Trash', updatedAt: now });
+        });
+
+        // Update folder meta and subfolder metas
+        const currentMetas: Record<string, FolderMeta> = { ...folderMetas };
+        if (!currentMetas[folderPath]) {
+          currentMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Trash' };
+        }
+        (Object.entries(currentMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
+          if (isInsideFolder(p)) {
+            const folderDocId = `${user.uid}_${encodeURIComponent(p).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+            batch.set(doc(db, 'folders', folderDocId), {
+              ...meta,
+              category: 'Trash',
+              userId: user.uid,
+              updatedAt: now
+            }, { merge: true });
+          }
+        });
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
+      }
+    } else {
+      syncLocalTasks(tasks.map(t => isInsideFolder(t.project) ? { ...t, category: 'Trash', updatedAt: now } : t));
+      const nextMetas = { ...folderMetas };
+      if (!nextMetas[folderPath]) {
+        nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Trash' };
+      }
+      Object.keys(nextMetas).forEach(p => {
+        if (isInsideFolder(p)) {
+          nextMetas[p] = { ...nextMetas[p], category: 'Trash', updatedAt: now };
+        }
+      });
+      syncLocalFolderMetas(nextMetas);
+    }
+
+    // Close any tabs related to this folder or tasks inside it
+    const isTabInFolder = (tabId: string) => {
+      if (tabId === `folder:${folderPath}` || tabId.startsWith(`folder:${folderPath}/`)) return true;
+      const t = tasks.find(task => task.id === tabId);
+      return t ? isInsideFolder(t.project) : false;
+    };
+    setOpenTaskIds(prev => prev.filter(id => !isTabInFolder(id)));
+    if (activeTabTaskId && isTabInFolder(activeTabTaskId)) {
+      setActiveTabTaskId(null);
+    }
+
+    // Also clean up any custom empty folders in localStorage
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const folders: string[] = JSON.parse(saved);
+        const updated = folders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+        window.dispatchEvent(new Event('navfor_folders_updated'));
+      }
+    } catch {}
+
+    setMessage({
+      text: settings.language === 'ja'
+        ? `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をゴミ箱へ移動しました。`
+        : `Moved folder "${folderPath}" and ${affectedTasks.length} tasks to trash.`,
+      type: 'info'
+    });
+  };
+
   const handleRenameFolder = async (oldFolderPath: string, newFolderPath: string) => {
     if (!oldFolderPath || !newFolderPath || oldFolderPath === newFolderPath) return;
     pushToHistory();
@@ -2155,6 +2408,51 @@ export default function App() {
         }
         return t;
       }));
+    }
+
+    // Update folderMetas map
+    const nextMetas = { ...folderMetas };
+    let metasChanged = false;
+    Object.keys(nextMetas).forEach(k => {
+      if (k === oldFolderPath || k.startsWith(oldFolderPath + '/')) {
+        const newKey = k === oldFolderPath ? newFolderPath : newFolderPath + k.slice(oldFolderPath.length);
+        nextMetas[newKey] = { ...nextMetas[k], path: newKey, updatedAt: Date.now() };
+        delete nextMetas[k];
+        metasChanged = true;
+      }
+    });
+    if (metasChanged) {
+      if (user) {
+        // Also update / migrate folder docs in Firestore
+        try {
+          const batch = writeBatch(db);
+          (Object.entries(nextMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
+            if (p === newFolderPath || p.startsWith(newFolderPath + '/')) {
+              const folderDocId = `${user.uid}_${encodeURIComponent(p).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+              batch.set(doc(db, 'folders', folderDocId), { ...meta, userId: user.uid, updatedAt: Date.now() }, { merge: true });
+            }
+          });
+          await batch.commit();
+        } catch (e) {
+          console.error('Failed to update folder doc in firestore', e);
+        }
+      } else {
+        syncLocalFolderMetas(nextMetas);
+      }
+    }
+
+    // Update any open tab IDs that reference this folder
+    setOpenTaskIds(prev => prev.map(id => {
+      if (id === `folder:${oldFolderPath}`) return `folder:${newFolderPath}`;
+      if (id.startsWith(`folder:${oldFolderPath}/`)) return `folder:${newFolderPath}${id.slice(`folder:${oldFolderPath}`.length)}`;
+      return id;
+    }));
+    if (activeTabTaskId) {
+      if (activeTabTaskId === `folder:${oldFolderPath}`) {
+        setActiveTabTaskId(`folder:${newFolderPath}`);
+      } else if (activeTabTaskId.startsWith(`folder:${oldFolderPath}/`)) {
+        setActiveTabTaskId(`folder:${newFolderPath}${activeTabTaskId.slice(`folder:${oldFolderPath}`.length)}`);
+      }
     }
   };
 
@@ -2192,35 +2490,7 @@ export default function App() {
   };
 
   const handleDeleteFolder = async (folderPath: string) => {
-    if (!folderPath || !user) return;
-    pushToHistory();
-    const affectedTasks = tasks.filter(t => 
-      t.project === folderPath || t.project.startsWith(folderPath + '/')
-    );
-
-    if (user) {
-      try {
-        const batch = writeBatch(db);
-        affectedTasks.forEach(t => {
-          batch.update(doc(db, 'tasks', t.id), { category: 'Trash', updatedAt: Date.now() });
-        });
-        await batch.commit();
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
-      }
-    }
-
-    // Also clean up any custom empty folders in localStorage
-    try {
-      const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
-      if (saved) {
-        const folders: string[] = JSON.parse(saved);
-        const updated = folders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
-        localStorage.setItem(storageKey, JSON.stringify(updated));
-        window.dispatchEvent(new Event('navfor_folders_updated'));
-      }
-    } catch {}
+    await handleTrashFolder(folderPath);
   };
 
   const pickDailyTasks = async (selectedIds: string[]) => {
@@ -3506,6 +3776,9 @@ export default function App() {
                 onOpenDailyPick={() => setIsPickingDaily(true)}
                 deadlineThresholdDays={settings.deadlineThreshold}
                 language={settings.language}
+                folderMetas={folderMetas}
+                onToggleFolderStar={handleToggleFolderStar}
+                onToggleFolderPin={handleToggleFolderPin}
                 t={t}
               />
             </div>
@@ -3546,6 +3819,9 @@ export default function App() {
                       onAddTask={handleCreateTaskDirect}
                       activeSection={activeSection}
                       language={settings.language}
+                      folderMetas={folderMetas}
+                      onToggleFolderStar={handleToggleFolderStar}
+                      onToggleFolderPin={handleToggleFolderPin}
                       t={t}
                     />
                   </div>
@@ -3574,6 +3850,13 @@ export default function App() {
                       onToggleStar={toggleStar}
                       onTogglePin={togglePin}
                       onDuplicateTask={handleDuplicateTask}
+                      folderMetas={folderMetas}
+                      onUpdateFolderMeta={updateFolderMeta}
+                      onArchiveFolder={handleArchiveFolder}
+                      onTrashFolder={handleTrashFolder}
+                      onToggleFolderStar={handleToggleFolderStar}
+                      onToggleFolderPin={handleToggleFolderPin}
+                      onShowMessage={setMessage}
                       deadlineThresholdDays={settings.deadlineThreshold}
                       language={settings.language}
                       width={detailPaneWidth}

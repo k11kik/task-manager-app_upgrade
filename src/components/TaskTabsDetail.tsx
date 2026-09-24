@@ -25,11 +25,14 @@ import {
   ArrowRight,
   PinOff,
   Repeat,
-  XSquare
+  XSquare,
+  AlertCircle
 } from 'lucide-react';
-import { Task, Category, RecurrenceType, TaskRecurrence } from '../types';
+import { Task, Category, RecurrenceType, TaskRecurrence, FolderMeta } from '../types';
 import { cn } from '../lib/utils';
 import { format } from 'date-fns';
+import { getParentFolderDeadline } from '../lib/folderDeadlineUtils';
+import { FolderDetailPane } from './FolderDetailPane';
 
 export type SplitLayoutType = 'single' | 'split-right' | 'split-down' | 'grid-2x2';
 
@@ -57,6 +60,13 @@ export interface TaskTabsDetailProps {
   onToggleStar: (taskId: string) => void;
   onTogglePin: (taskId: string) => void;
   onDuplicateTask?: (task: Task) => void;
+  folderMetas?: Record<string, FolderMeta>;
+  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
+  onArchiveFolder?: (folderPath: string) => void;
+  onTrashFolder?: (folderPath: string) => void;
+  onToggleFolderStar?: (folderPath: string) => void;
+  onToggleFolderPin?: (folderPath: string) => void;
+  onShowMessage?: (msg: { text: string; type: 'error' | 'info' }) => void;
   deadlineThresholdDays?: number;
   language?: string;
   width: number;
@@ -80,6 +90,7 @@ interface SinglePaneProps {
   onPinTab: (taskId: string) => void;
   onCloseTab: (taskId: string) => void;
   onCloseAllTabs?: () => void;
+  onOpenTaskInNewTab?: (taskId: string) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
   onClosePane?: () => void;
@@ -93,6 +104,13 @@ interface SinglePaneProps {
   onToggleStar: (taskId: string) => void;
   onTogglePin: (taskId: string) => void;
   onDuplicateTask?: (task: Task) => void;
+  folderMetas?: Record<string, FolderMeta>;
+  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
+  onArchiveFolder?: (folderPath: string) => void;
+  onTrashFolder?: (folderPath: string) => void;
+  onToggleFolderStar?: (folderPath: string) => void;
+  onToggleFolderPin?: (folderPath: string) => void;
+  onShowMessage?: (msg: { text: string; type: 'error' | 'info' }) => void;
   t: (key: string) => string;
 }
 
@@ -112,6 +130,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   onPinTab,
   onCloseTab,
   onCloseAllTabs,
+  onOpenTaskInNewTab,
   onSplitRight,
   onSplitDown,
   onClosePane,
@@ -125,19 +144,63 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   onToggleStar,
   onTogglePin,
   onDuplicateTask,
+  folderMetas,
+  onUpdateFolderMeta,
+  onArchiveFolder,
+  onTrashFolder,
+  onToggleFolderStar,
+  onToggleFolderPin,
+  onShowMessage,
   t
 }) => {
   const isJa = language === 'ja';
 
-  const activeTask = useMemo(() => {
-    return tasks.find(t => t.id === pane.activeTaskId) || null;
-  }, [tasks, pane.activeTaskId]);
+  const isFolderActive = Boolean(pane.activeTaskId && pane.activeTaskId.startsWith('folder:'));
+  const activeFolderPath = isFolderActive ? pane.activeTaskId!.slice(7) : '';
+  const activeFolderMeta = isFolderActive
+    ? (folderMetas?.[activeFolderPath] || { path: activeFolderPath, section: '', category: 'Focus' })
+    : null;
 
-  const openTasks = useMemo(() => {
-    return pane.openTaskIds
-      .map(id => tasks.find(t => t.id === id))
-      .filter((t): t is Task => t !== undefined);
-  }, [pane.openTaskIds, tasks]);
+  const activeTask = useMemo(() => {
+    if (isFolderActive) return null;
+    return tasks.find(t => t.id === pane.activeTaskId) || null;
+  }, [tasks, pane.activeTaskId, isFolderActive]);
+
+  const openTabItems = useMemo(() => {
+    return pane.openTaskIds.map(id => {
+      if (id.startsWith('folder:')) {
+        const folderPath = id.slice(7);
+        const folderName = folderPath.split('/').pop() || folderPath;
+        const meta = folderMetas?.[folderPath] || { path: folderPath, section: '', category: 'Focus' };
+        return {
+          id,
+          type: 'folder' as const,
+          title: meta.title || folderName,
+          project: folderPath,
+          isStarred: Boolean(meta.isStarred),
+          isPinned: Boolean(meta.isPinned),
+          isDone: false,
+          isUrgent: false,
+          folderPath,
+          folderMeta: meta
+        };
+      } else {
+        const task = tasks.find(t => t.id === id);
+        if (!task) return null;
+        return {
+          id,
+          type: 'task' as const,
+          title: task.title || (isJa ? '無題のタスク' : 'Untitled'),
+          project: task.project || 'General',
+          isDone: Boolean(task.isDone),
+          isUrgent: task.category === 'Urgent',
+          isStarred: Boolean(task.isStarred),
+          isPinned: Boolean(task.isPinned),
+          task
+        };
+      }
+    }).filter((x): x is NonNullable<typeof x> => x !== null);
+  }, [pane.openTaskIds, tasks, folderMetas, isJa]);
 
   // Form local editing states
   const [title, setTitle] = useState('');
@@ -244,6 +307,11 @@ const SinglePane: React.FC<SinglePaneProps> = ({
     triggerSaveNotice();
   };
 
+  const parentDeadlineLimit = useMemo(() => {
+    if (!activeTask || !activeTask.project) return undefined;
+    return getParentFolderDeadline(activeTask.project, folderMetas || {}, true);
+  }, [activeTask?.project, folderMetas]);
+
   const handleStartDateCommit = (dateStr: string, timeStr: string, allDay: boolean) => {
     if (!activeTask) return;
     onPinTab(activeTask.id); // Promotes to permanent on edit
@@ -280,6 +348,23 @@ const SinglePane: React.FC<SinglePaneProps> = ({
       const [h, m] = timeStr.split(':').map(Number);
       d.setHours(h || 18, m || 0, 0, 0);
     }
+
+    if (parentDeadlineLimit !== undefined && d.getTime() > parentDeadlineLimit) {
+      onShowMessage?.({
+        text: isJa ? '親フォルダの締切以降は設定できません' : "Cannot set deadline after parent folder's deadline",
+        type: 'error'
+      });
+      if (activeTask.deadline) {
+        const prevD = new Date(activeTask.deadline);
+        setDeadlineDate(format(prevD, 'yyyy-MM-dd'));
+        setDeadlineTime(format(prevD, 'HH:mm'));
+      } else {
+        setDeadlineDate('');
+        setDeadlineTime('18:00');
+      }
+      return;
+    }
+
     onUpdateTask(activeTask.id, { deadline: d.getTime(), isAllDay: allDay });
     triggerSaveNotice();
   };
@@ -416,7 +501,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
             e.dataTransfer.dropEffect = 'move';
             if (!isOverTabBar) setIsOverTabBar(true);
             if (e.target === e.currentTarget) {
-              setDropSlot(openTasks.length);
+              setDropSlot(openTabItems.length);
             }
           }}
           onDragLeave={(e) => {
@@ -436,7 +521,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
             setIsOverPane(false);
 
             // Dropping on the empty tab bar space inserts at the end of the tabs!
-            const targetIndex = openTasks.length;
+            const targetIndex = openTabItems.length;
 
             try {
               const raw = e.dataTransfer.getData('application/json');
@@ -456,25 +541,26 @@ const SinglePane: React.FC<SinglePaneProps> = ({
             }
           }}
         >
-          {openTasks.map((task, idx) => {
-            const isActive = task.id === pane.activeTaskId;
-            const isPreview = task.id === pane.previewTaskId;
-            const isBeingDragged = draggingTaskId === task.id;
+          {openTabItems.map((item, idx) => {
+            const isActive = item.id === pane.activeTaskId;
+            const isPreview = item.id === pane.previewTaskId;
+            const isBeingDragged = draggingTaskId === item.id;
+            const isFolderTab = item.type === 'folder';
 
             return (
               <div
-                key={task.id}
+                key={item.id}
                 draggable
                 onDragStart={(e) => {
-                  activeDragTabInfo = { taskId: task.id, sourcePaneId: pane.id };
+                  activeDragTabInfo = { taskId: item.id, sourcePaneId: pane.id };
                   e.dataTransfer.setData('application/json', JSON.stringify({
                     type: 'task-tab-drag',
-                    taskId: task.id,
+                    taskId: item.id,
                     sourcePaneId: pane.id
                   }));
-                  e.dataTransfer.setData('text/plain', task.id);
+                  e.dataTransfer.setData('text/plain', item.id);
                   e.dataTransfer.effectAllowed = 'move';
-                  setDraggingTaskId(task.id);
+                  setDraggingTaskId(item.id);
                 }}
                 onDragEnd={() => {
                   activeDragTabInfo = null;
@@ -489,7 +575,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                   e.dataTransfer.dropEffect = 'move';
 
                   // If dragging over itself in the same pane, don't show insertion line
-                  if (activeDragTabInfo?.sourcePaneId === pane.id && activeDragTabInfo?.taskId === task.id) {
+                  if (activeDragTabInfo?.sourcePaneId === pane.id && activeDragTabInfo?.taskId === item.id) {
                     if (dropSlot !== null) setDropSlot(null);
                     return;
                   }
@@ -541,18 +627,18 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                 onClick={(e) => {
                   e.stopPropagation();
                   onFocus();
-                  onSelectTab(task.id);
+                  onSelectTab(item.id);
                 }}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
-                  onDoubleClickTab(task.id);
+                  onDoubleClickTab(item.id);
                 }}
                 onAuxClick={(e) => {
                   // Middle click closes tab
                   if (e.button === 1) {
                     e.preventDefault();
                     e.stopPropagation();
-                    onCloseTab(task.id);
+                    onCloseTab(item.id);
                   }
                 }}
                 className={cn(
@@ -564,21 +650,23 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                   isBeingDragged && "opacity-40 scale-95 border-dashed border-indigo-400"
                 )}
                 title={isPreview 
-                  ? `${task.project} > ${task.title} (${isJa ? 'プレビュー - ダブルクリックで固定 / ドラッグで移動' : 'Preview - double click to pin / drag to move'})` 
-                  : `${task.project} > ${task.title} (${isJa ? 'ドラッグして領域間・タブ間を移動' : 'Drag to move tab'})`}
+                  ? `${item.project} > ${item.title} (${isJa ? 'プレビュー - ダブルクリックで固定 / ドラッグで移動' : 'Preview - double click to pin / drag to move'})` 
+                  : `${item.project} > ${item.title} (${isJa ? 'ドラッグして領域間・タブ間を移動' : 'Drag to move tab'})`}
               >
                 {/* Insertion line indicator */}
                 {dropSlot === idx && (
                   <div className="absolute left-0 top-0 bottom-0 w-1 bg-indigo-600 z-30 pointer-events-none rounded-r shadow-xs animate-pulse" />
                 )}
-                {dropSlot === idx + 1 && idx === openTasks.length - 1 && (
+                {dropSlot === idx + 1 && idx === openTabItems.length - 1 && (
                   <div className="absolute right-0 top-0 bottom-0 w-1 bg-indigo-600 z-30 pointer-events-none rounded-l shadow-xs animate-pulse" />
                 )}
 
                 {/* Status Dot / Indicator */}
-                {task.isDone ? (
+                {isFolderTab ? (
+                  <Folder size={12} className={cn("shrink-0 not-italic", item.isStarred ? "text-amber-500 fill-amber-400/30" : "text-amber-500")} />
+                ) : item.isDone ? (
                   <CheckCircle2 size={12} className="text-emerald-500 shrink-0 not-italic" />
-                ) : task.category === 'Urgent' ? (
+                ) : item.isUrgent ? (
                   <span className="w-2 h-2 rounded-full bg-red-500 shrink-0 not-italic" />
                 ) : (
                   <FileText size={12} className="text-indigo-400 shrink-0 not-italic" />
@@ -586,7 +674,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
 
                 {/* Tab Title */}
                 <span className="truncate min-w-0">
-                  {task.title || (isJa ? '無題のタスク' : 'Untitled')}
+                  {item.title}
                 </span>
 
                 {/* Pin Button if in preview mode */}
@@ -595,7 +683,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onPinTab(task.id);
+                      onPinTab(item.id);
                     }}
                     className="opacity-0 group-hover:opacity-100 hover:text-indigo-600 p-0.5 rounded transition-opacity"
                     title={isJa ? 'タブを固定' : 'Pin tab'}
@@ -609,7 +697,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onCloseTab(task.id);
+                    onCloseTab(item.id);
                   }}
                   className="ml-0.5 p-0.5 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-200/80 transition-colors opacity-70 group-hover:opacity-100 not-italic"
                   title={isJa ? '閉じる (中クリックでも可)' : 'Close'}
@@ -621,13 +709,13 @@ const SinglePane: React.FC<SinglePaneProps> = ({
           })}
 
           {/* Drop indicator at the end of the tabs when dragging over empty space */}
-          {isOverTabBar && (dropSlot === null || dropSlot === openTasks.length) && openTasks.length > 0 && (
+          {isOverTabBar && (dropSlot === null || dropSlot === openTabItems.length) && openTabItems.length > 0 && (
             <div className="h-6 px-2 mx-1 border border-dashed border-indigo-400 bg-indigo-50/70 rounded flex items-center justify-center text-[10px] text-indigo-600 font-semibold shrink-0 animate-pulse pointer-events-none">
               ＋ {isJa ? '右端に追加' : 'Insert at end'}
             </div>
           )}
 
-          {openTasks.length === 0 && (
+          {openTabItems.length === 0 && (
             <div className="px-3 text-xs text-slate-400 italic">
               {isJa ? 'タブなし (ここにドロップ可能)' : 'No tabs (drop here)'}
             </div>
@@ -671,7 +759,29 @@ const SinglePane: React.FC<SinglePaneProps> = ({
       </div>
 
       {/* Pane Content Body */}
-      {activeTask ? (
+      {isFolderActive && activeFolderMeta ? (
+        <FolderDetailPane
+          folderPath={activeFolderPath}
+          folderMeta={activeFolderMeta}
+          folderMetas={folderMetas || {}}
+          tasks={tasks}
+          onUpdateFolderMeta={onUpdateFolderMeta}
+          onArchiveFolder={onArchiveFolder}
+          onTrashFolder={onTrashFolder}
+          onToggleFolderStar={onToggleFolderStar}
+          onToggleFolderPin={onToggleFolderPin}
+          onSelectTab={onSelectTab}
+          onPinTab={onPinTab}
+          onCloseTab={onCloseTab}
+          onOpenTaskInNewTab={onOpenTaskInNewTab}
+          availablePaneIds={availablePaneIds}
+          onMoveTabToPane={onMoveTabToPane}
+          onShowMessage={onShowMessage}
+          isPreview={pane.previewTaskId === pane.activeTaskId}
+          language={language}
+          t={t}
+        />
+      ) : activeTask ? (
         <div className="flex-1 h-full min-h-0 flex flex-col overflow-hidden bg-white">
           {/* Subheader / Breadcrumb */}
           <div className="flex items-center justify-between px-3.5 py-2 border-b border-slate-100 bg-slate-50/50 shrink-0">
@@ -899,6 +1009,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                   <input
                     type="date"
                     value={deadlineDate}
+                    max={parentDeadlineLimit ? format(new Date(parentDeadlineLimit), 'yyyy-MM-dd') : undefined}
                     onChange={(e) => {
                       setDeadlineDate(e.target.value);
                       handleDeadlineCommit(e.target.value, deadlineTime, isAllDay);
@@ -918,6 +1029,18 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                     />
                   )}
                 </div>
+
+                {/* Parent deadline notice if applicable */}
+                {parentDeadlineLimit !== undefined && (
+                  <div className="flex items-center gap-1 text-[10px] text-amber-700 bg-amber-50 border border-amber-200/80 px-2 py-1 rounded-md">
+                    <AlertCircle size={11} className="shrink-0" />
+                    <span>
+                      {isJa 
+                        ? `※ 親フォルダの締切 (${format(new Date(parentDeadlineLimit), 'yyyy/MM/dd HH:mm')}) 以前に設定する必要があります`
+                        : `* Must be on or before parent folder deadline (${format(new Date(parentDeadlineLimit), 'yyyy/MM/dd HH:mm')})`}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* All-day Checkbox */}
@@ -1201,10 +1324,10 @@ const SinglePane: React.FC<SinglePaneProps> = ({
             <FileText size={18} strokeWidth={1.5} />
           </div>
           <h4 className="text-xs font-bold text-slate-700 mb-1">
-            {isJa ? 'タスクが選択されていません' : 'No task selected'}
+            {isJa ? 'タスクまたはフォルダが選択されていません' : 'No task or folder selected'}
           </h4>
           <p className="text-[11px] text-slate-400 max-w-xs leading-relaxed">
-            {isJa ? 'エクスプローラー等から開くか、他の領域からタブをドラッグ＆ドロップできます' : 'Click a task to open, or drag a tab from another pane'}
+            {isJa ? 'エクスプローラー等から開くか、他の領域からタブをドラッグ＆ドロップできます' : 'Click a task or folder to open, or drag a tab from another pane'}
           </p>
         </div>
       )}
@@ -1232,6 +1355,13 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   onToggleStar,
   onTogglePin,
   onDuplicateTask,
+  folderMetas,
+  onUpdateFolderMeta,
+  onArchiveFolder,
+  onTrashFolder,
+  onToggleFolderStar,
+  onToggleFolderPin,
+  onShowMessage,
   deadlineThresholdDays = 3,
   language = 'en',
   width,
@@ -1439,6 +1569,54 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
       if (p.id !== paneId) return p;
       return { ...p, activeTaskId: taskId };
     }));
+  };
+
+  // Handle opening a task into a new tab (e.g. from a folder's Contained tasks list)
+  const handleOpenTaskInNewTab = (paneId: number, taskId: string) => {
+    setActivePaneId(paneId);
+    prevActiveTaskIdRef.current = taskId;
+
+    setPanes(prevPanes => {
+      const nextPanes = prevPanes.map(p => {
+        if (p.id !== paneId) return p;
+
+        const isAlreadyOpen = p.openTaskIds.includes(taskId);
+        let nextOpen = [...p.openTaskIds];
+
+        if (!isAlreadyOpen) {
+          // Insert right after current active folder tab, or at the end
+          const currentIdx = p.activeTaskId ? nextOpen.indexOf(p.activeTaskId) : -1;
+          if (currentIdx !== -1) {
+            nextOpen.splice(currentIdx + 1, 0, taskId);
+          } else {
+            nextOpen.push(taskId);
+          }
+        }
+
+        // Pin the folder tab if it was preview so it is NEVER replaced or lost
+        let nextPreview = p.previewTaskId;
+        if (nextPreview && nextPreview.startsWith('folder:')) {
+          nextPreview = null;
+        }
+
+        return {
+          ...p,
+          openTaskIds: nextOpen,
+          activeTaskId: taskId,
+          previewTaskId: isAlreadyOpen ? nextPreview : taskId
+        };
+      });
+
+      const allOpenIds = Array.from(new Set(nextPanes.flatMap(p => p.openTaskIds)));
+      if (onOpenTaskIdsChange) {
+        onOpenTaskIdsChange(allOpenIds);
+      }
+      return nextPanes;
+    });
+
+    if (onSelectTask) {
+      onSelectTask(taskId, false);
+    }
   };
 
   // Double click tab -> Pin it (promotes to permanent)
@@ -1865,6 +2043,16 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
+  const commonFolderProps = {
+    folderMetas,
+    onUpdateFolderMeta,
+    onArchiveFolder,
+    onTrashFolder,
+    onToggleFolderStar,
+    onToggleFolderPin,
+    onShowMessage,
+  };
+
   return (
     <div 
       className="fixed inset-0 z-[150] w-full h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-2xl lg:shadow-md select-text"
@@ -1887,7 +2075,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
           <div className="flex items-center gap-1.5">
             <span className="font-bold text-slate-600 flex items-center gap-1 text-[11px]">
               <FileText size={13} className="text-indigo-600" />
-              {isJa ? 'タスク詳細' : 'Task Details'}
+              {isJa ? '詳細' : 'Details'}
             </span>
 
             {/* Layout Quick Selector */}
@@ -1991,6 +2179,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
               onTogglePin={onTogglePin}
               onDuplicateTask={onDuplicateTask}
               t={t}
+              {...commonFolderProps}
             />
           )}
 
@@ -2028,6 +2217,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onTogglePin={onTogglePin}
                   onDuplicateTask={onDuplicateTask}
                   t={t}
+                  {...commonFolderProps}
                 />
               </div>
 
@@ -2071,6 +2261,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onTogglePin={onTogglePin}
                   onDuplicateTask={onDuplicateTask}
                   t={t}
+                  {...commonFolderProps}
                 />
               </div>
             </div>
@@ -2110,6 +2301,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onTogglePin={onTogglePin}
                   onDuplicateTask={onDuplicateTask}
                   t={t}
+                  {...commonFolderProps}
                 />
               </div>
 
@@ -2153,6 +2345,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                   onTogglePin={onTogglePin}
                   onDuplicateTask={onDuplicateTask}
                   t={t}
+                  {...commonFolderProps}
                 />
               </div>
             </div>
@@ -2198,6 +2391,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onTogglePin={onTogglePin}
                     onDuplicateTask={onDuplicateTask}
                     t={t}
+                    {...commonFolderProps}
                   />
                 </div>
 
@@ -2242,6 +2436,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onTogglePin={onTogglePin}
                     onDuplicateTask={onDuplicateTask}
                     t={t}
+                    {...commonFolderProps}
                   />
                 </div>
               </div>
@@ -2292,6 +2487,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onTogglePin={onTogglePin}
                     onDuplicateTask={onDuplicateTask}
                     t={t}
+                    {...commonFolderProps}
                   />
                 </div>
 
@@ -2336,6 +2532,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                     onTogglePin={onTogglePin}
                     onDuplicateTask={onDuplicateTask}
                     t={t}
+                    {...commonFolderProps}
                   />
                 </div>
               </div>

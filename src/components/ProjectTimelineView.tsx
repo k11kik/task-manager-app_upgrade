@@ -33,7 +33,7 @@ import {
   LayoutGrid,
   ArrowLeftRight
 } from 'lucide-react';
-import { Task, Category } from '../types';
+import { Task, Category, FolderMeta } from '../types';
 import { cn } from '../lib/utils';
 import { format, addDays, subDays, startOfDay, isSameDay, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
 import { isTaskOccurringOnDate } from '../lib/taskDateUtils';
@@ -137,6 +137,9 @@ interface ProjectTimelineViewProps {
   }) => Promise<void>;
   activeSection?: string;
   language?: string;
+  folderMetas?: Record<string, FolderMeta>;
+  onToggleFolderStar?: (folderPath: string) => void;
+  onToggleFolderPin?: (folderPath: string) => void;
   t: (key: string) => string;
 }
 
@@ -157,6 +160,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   onAddTask,
   activeSection = 'dashboard',
   language = 'en',
+  folderMetas,
+  onToggleFolderStar,
+  onToggleFolderPin,
   t
 }) => {
   const isJa = language === 'ja';
@@ -2461,16 +2467,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     "shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-center justify-between bg-white sticky left-0 z-20 select-none transition-colors cursor-grab active:cursor-grabbing group/lane self-stretch min-h-[56px]",
                     project.level === 0 ? "font-bold text-slate-800" : "font-medium text-slate-600",
                     dragOverProjectHeader === project.fullPath && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset",
-                    (selectedFolderPath === project.fullPath || selectedKey === `folder:${project.fullPath}`) && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset"
+                    (selectedFolderPath === project.fullPath || selectedKey === `folder:${project.fullPath}` || activeTaskId === `folder:${project.fullPath}`) && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset"
                   )}
-                  title={isJa ? "クリックで折りたたみ切替 / ドラッグで移動" : "Click to collapse/expand, drag to move"}
+                  title={isJa ? "クリックでフォルダ詳細を開く / ドラッグで移動" : "Click to open folder detail / drag to move"}
                 >
                   <div 
                     onClick={() => {
                       (window as any).__navforActivePane = 'timeline';
-                      toggleProjectCollapse(project.fullPath);
                       setSelectedKey(`folder:${project.fullPath}`);
                       setSelectedFolderPath(project.fullPath);
+                      onSelectTask(`folder:${project.fullPath}`, false);
+                    }}
+                    onDoubleClick={() => {
+                      toggleProjectCollapse(project.fullPath);
+                      onSelectTask(`folder:${project.fullPath}`, true);
                     }}
                     className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden cursor-pointer hover:text-indigo-600 transition-colors"
                   >
@@ -2521,6 +2531,80 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         {project.name}
                       </span>
                     )}
+
+                    {/* Folder Star, Pin, Deadline icons */}
+                    {(() => {
+                      const fMeta = folderMetas?.[project.fullPath];
+                      const fDeadlineAlert = fMeta?.deadline ? getTaskDeadlineAlert(fMeta.deadline, false, isJa) : null;
+                      return (
+                        <div className="flex items-center gap-1 shrink-0 ml-1" onClick={(e) => e.stopPropagation()}>
+                          {/* Star */}
+                          {fMeta?.isStarred ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onToggleFolderStar?.(project.fullPath);
+                              }}
+                              className="text-amber-400 hover:text-amber-500 shrink-0"
+                              title={isJa ? "スター解除" : "Unstar folder"}
+                            >
+                              <Star size={11} fill="currentColor" />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onToggleFolderStar?.(project.fullPath);
+                              }}
+                              className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover/lane:opacity-100 transition-opacity"
+                              title={isJa ? "スターを付ける" : "Star folder"}
+                            >
+                              <Star size={11} />
+                            </button>
+                          )}
+
+                          {/* Pin */}
+                          {fMeta?.isPinned && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onToggleFolderPin?.(project.fullPath);
+                              }}
+                              className="text-indigo-500 hover:text-indigo-600 shrink-0"
+                              title={isJa ? "ピン留め解除" : "Unpin folder"}
+                            >
+                              <Pin size={11} fill="currentColor" />
+                            </button>
+                          )}
+
+                          {/* Deadline Badge */}
+                          {fDeadlineAlert && (
+                            <span
+                              className={cn(
+                                "text-[9px] px-1 py-0.2 rounded font-mono font-bold shrink-0 leading-none",
+                                fDeadlineAlert.isOverdue
+                                  ? "bg-red-100 text-red-700 border border-red-200"
+                                  : "bg-amber-100 text-amber-800 border border-amber-200"
+                              )}
+                              title={fDeadlineAlert.tooltip}
+                            >
+                              {fDeadlineAlert.label}
+                            </span>
+                          )}
+                          {!fDeadlineAlert && fMeta?.deadline && (
+                            <span
+                              className="text-[9px] px-1 py-0.2 rounded font-mono text-slate-400 font-normal shrink-0 leading-none"
+                              title={format(new Date(fMeta.deadline), 'yyyy/MM/dd HH:mm')}
+                            >
+                              {format(new Date(fMeta.deadline), 'M/d')}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Subfolder add, rename, and quick task add buttons */}

@@ -27,7 +27,7 @@ import {
   Copy,
   PanelLeftClose
 } from 'lucide-react';
-import { Task, Category } from '../types';
+import { Task, Category, FolderMeta } from '../types';
 import { cn } from '../lib/utils';
 import { format, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
 
@@ -63,6 +63,9 @@ interface TaskExplorerTreeProps {
   onOpenDailyPick?: () => void;
   deadlineThresholdDays?: number;
   language?: string;
+  folderMetas?: Record<string, FolderMeta>;
+  onToggleFolderStar?: (folderPath: string) => void;
+  onToggleFolderPin?: (folderPath: string) => void;
   t: (key: string) => string;
 }
 
@@ -91,6 +94,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   onOpenDailyPick,
   deadlineThresholdDays = 3,
   language = 'en',
+  folderMetas,
+  onToggleFolderStar,
+  onToggleFolderPin,
   t
 }) => {
   const isJa = language === 'ja';
@@ -628,6 +634,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         } else {
           setSelectedFolderPaths(new Set([next.path]));
           setSelectedTaskIds(new Set());
+          onSelectTask(`folder:${next.path}`, false);
         }
       }
 
@@ -667,6 +674,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         } else {
           setSelectedFolderPaths(new Set([prev.path]));
           setSelectedTaskIds(new Set());
+          onSelectTask(`folder:${prev.path}`, false);
         }
       }
 
@@ -1140,10 +1148,12 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   const renderFolder = (node: FolderNode, depth = 0) => {
     const isCollapsed = collapsedFolders.has(node.fullPath);
     const counts = countFolderTasks(node);
+    const folderMeta = folderMetas?.[node.fullPath];
+    const folderDeadlineInfo = folderMeta?.deadline ? formatDeadlineBadge(folderMeta.deadline) : null;
     const isCreatingHere = creatingInFolder?.path === node.fullPath;
     const isRenamingHere = renamingItem?.type === 'folder' && renamingItem.idOrPath === node.fullPath;
     const isDragOver = dragOverFolderPath === node.fullPath;
-    const isFolderSelected = selectedKey === `folder:${node.fullPath}` || selectedFolderPaths.has(node.fullPath);
+    const isFolderSelected = selectedKey === `folder:${node.fullPath}` || selectedFolderPaths.has(node.fullPath) || activeTaskId === `folder:${node.fullPath}`;
 
     const folderItemKey = `folder:${node.fullPath}`;
 
@@ -1193,6 +1203,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               });
               setSelectedKey(folderItemKey);
               setLastSelectedKey(folderItemKey);
+              onSelectTask(`folder:${node.fullPath}`, false);
             } else if (e.shiftKey && lastSelectedKey) {
               rangeSelectItems(lastSelectedKey, folderItemKey);
               setSelectedKey(folderItemKey);
@@ -1201,8 +1212,13 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               setSelectedTaskIds(new Set());
               setSelectedKey(folderItemKey);
               setLastSelectedKey(folderItemKey);
-              toggleFolder(node.fullPath);
+              onSelectTask(`folder:${node.fullPath}`, false);
             }
+          }}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            toggleFolder(node.fullPath);
+            onSelectTask(`folder:${node.fullPath}`, true);
           }}
           className={cn(
             "group relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-semibold cursor-pointer transition-all",
@@ -1256,6 +1272,68 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             >
               {node.name}
             </span>
+          )}
+
+          {/* Folder Star, Pin & Deadline Icons */}
+          {!isRenamingHere && (
+            <div className="flex items-center gap-1 shrink-0 ml-0.5">
+              {/* Star icon */}
+              {folderMeta?.isStarred ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleFolderStar?.(node.fullPath);
+                  }}
+                  className="text-amber-400 hover:text-amber-500 shrink-0"
+                  title={isJa ? "スター解除" : "Unstar folder"}
+                >
+                  <Star size={11} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleFolderStar?.(node.fullPath);
+                  }}
+                  className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                  title={isJa ? "スターを付ける" : "Star folder"}
+                >
+                  <Star size={11} />
+                </button>
+              )}
+
+              {/* Pin icon if pinned */}
+              {folderMeta?.isPinned && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleFolderPin?.(node.fullPath);
+                  }}
+                  className="text-indigo-500 hover:text-indigo-600 shrink-0"
+                  title={isJa ? "ピン留め解除" : "Unpin folder"}
+                >
+                  <Pin size={11} fill="currentColor" />
+                </button>
+              )}
+
+              {/* Deadline Badge */}
+              {folderDeadlineInfo && (
+                <span
+                  className={cn(
+                    "text-[9px] px-1 py-0.2 rounded font-mono font-bold shrink-0 leading-none",
+                    folderDeadlineInfo.status === 'expired' && "bg-red-100 text-red-700 border border-red-200",
+                    folderDeadlineInfo.status === 'approaching' && "bg-amber-100 text-amber-800 border border-amber-200",
+                    folderDeadlineInfo.status === 'normal' && "text-slate-400 font-normal"
+                  )}
+                  title={folderMeta?.deadline ? format(new Date(folderMeta.deadline), 'yyyy/MM/dd HH:mm') : undefined}
+                >
+                  {folderDeadlineInfo.label}
+                </span>
+              )}
+            </div>
           )}
 
           {/* Task count badges */}
