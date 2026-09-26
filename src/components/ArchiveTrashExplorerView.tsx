@@ -36,12 +36,13 @@ interface ArchiveTrashExplorerViewProps {
   onRestore: (taskId: string, targetCategory?: Category) => void;
   onPermanentDelete: (taskId: string) => void;
   onMoveToTrash?: (taskId: string) => void;
-  onSelectTask: (task: Task) => void;
+  onSelectTask: (taskId: string, isPermanent?: boolean) => void;
   onToggleStar?: (taskId: string) => void;
   onTogglePin?: (taskId: string) => void;
   trashCleanupThresholdDays?: number;
   archiveThresholdDays?: number;
   activeTaskId?: string | null;
+  openTaskIds?: string[];
   onEmptyTrash?: () => void;
   onCleanupArchive?: () => void;
   language?: string;
@@ -58,8 +59,9 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
   onToggleStar,
   onTogglePin,
   trashCleanupThresholdDays = 30,
-  archiveThresholdDays = 30,
+  archiveThresholdDays = 90,
   activeTaskId,
+  openTaskIds = [],
   onEmptyTrash,
   onCleanupArchive,
   language = 'en',
@@ -205,23 +207,43 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
     const trashInfo = isTrash ? getTrashPurgeInfo(task) : null;
     const isNearingPurge = isTrash && trashInfo?.isNearing;
     const isSelected = activeTaskId === task.id;
+    const isOpenInTab = openTaskIds.includes(task.id);
 
     return (
       <div
         key={task.id}
-        onClick={() => onSelectTask(task)}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData('text/plain', task.id);
+          e.dataTransfer.setData('application/navfor-tab', JSON.stringify({ taskId: task.id, sourcePaneId: -1 }));
+          e.dataTransfer.effectAllowed = 'copyMove';
+        }}
+        onClick={() => onSelectTask(task.id, false)}
+        onDoubleClick={() => onSelectTask(task.id, true)}
         className={cn(
           "group relative flex items-center justify-between gap-2.5 px-3 py-2 rounded-lg text-xs cursor-pointer transition-all border select-none mb-1",
           isSelected
             ? "bg-indigo-50 border-indigo-300 ring-2 ring-indigo-500/50 text-indigo-950 font-medium"
-            : isNearingPurge 
-              ? "bg-red-50/70 hover:bg-red-100/70 border-red-200/80 text-red-950 font-medium" 
-              : "bg-white hover:bg-slate-50 border-slate-200/70 text-slate-700"
+            : isOpenInTab
+              ? "bg-indigo-50/40 hover:bg-indigo-50/80 border-indigo-200/80 text-slate-800"
+              : isNearingPurge 
+                ? "bg-red-50/70 hover:bg-red-100/70 border-red-200/80 text-red-950 font-medium" 
+                : "bg-white hover:bg-slate-50 border-slate-200/70 text-slate-700"
         )}
         style={{ marginLeft: `${Math.max(0, depth * 14)}px` }}
       >
         {/* Left side: Icon, Status, Title */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
+          {/* Open in Tab indicator dot */}
+          {isOpenInTab && (
+            <span
+              className={cn(
+                "w-1.5 h-1.5 rounded-full shrink-0",
+                isSelected ? "bg-indigo-600" : "bg-indigo-400"
+              )}
+              title={L("詳細タブで開いています", "Open in detail tab", "Ouvert dans l'onglet de détail")}
+            />
+          )}
           {/* Status Icon */}
           <div className="shrink-0">
             {isTrash ? (

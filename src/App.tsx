@@ -407,10 +407,10 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
-    if (viewMode !== 'dashboard') {
+    if (viewMode !== 'dashboard' && viewMode !== 'archive' && viewMode !== 'trash') {
       setViewMode('dashboard');
     }
-    if (window.innerWidth < 1024) {
+    if (viewMode === 'dashboard' && window.innerWidth < 1024) {
       setMobileView('focus');
     }
   };
@@ -752,6 +752,7 @@ export default function App() {
   const [trashFilter, setTrashFilter] = useState<'all' | '1w' | '2w'>('all');
 
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [dirPermission, setDirPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(() => {
     const saved = Number(localStorage.getItem('trifocus_last_backup'));
@@ -778,6 +779,9 @@ export default function App() {
     } catch {}
     return 1;
   });
+  const nextBackupSlotRef = useRef<1 | 2 | 3>(nextBackupSlot);
+  const lastWrittenSignatureRef = useRef<string>('');
+  const isWritingLocalRef = useRef<boolean>(false);
   const localLogSettingsRef = useRef<HTMLDivElement>(null);
   const [highlightLocalSettings, setHighlightLocalSettings] = useState(false);
   const [showCleanupMenu, setShowCleanupMenu] = useState(false);
@@ -789,15 +793,54 @@ export default function App() {
   // Restore saved FileSystemDirectoryHandle from IndexedDB on startup
   useEffect(() => {
     let mounted = true;
-    loadDirHandleFromIDB().then((handle) => {
-      if (mounted && handle) {
-        setDirHandle(handle);
+    loadDirHandleFromIDB().then(async (handle) => {
+      if (!mounted || !handle) return;
+      setDirHandle(handle);
+      try {
+        if (typeof (handle as any).queryPermission === 'function') {
+          const perm = await (handle as any).queryPermission({ mode: 'readwrite' });
+          if (mounted) setDirPermission(perm);
+        } else {
+          if (mounted) setDirPermission('granted');
+        }
+      } catch {
+        if (mounted) setDirPermission('prompt');
       }
     });
     return () => {
       mounted = false;
     };
   }, []);
+
+  // Automatically re-verify write permission on the first user interaction if handle was restored from IndexedDB with 'prompt'
+  useEffect(() => {
+    if (!dirHandle || dirPermission === 'granted') return;
+
+    let requesting = false;
+    const handleUserGesture = async () => {
+      if (requesting) return;
+      requesting = true;
+      try {
+        if (typeof (dirHandle as any).requestPermission === 'function') {
+          const perm = await (dirHandle as any).requestPermission({ mode: 'readwrite' });
+          setDirPermission(perm);
+        } else {
+          setDirPermission('granted');
+        }
+      } catch {
+        // Ignore if gesture was not eligible
+      } finally {
+        requesting = false;
+      }
+    };
+
+    window.addEventListener('pointerdown', handleUserGesture, { once: true, capture: true });
+    window.addEventListener('keydown', handleUserGesture, { once: true, capture: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleUserGesture, { capture: true } as any);
+      window.removeEventListener('keydown', handleUserGesture, { capture: true } as any);
+    };
+  }, [dirHandle, dirPermission]);
 
   useEffect(() => {
     if (message && message.type !== 'error') {
@@ -811,7 +854,7 @@ export default function App() {
   const [settings, setSettings] = useState({
     urgentLimit: 3,
     deadlineThreshold: 3,
-    archiveThresholdDays: 99999,
+    archiveThresholdDays: 90,
     doneToTrashThresholdDays: 7,
     trashCleanupThresholdDays: 30,
     archiveDoneToTrashDays: 7,
@@ -1436,10 +1479,20 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         const loadedSections = (data.sections && data.sections.length > 0) ? data.sections : ['General'];
+        let resolvedArchiveThresholdDays = data.archiveThresholdDays !== undefined ? data.archiveThresholdDays : 90;
+        try {
+          if (!localStorage.getItem('navfor_migrated_archive_threshold_90_v1')) {
+            localStorage.setItem('navfor_migrated_archive_threshold_90_v1', '1');
+            if (resolvedArchiveThresholdDays === 99999) {
+              resolvedArchiveThresholdDays = 90;
+              setDoc(settingsRef, { archiveThresholdDays: 90 }, { merge: true }).catch(() => {});
+            }
+          }
+        } catch {}
         setSettings({
           urgentLimit: data.urgentLimit || 3,
           deadlineThreshold: data.deadlineThreshold || 3,
-          archiveThresholdDays: data.archiveThresholdDays !== undefined ? data.archiveThresholdDays : 99999,
+          archiveThresholdDays: resolvedArchiveThresholdDays,
           doneToTrashThresholdDays: data.doneToTrashThresholdDays || 7,
           trashCleanupThresholdDays: data.trashCleanupThresholdDays || 30,
           archiveDoneToTrashDays: data.archiveDoneToTrashDays !== undefined ? data.archiveDoneToTrashDays : 7,
@@ -1467,7 +1520,7 @@ export default function App() {
           userId: user.uid,
           urgentLimit: 3,
           deadlineThreshold: 3,
-          archiveThresholdDays: 99999,
+          archiveThresholdDays: 90,
           doneToTrashThresholdDays: 7,
           trashCleanupThresholdDays: 30,
           archiveDoneToTrashDays: 7,
@@ -2929,11 +2982,30 @@ export default function App() {
     });
   };
 
+  const getCurrentNextSlot = (): 1 | 2 | 3 => {
+    try {
+      const saved = Number(localStorage.getItem('navfor_local_backup_next_slot'));
+      if (saved === 1 || saved === 2 || saved === 3) {
+        nextBackupSlotRef.current = saved;
+        return saved;
+      }
+    } catch {}
+    return nextBackupSlotRef.current || 1;
+  };
+
   const getTasksSignature = () => {
-    return tasks
-      .map(t => `${t.id}:${t.updatedAt || 0}:${t.isDone ? 1 : 0}:${t.category}:${t.project}:${t.title}`)
+    const taskPart = tasks
+      .map(t => `${t.id}:${t.updatedAt || 0}:${t.isDone ? 1 : 0}:${t.isStarred ? 1 : 0}:${t.isPinned ? 1 : 0}:${t.category}:${t.section || ''}:${t.project}:${t.title}:${t.notes || ''}:${(t.urls || []).join(',')}:${t.deadline || ''}:${t.startDate || ''}:${t.timelineColumn || ''}:${t.timelineStep ?? ''}`)
       .sort()
       .join('|');
+    const folderPart = Object.keys(folderMetas)
+      .sort()
+      .map(k => {
+        const m = folderMetas[k];
+        return `${k}:${m?.updatedAt || 0}:${m?.notes || ''}:${m?.deadline || ''}:${m?.isStarred ? 1 : 0}:${m?.isPinned ? 1 : 0}`;
+      })
+      .join('|');
+    return `${taskPart}__${folderPart}`;
   };
 
   const recordBackupSlot = (
@@ -2945,6 +3017,9 @@ export default function App() {
     now: number
   ) => {
     const nextSlot = ((slot % 3) + 1) as 1 | 2 | 3;
+    nextBackupSlotRef.current = nextSlot;
+    lastWrittenSignatureRef.current = signature;
+
     const slotInfo: LocalBackupSlotInfo = {
       slot,
       fileName,
@@ -2976,6 +3051,44 @@ export default function App() {
     setLastSyncTime(now);
   };
 
+  const writeCsvToDirHandle = async (
+    handle: FileSystemDirectoryHandle,
+    fileName: string,
+    csvContent: string,
+    userPart: string
+  ): Promise<boolean> => {
+    let perm: 'granted' | 'prompt' | 'denied' = 'granted';
+    if (typeof (handle as any).queryPermission === 'function') {
+      perm = await (handle as any).queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted' && typeof (handle as any).requestPermission === 'function') {
+        try {
+          perm = await (handle as any).requestPermission({ mode: 'readwrite' });
+        } catch {
+          // User activation might not be active right now
+        }
+      }
+    }
+    setDirPermission(perm);
+    if (perm !== 'granted') {
+      return false;
+    }
+
+    // Write and overwrite the numbered file (e.g., NavFOR_Log_<user>_1.csv, _2.csv, _3.csv)
+    const fileHandle = await handle.getFileHandle(fileName, { create: true });
+    const writable = await (fileHandle as any).createWritable({ keepExistingData: false });
+    await writable.write(csvContent);
+    await writable.close();
+
+    // Remove legacy unnumbered file if present so only the max 3 numbered files remain
+    try {
+      if (typeof (handle as any).removeEntry === 'function') {
+        await (handle as any).removeEntry(`NavFOR_Log_${userPart}.csv`).catch(() => {});
+      }
+    } catch {}
+
+    return true;
+  };
+
   const downloadBackupSlot = (slot: 1 | 2 | 3) => {
     const userPart = user?.email?.split('@')[0] || 'local';
     const slotInfo = backupSlots[slot];
@@ -2998,12 +3111,28 @@ export default function App() {
   const downloadBackup = async () => {
     const csv = getCSVData();
     const userPart = user?.email?.split('@')[0] || 'local';
-    const slot: 1 | 2 | 3 = nextBackupSlot;
+    const slot: 1 | 2 | 3 = getCurrentNextSlot();
     const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
     const now = Date.now();
     const signature = getTasksSignature();
 
     try {
+      if (dirHandle) {
+        const written = await writeCsvToDirHandle(dirHandle, fileName, csv, userPart);
+        if (written) {
+          recordBackupSlot(slot, fileName, csv, tasks.length, signature, now);
+          setMessage({
+            text: L(
+              `ローカルフォルダに ${fileName} を保存・上書きしました。`,
+              `Saved and overwritten ${fileName} in local folder.`,
+              `Fichier ${fileName} enregistré et écrasé dans le dossier local.`
+            ),
+            type: 'info'
+          });
+          return;
+        }
+      }
+
       if ((window as any).showSaveFilePicker && window.self === window.top) {
         const handle = await (window as any).showSaveFilePicker({
           suggestedName: fileName,
@@ -3073,6 +3202,7 @@ export default function App() {
         mode: 'readwrite'
       });
       setDirHandle(handle);
+      setDirPermission('granted');
       await saveDirHandleToIDB(handle);
       
       await saveSettings({ 
@@ -3080,28 +3210,24 @@ export default function App() {
         isLocalBackupEnabled: true 
       });
 
-      // Immediately create initial numbered backup in the selected folder
+      // Immediately write/overwrite initial numbered backup in the selected folder
       const csvContent = getCSVData();
       const userPart = user?.email?.split('@')[0] || 'local';
-      const slot: 1 | 2 | 3 = nextBackupSlot;
+      const slot: 1 | 2 | 3 = getCurrentNextSlot();
       const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
       const now = Date.now();
-      const fileHandle = await handle.getFileHandle(fileName, { create: true });
-      const writable = await fileHandle.createWritable();
-      await writable.write(csvContent);
-      await writable.close();
+      await writeCsvToDirHandle(handle, fileName, csvContent, userPart);
       recordBackupSlot(slot, fileName, csvContent, tasks.length, getTasksSignature(), now);
       setMessage({
         text: L(
-          `保存先フォルダ「${handle.name}」を設定し、${fileName} を保存しました。`,
-          `Configured folder "${handle.name}" and saved ${fileName}.`,
+          `保存先フォルダ「${handle.name}」を設定し、${fileName} をローカルに保存しました。`,
+          `Configured folder "${handle.name}" and saved ${fileName} locally.`,
           `Dossier « ${handle.name} » configuré et ${fileName} enregistré.`
         ),
         type: 'info'
       });
     } catch (err: any) {
       if (err.name === 'SecurityError' || err.message?.includes('Cross origin sub frames')) {
-        // In preview iframe where native folder picker is blocked by browser security, still enable 3-slot local backup
         const fallbackPath = settings.localBackupPath || 'Local_Log_Storage (Max 3)';
         await saveSettings({
           localBackupPath: fallbackPath,
@@ -3109,14 +3235,14 @@ export default function App() {
         });
         const csvContent = getCSVData();
         const userPart = user?.email?.split('@')[0] || 'local';
-        const slot: 1 | 2 | 3 = nextBackupSlot;
+        const slot: 1 | 2 | 3 = getCurrentNextSlot();
         const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
         recordBackupSlot(slot, fileName, csvContent, tasks.length, getTasksSignature(), Date.now());
         setMessage({ 
           text: L(
-            'プレビュー環境のためブラウザ内ローカルバックアップ（最大3ファイル: 1, 2, 3）を有効化しました。PCフォルダ直接同期は「新しいタブで開く」から利用可能です。',
-            'Enabled 3-file local backup (1, 2, 3) in browser storage. Open in a new tab if you want direct OS folder access.',
-            'Sauvegarde locale sur 3 fichiers (1, 2, 3) activée. Ouvrez dans un nouvel onglet pour un accès direct au dossier.'
+            'プレビュー画面の制限によりブラウザ内バックアップを有効化しました。PCフォルダへ直接ファイル保存・上書きする場合は「新しいタブで開く」をご利用ください。',
+            'Enabled browser local backup. To directly write & overwrite files in your PC folder, please open in a new tab.',
+            'Sauvegarde navigateur activée. Ouvrez dans un nouvel onglet pour écrire directement dans votre dossier PC.'
           ),
           type: 'info'
         });
@@ -3132,42 +3258,57 @@ export default function App() {
       return;
     }
 
+    // If user clicked manual sync in a top-level browser window and dirHandle is not yet bound, prompt folder picker
+    if (manual && !dirHandle && window.showDirectoryPicker && window.self === window.top) {
+      await selectBackupFolder();
+      return;
+    }
+
     const signature = getTasksSignature();
     if (!manual && !customName) {
-      // Find most recent slot and check if signature is unchanged
-      const existingSlots = ([backupSlots[1], backupSlots[2], backupSlots[3]].filter(Boolean) as LocalBackupSlotInfo[])
-        .sort((a, b) => b.timestamp - a.timestamp);
-      if (existingSlots.length > 0 && existingSlots[0].signature === signature) {
+      // Skip only if we have already written this exact task state during this session (or to the latest slot when no dirHandle is needed)
+      if (lastWrittenSignatureRef.current === signature) {
         return;
+      }
+      if (!dirHandle) {
+        const existingSlots = ([backupSlots[1], backupSlots[2], backupSlots[3]].filter(Boolean) as LocalBackupSlotInfo[])
+          .sort((a, b) => b.timestamp - a.timestamp);
+        if (existingSlots.length > 0 && existingSlots[0].signature === signature) {
+          return;
+        }
       }
     }
 
+    if (isWritingLocalRef.current) return;
+    isWritingLocalRef.current = true;
     setIsSyncing(true);
     try {
       const csvContent = getCSVData();
       const userPart = user?.email?.split('@')[0] || 'local';
-      const slot: 1 | 2 | 3 = nextBackupSlot;
+      const slot: 1 | 2 | 3 = getCurrentNextSlot();
       const fileName = customName || `NavFOR_Log_${userPart}_${slot}.csv`;
       const now = Date.now();
 
-      // Always record into the 3-slot rotating local backup (1, 2, 3)
-      recordBackupSlot(slot, fileName, csvContent, tasks.length, signature, now);
-
-      // Also write to the native OS directory if dirHandle is available
       if (dirHandle) {
-        let perm = 'granted';
-        if (typeof (dirHandle as any).queryPermission === 'function') {
-          perm = await (dirHandle as any).queryPermission({ mode: 'readwrite' });
-          if (perm !== 'granted' && manual && typeof (dirHandle as any).requestPermission === 'function') {
-            perm = await (dirHandle as any).requestPermission({ mode: 'readwrite' });
+        const written = await writeCsvToDirHandle(dirHandle, fileName, csvContent, userPart);
+        if (!written) {
+          // Permission is still 'prompt' (waiting for user gesture); do not advance slot yet
+          if (manual) {
+            setMessage({
+              text: L(
+                'ローカルフォルダへの書き込み許可が必要です。もう一度クリックしてください。',
+                'Write permission is needed for the local folder. Please click again to allow.',
+                'Autorisation d\'écriture requise pour le dossier local.'
+              ),
+              type: 'error'
+            });
           }
+          return;
         }
-        if (perm === 'granted') {
-          const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-          const writable = await fileHandle.createWritable();
-          await writable.write(csvContent);
-          await writable.close();
-        }
+        recordBackupSlot(slot, fileName, csvContent, tasks.length, signature, now);
+      } else {
+        // When in iframe or Safari without FileSystemDirectoryHandle, still record into the 3-slot browser backup
+        recordBackupSlot(slot, fileName, csvContent, tasks.length, signature, now);
       }
 
       if (manual) {
@@ -3175,9 +3316,9 @@ export default function App() {
           text: customName
             ? `Emergency backup created: ${fileName}`
             : L(
-                `ローカルログ (#${slot}: ${fileName}) を更新しました。`,
-                `Local log backup (#${slot}: ${fileName}) updated.`,
-                `Journal local (#${slot} : ${fileName}) mis à jour.`
+                `ローカルログ (#${slot}: ${fileName}) を保存・上書きしました。`,
+                `Local log backup (#${slot}: ${fileName}) saved & overwritten.`,
+                `Journal local (#${slot} : ${fileName}) enregistré et écrasé.`
               ),
           type: 'info'
         });
@@ -3191,19 +3332,20 @@ export default function App() {
         });
       }
     } finally {
+      isWritingLocalRef.current = false;
       setIsSyncing(false);
     }
   };
 
-  // Auto-sync effect (rotates across up to 3 numbered files: 1, 2, 3)
+  // Auto-sync effect: immediately saves & overwrites the next numbered file (1 -> 2 -> 3 -> 1) on every task/folder change
   useEffect(() => {
     if (isLocalLogConfigured && tasks.length > 0) {
       const timer = setTimeout(() => {
         syncToLocalSystem(false);
-      }, 5000); // 5s debounce
+      }, 300); // Fast 300ms debounce so every change is immediately written & overwritten to local disk
       return () => clearTimeout(timer);
     }
-  }, [tasks, isLocalLogConfigured, dirHandle]);
+  }, [tasks, folderMetas, isLocalLogConfigured, dirHandle, dirPermission]);
 
   // Safari/PWA Persistence Request
   useEffect(() => {
@@ -3941,13 +4083,37 @@ export default function App() {
                           <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100">
                             <div className="flex items-center justify-between mb-1">
                               <label className="text-[8px] font-black text-slate-400 uppercase">{t('LocalDirectoryPath')}</label>
-                              <span className="text-[8px] font-black uppercase px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
-                                {t('SyncActive')}
+                              <span className={cn(
+                                "text-[8px] font-black uppercase px-1.5 py-0.5 rounded",
+                                dirHandle && dirPermission === 'granted'
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : "bg-amber-100 text-amber-700"
+                              )}>
+                                {dirHandle && dirPermission === 'granted'
+                                  ? t('SyncActive')
+                                  : L('フォルダ連携確認', 'Verify Folder', 'Vérifier dossier')}
                               </span>
                             </div>
                             <p className="text-[10px] font-mono break-all text-slate-700 leading-tight">
                               {settings.localBackupPath || t('AuthorizedLocalFolder')}
                             </p>
+                            {(!dirHandle || dirPermission !== 'granted') && window.showDirectoryPicker && window.self === window.top && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (!dirHandle) {
+                                    selectBackupFolder();
+                                  } else {
+                                    syncToLocalSystem(true);
+                                  }
+                                }}
+                                className="mt-2 w-full py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-white rounded text-[9px] font-bold transition-colors"
+                              >
+                                {!dirHandle
+                                  ? L('保存先フォルダを再選択して自動上書きを有効化', 'Reselect Folder to Enable Direct Overwrite', 'Resélectionner le dossier')
+                                  : L('クリックしてローカル上書き保存を許可', 'Click to Authorize Local File Overwrite', 'Autoriser l\'écriture locale')}
+                              </button>
+                            )}
                           </div>
 
                           {/* 3-File Rotating Backup List (1, 2, 3) */}
@@ -4167,7 +4333,9 @@ export default function App() {
       ) : (
         <main className={cn(
           "flex-1 min-h-0 overflow-hidden relative",
-          viewMode === 'dashboard' ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3" : "p-4 md:p-6 grid grid-cols-12 gap-6"
+          (viewMode === 'dashboard' || viewMode === 'archive' || viewMode === 'trash')
+            ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3"
+            : "p-4 md:p-6 grid grid-cols-12 gap-6"
         )}>
         {/* Mobile Navigation (Bottom) */}
         <div className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-slate-200 z-[70] flex items-center justify-around px-2 shadow-[0_-4px_20px_rgba(0,0,0,0.1)]">
@@ -4280,22 +4448,27 @@ export default function App() {
         )}
 
         {/* Task Columns / Timeline & Detail Area */}
-        <div className={cn("h-full min-h-0 overflow-hidden relative", viewMode === 'dashboard' ? "flex-1 min-w-0" : "col-span-12")}>
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={viewMode}
-              initial={{ x: 10, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: -10, opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="h-full"
-            >
-              {viewMode === 'dashboard' ? (
-                <div className={cn(
-                  "flex-1 h-full min-w-0 flex flex-row min-h-0 overflow-hidden",
-                  mobileView === 'summary' && "hidden lg:flex"
-                )}>
-                  {/* Project Timeline View */}
+        <div className={cn(
+          "h-full min-h-0 overflow-hidden relative",
+          (viewMode === 'dashboard' || viewMode === 'archive' || viewMode === 'trash')
+            ? "flex-1 min-w-0 flex flex-row min-h-0"
+            : "col-span-12"
+        )}>
+          <div className={cn(
+            "flex-1 h-full min-w-0 flex flex-col min-h-0 overflow-hidden",
+            viewMode === 'dashboard' && mobileView === 'summary' && "hidden lg:flex"
+          )}>
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={viewMode}
+                initial={{ x: 10, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -10, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="h-full min-w-0 flex-1 flex flex-col overflow-hidden"
+              >
+                {viewMode === 'dashboard' ? (
+                  /* Project Timeline View */
                   <div className="flex-1 h-full min-w-0 flex flex-col min-h-0 overflow-hidden">
                     <ProjectTimelineView
                       tasks={filteredTasks}
@@ -4324,111 +4497,52 @@ export default function App() {
                       t={t}
                     />
                   </div>
-
-                  {/* Task Detail Pane (Right side, resizable, tabbed & split like VS Code) */}
-                  {isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
-                    <TaskTabsDetail
-                      tasks={tasks}
+                ) : viewMode === 'calendar' ? (
+                  /* Calendar Mode */
+                  <CalendarView 
+                    tasks={searchAndProjectFilteredTasks} 
+                    onEdit={setEditingTask} 
+                    t={t} 
+                    locale={dateLocale}
+                  />
+                ) : viewMode === 'archive' ? (
+                  /* Archive Mode (Explorer Style) */
+                  <section className="flex-1 flex flex-col rounded-2xl border p-4 md:p-6 min-h-0 bg-white border-slate-200 shadow-sm h-full overflow-hidden">
+                    <ArchiveTrashExplorerView
+                      mode="archive"
+                      tasks={filteredTasks.filter(t => t.category === 'Archive')}
                       activeTaskId={activeTabTaskId}
                       openTaskIds={openTaskIds}
-                      lastOpenEvent={lastOpenEvent}
-                      onSelectTask={(id, isPermanent) => {
-                        setActiveTabTaskId(id);
-                        if (isPermanent) {
-                          setLastOpenEvent({ taskId: id, isPermanent: true, timestamp: Date.now() });
-                        }
-                      }}
-                      onClose={handleMinimizeDetailPane}
-                      onMinimize={handleMinimizeDetailPane}
-                      onCloseAllTabs={handleCloseAllTabs}
-                      onOpenTaskIdsChange={setOpenTaskIds}
-                      onUpdateTask={updateTask}
-                      onMoveTask={moveTask}
-                      onDeleteTask={deleteTask}
-                      onToggleDone={toggleDone}
-                      onToggleStar={toggleStar}
-                      onTogglePin={togglePin}
-                      onDuplicateTask={handleDuplicateTask}
-                      folderMetas={folderMetas}
-                      onUpdateFolderMeta={updateFolderMeta}
-                      onArchiveFolder={handleArchiveFolder}
-                      onTrashFolder={handleTrashFolder}
-                      onToggleFolderStar={handleToggleFolderStar}
-                      onToggleFolderPin={handleToggleFolderPin}
-                      onShowMessage={setMessage}
-                      deadlineThresholdDays={settings.deadlineThreshold}
+                      onRestore={(taskId, cat) => moveTask(taskId, cat || 'Focus')}
+                      onPermanentDelete={(taskId) => deleteTask(taskId)}
+                      onMoveToTrash={(taskId) => moveTask(taskId, 'Trash')}
+                      onSelectTask={handleOpenTaskInTab}
+                      onToggleStar={(taskId) => toggleStar(taskId)}
+                      onTogglePin={(taskId) => togglePin(taskId)}
+                      archiveThresholdDays={settings.archiveThresholdDays}
+                      onCleanupArchive={() => cleanupArchive()}
                       language={settings.language}
-                      width={detailPaneWidth}
-                      onWidthChange={handleDetailPaneWidthChange}
                       t={t}
                     />
-                  )}
-
-                  {/* Collapsed Detail Pane Bar when minimized with open tabs */}
-                  {!isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
-                    <div className="h-full shrink-0 flex flex-col items-center py-2 px-1 bg-slate-50/90 border-l border-slate-200 select-none w-10 transition-all z-10">
-                      <button
-                        type="button"
-                        onClick={handleExpandDetailPane}
-                        className="p-1.5 hover:bg-slate-200 text-slate-600 hover:text-indigo-600 rounded-md transition-colors"
-                        title={L('詳細ペインを展開 (タブを復元)', 'Expand Detail Pane (restore tabs)', 'Développer le panneau de détails')}
-                      >
-                        <FileText size={16} />
-                      </button>
-                      <div
-                        onClick={handleExpandDetailPane}
-                        className="mt-6 flex-1 cursor-pointer flex flex-col items-center justify-start text-slate-400 hover:text-indigo-600 transition-colors w-full"
-                        title={L('詳細ペインを展開 (タブを復元)', 'Expand Detail Pane (restore tabs)', 'Développer le panneau de détails')}
-                      >
-                        <span className="text-[10px] font-black tracking-widest uppercase [writing-mode:vertical-lr] select-none">
-                          {L('タスク詳細', 'TASK DETAIL', 'DÉTAILS')} ({openTaskIds.length})
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : viewMode === 'calendar' ? (
-            /* Calendar Mode */
-            <CalendarView 
-              tasks={searchAndProjectFilteredTasks} 
-              onEdit={setEditingTask} 
-              t={t} 
-              locale={dateLocale}
-            />
-          ) : viewMode === 'archive' ? (
-            /* Archive Mode (Explorer Style) */
-            <section className="flex flex-col rounded-2xl border p-4 md:p-6 min-h-0 bg-white border-slate-200 shadow-sm h-full overflow-hidden">
-              <ArchiveTrashExplorerView
-                mode="archive"
-                tasks={filteredTasks.filter(t => t.category === 'Archive')}
-                onRestore={(taskId, cat) => moveTask(taskId, cat || 'Focus')}
-                onPermanentDelete={(taskId) => deleteTask(taskId)}
-                onMoveToTrash={(taskId) => moveTask(taskId, 'Trash')}
-                onSelectTask={(task) => setEditingTask(task)}
-                onToggleStar={(taskId) => toggleStar(taskId)}
-                onTogglePin={(taskId) => togglePin(taskId)}
-                archiveThresholdDays={settings.archiveThresholdDays}
-                onCleanupArchive={() => cleanupArchive()}
-                language={settings.language}
-                t={t}
-              />
-            </section>
-          ) : viewMode === 'trash' ? (
-            /* Trash Mode (Explorer Style with nearing purge indicators) */
-            <section className="flex flex-col rounded-2xl border p-4 md:p-6 min-h-0 bg-white border-red-200/70 shadow-sm h-full overflow-hidden">
-              <ArchiveTrashExplorerView
-                mode="trash"
-                tasks={filteredTasks.filter(t => t.category === 'Trash')}
-                onRestore={(taskId, cat) => moveTask(taskId, cat || 'Backlog')}
-                onPermanentDelete={(taskId) => deleteTask(taskId)}
-                onSelectTask={(task) => setEditingTask(task)}
-                trashCleanupThresholdDays={settings.trashCleanupThresholdDays}
-                onEmptyTrash={() => emptyTrash()}
-                language={settings.language}
-                t={t}
-              />
-            </section>
-          ) : (
+                  </section>
+                ) : viewMode === 'trash' ? (
+                  /* Trash Mode (Explorer Style with nearing purge indicators) */
+                  <section className="flex-1 flex flex-col rounded-2xl border p-4 md:p-6 min-h-0 bg-white border-red-200/70 shadow-sm h-full overflow-hidden">
+                    <ArchiveTrashExplorerView
+                      mode="trash"
+                      tasks={filteredTasks.filter(t => t.category === 'Trash')}
+                      activeTaskId={activeTabTaskId}
+                      openTaskIds={openTaskIds}
+                      onRestore={(taskId, cat) => moveTask(taskId, cat || 'Backlog')}
+                      onPermanentDelete={(taskId) => deleteTask(taskId)}
+                      onSelectTask={handleOpenTaskInTab}
+                      trashCleanupThresholdDays={settings.trashCleanupThresholdDays}
+                      onEmptyTrash={() => emptyTrash()}
+                      language={settings.language}
+                      t={t}
+                    />
+                  </section>
+                ) : (
             /* Settings Mode */
             <section className="flex flex-col rounded-2xl border p-4 md:p-8 min-h-0 bg-white border-slate-200 h-full overflow-hidden">
               <div className="max-w-2xl mx-auto w-full flex-1 overflow-y-auto custom-scrollbar pb-32">
@@ -4578,94 +4692,25 @@ export default function App() {
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                       <div className="flex-1">
                         <p className="font-bold text-slate-900">{t('UrgentSlotLimit')}</p>
-                        <p className="text-xs text-slate-500">{t('MaxConcurrentUrgent')}</p>
+                        <p className="text-xs text-slate-500">
+                          {t('MaxConcurrentUrgent')} <span className="font-semibold text-slate-400">(3 {t('Slots')} ({t('Default')}))</span>
+                        </p>
                       </div>
                       <div className="flex items-center gap-3 w-full sm:w-48 shrink-0">
                         <button 
                           onClick={() => saveSettings({ ...settings, urgentLimit: Math.max(1, settings.urgentLimit - 1) })}
                           className="flex-1 h-11 flex items-center justify-center bg-white border border-slate-200 rounded-xl hover:bg-slate-100 transition-colors font-bold shadow-sm"
                         >-</button>
-                        <span className="w-12 text-center font-mono font-bold text-xl">{settings.urgentLimit}</span>
+                        <div className="w-16 flex flex-col items-center justify-center">
+                          <span className="text-center font-mono font-bold text-xl leading-none">{settings.urgentLimit}</span>
+                          {settings.urgentLimit === 3 && (
+                            <span className="text-[9px] font-bold text-slate-400 leading-tight mt-0.5">({t('Default')})</span>
+                          )}
+                        </div>
                         <button 
                           onClick={() => saveSettings({ ...settings, urgentLimit: settings.urgentLimit + 1 })}
                           className="flex-1 h-11 flex items-center justify-center bg-white border border-slate-200 rounded-xl hover:bg-slate-100 transition-colors font-bold shadow-sm"
                         >+</button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Health Thresholds */}
-                  <div className="bg-slate-50 rounded-2xl p-6 border border-slate-100">
-                    <div className="flex items-center gap-2 mb-6 text-indigo-600">
-                      <Activity size={18} />
-                      <h3 className="font-bold text-sm uppercase tracking-wider">{t('HealthMetrics')}</h3>
-                    </div>
-                    <div className="space-y-8">
-                      <div className="space-y-6">
-                        <div className="flex flex-col sm:flex-row sm:items-end justify-between items-start gap-4">
-                          <div className="flex-1">
-                            <p className="font-bold text-slate-900">{t('CriticalThreshold')}</p>
-                            <p className="text-xs text-slate-500">{t('CriticalAlertDesc')}</p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                             <input 
-                              type="number"
-                              className="w-16 bg-white border border-slate-200 rounded-lg h-10 text-sm font-mono font-bold outline-none focus:ring-1 focus:ring-red-500 text-center"
-                              value={settings.criticalThreshold}
-                              onChange={(e) => saveSettings({ ...settings, criticalThreshold: Math.max(5, parseInt(e.target.value) || 5) })}
-                            />
-                            <span className="text-[10px] font-bold text-slate-400 uppercase">{t('Items')}</span>
-                          </div>
-                        </div>
-                        <input 
-                          type="range" min="5" max="100" step="5"
-                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-red-600"
-                          value={settings.criticalThreshold}
-                          onChange={(e) => saveSettings({ ...settings, criticalThreshold: parseInt(e.target.value) })}
-                        />
-                        <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                          <span>5 {t('Items')}</span>
-                          <span>100 {t('Items')}</span>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-200/60">
-                        <div className="bg-white p-3 rounded-xl border border-slate-100 flex flex-col items-center">
-                          <span className="text-[9px] font-black uppercase text-orange-400 tracking-tighter mb-1">Warning (70%)</span>
-                          <span className="text-lg font-mono font-bold text-orange-400">{Math.floor(settings.criticalThreshold * 0.7)}</span>
-                        </div>
-                        <div className="bg-white p-3 rounded-xl border border-slate-100 flex flex-col items-center">
-                          <span className="text-[9px] font-black uppercase text-red-500 tracking-tighter mb-1">Critical (100%)</span>
-                          <span className="text-lg font-mono font-bold text-red-600">{settings.criticalThreshold}</span>
-                        </div>
-                      </div>
-
-                      <div className="pt-6 border-t border-slate-200/60">
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between items-start gap-4 mb-4">
-                          <div className="flex-1">
-                            <p className="font-bold text-slate-900">{t('DeadlineThreshold')}</p>
-                            <p className="text-xs text-slate-500">{t('DeadlineThresholdDesc')}</p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                             <input 
-                              type="number"
-                              className="w-16 bg-white border border-slate-200 rounded-lg h-10 text-sm font-mono font-bold outline-none focus:ring-1 focus:ring-indigo-500 text-center"
-                              value={settings.deadlineThreshold}
-                              onChange={(e) => saveSettings({ ...settings, deadlineThreshold: Math.max(1, parseInt(e.target.value) || 1) })}
-                            />
-                            <span className="text-[10px] font-bold text-slate-400 uppercase">{t('Days')}</span>
-                          </div>
-                        </div>
-                        <input 
-                          type="range" min="1" max="14" step="1"
-                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-                          value={settings.deadlineThreshold}
-                          onChange={(e) => saveSettings({ ...settings, deadlineThreshold: parseInt(e.target.value) })}
-                        />
-                        <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">
-                          <span>1 {t('Days')}</span>
-                          <span>14 {t('Days')}</span>
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -4683,13 +4728,13 @@ export default function App() {
                           <p className="text-xs text-slate-500">{t('DoneToTrashDesc')}</p>
                         </div>
                         <select 
-                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all shadow-sm w-full sm:w-48 shrink-0 h-11"
+                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all shadow-sm w-full sm:w-56 shrink-0 h-11"
                           value={settings.doneToTrashThresholdDays}
                           onChange={(e) => saveSettings({ doneToTrashThresholdDays: parseInt(e.target.value) })}
                         >
                           <option value={1}>1 {t('Days')}</option>
                           <option value={3}>3 {t('Days')}</option>
-                          <option value={7}>7 {t('Days')}</option>
+                          <option value={7}>7 {t('Days')} ({t('Default')})</option>
                           <option value={14}>14 {t('Days')}</option>
                           <option value={99999}>{t('Reset')}</option>
                         </select>
@@ -4701,13 +4746,13 @@ export default function App() {
                           <p className="text-xs text-slate-500">{t('TrashAutoCleanupDesc')}</p>
                         </div>
                         <select 
-                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all shadow-sm w-full sm:w-48 shrink-0 h-11"
+                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 transition-all shadow-sm w-full sm:w-56 shrink-0 h-11"
                           value={settings.trashCleanupThresholdDays}
                           onChange={(e) => saveSettings({ trashCleanupThresholdDays: parseInt(e.target.value) })}
                         >
                           <option value={7}>7 {t('Days')}</option>
                           <option value={14}>14 {t('Days')}</option>
-                          <option value={30}>30 {t('Days')}</option>
+                          <option value={30}>30 {t('Days')} ({t('Default')})</option>
                           <option value={90}>90 {t('Days')}</option>
                           <option value={99999}>{t('NeverCleanup')}</option>
                         </select>
@@ -4728,14 +4773,14 @@ export default function App() {
                           <p className="text-xs text-slate-500">{t('ArchiveThresholdDesc')}</p>
                         </div>
                         <select 
-                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all shadow-sm w-full sm:w-48 shrink-0 h-11"
+                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all shadow-sm w-full sm:w-56 shrink-0 h-11"
                           value={settings.archiveThresholdDays}
                           onChange={(e) => saveSettings({ archiveThresholdDays: parseInt(e.target.value) })}
                         >
                           <option value={7}>7 {t('Days')}</option>
                           <option value={14}>14 {t('Days')}</option>
                           <option value={30}>30 {t('Days')}</option>
-                          <option value={90}>90 {t('Days')}</option>
+                          <option value={90}>90 {t('Days')} ({t('Default')})</option>
                           <option value={99999}>{t('Never')}</option>
                         </select>
                       </div>
@@ -4746,13 +4791,13 @@ export default function App() {
                           <p className="text-xs text-slate-500">{t('ArchiveDoneToTrashDesc')}</p>
                         </div>
                         <select 
-                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all shadow-sm w-full sm:w-48 shrink-0 h-11"
+                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all shadow-sm w-full sm:w-56 shrink-0 h-11"
                           value={settings.archiveDoneToTrashDays !== undefined ? settings.archiveDoneToTrashDays : 7}
                           onChange={(e) => saveSettings({ archiveDoneToTrashDays: parseInt(e.target.value) })}
                         >
                           <option value={1}>1 {t('Days')}</option>
                           <option value={3}>3 {t('Days')}</option>
-                          <option value={7}>7 {t('Days')}</option>
+                          <option value={7}>7 {t('Days')} ({t('Default')})</option>
                           <option value={14}>14 {t('Days')}</option>
                           <option value={30}>30 {t('Days')}</option>
                           <option value={99999}>{t('Never')}</option>
@@ -4765,7 +4810,7 @@ export default function App() {
                           <p className="text-xs text-slate-500">{t('ArchiveInactiveToTrashDesc')}</p>
                         </div>
                         <select 
-                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all shadow-sm w-full sm:w-48 shrink-0 h-11"
+                          className="bg-white border border-slate-200 rounded-lg px-4 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all shadow-sm w-full sm:w-56 shrink-0 h-11"
                           value={settings.archiveInactiveToTrashDays !== undefined ? settings.archiveInactiveToTrashDays : 99999}
                           onChange={(e) => saveSettings({ archiveInactiveToTrashDays: parseInt(e.target.value) })}
                         >
@@ -4775,7 +4820,7 @@ export default function App() {
                           <option value={90}>90 {t('Days')} (3 {t('month')})</option>
                           <option value={180}>180 {t('Days')}</option>
                           <option value={365}>365 {t('Days')}</option>
-                          <option value={99999}>{t('Never')}</option>
+                          <option value={99999}>{t('Never')} ({t('Default')})</option>
                         </select>
                       </div>
                     </div>
@@ -5011,11 +5056,79 @@ export default function App() {
               </div>
             </section>
             )}
-          </motion.div>
-        </AnimatePresence>
-      </div>
-    </main>
-  )}
+              </motion.div>
+            </AnimatePresence>
+          </div>
+
+          {/* Task Detail Pane (Right side, resizable, tabbed & split like VS Code — active in Dashboard, Archive & Trash) */}
+          {(viewMode === 'dashboard' || viewMode === 'archive' || viewMode === 'trash') &&
+            !(viewMode === 'dashboard' && mobileView === 'summary' && typeof window !== 'undefined' && window.innerWidth < 1024) && (
+            <>
+              {isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
+                <TaskTabsDetail
+                  tasks={tasks}
+                  activeTaskId={activeTabTaskId}
+                  openTaskIds={openTaskIds}
+                  lastOpenEvent={lastOpenEvent}
+                  onSelectTask={(id, isPermanent) => {
+                    setActiveTabTaskId(id);
+                    if (isPermanent) {
+                      setLastOpenEvent({ taskId: id, isPermanent: true, timestamp: Date.now() });
+                    }
+                  }}
+                  onClose={handleMinimizeDetailPane}
+                  onMinimize={handleMinimizeDetailPane}
+                  onCloseAllTabs={handleCloseAllTabs}
+                  onOpenTaskIdsChange={setOpenTaskIds}
+                  onUpdateTask={updateTask}
+                  onMoveTask={moveTask}
+                  onDeleteTask={deleteTask}
+                  onToggleDone={toggleDone}
+                  onToggleStar={toggleStar}
+                  onTogglePin={togglePin}
+                  onDuplicateTask={handleDuplicateTask}
+                  folderMetas={folderMetas}
+                  onUpdateFolderMeta={updateFolderMeta}
+                  onArchiveFolder={handleArchiveFolder}
+                  onTrashFolder={handleTrashFolder}
+                  onToggleFolderStar={handleToggleFolderStar}
+                  onToggleFolderPin={handleToggleFolderPin}
+                  onShowMessage={setMessage}
+                  deadlineThresholdDays={settings.deadlineThreshold}
+                  language={settings.language}
+                  width={detailPaneWidth}
+                  onWidthChange={handleDetailPaneWidthChange}
+                  t={t}
+                />
+              )}
+
+              {/* Collapsed Detail Pane Bar when minimized with open tabs */}
+              {!isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
+                <div className="h-full shrink-0 flex flex-col items-center py-2 px-1 bg-slate-50/90 border-l border-slate-200 select-none w-10 transition-all z-10">
+                  <button
+                    type="button"
+                    onClick={handleExpandDetailPane}
+                    className="p-1.5 hover:bg-slate-200 text-slate-600 hover:text-indigo-600 rounded-md transition-colors"
+                    title={L('詳細ペインを展開 (タブを復元)', 'Expand Detail Pane (restore tabs)', 'Développer le panneau de détails')}
+                  >
+                    <FileText size={16} />
+                  </button>
+                  <div
+                    onClick={handleExpandDetailPane}
+                    className="mt-6 flex-1 cursor-pointer flex flex-col items-center justify-start text-slate-400 hover:text-indigo-600 transition-colors w-full"
+                    title={L('詳細ペインを展開 (タブを復元)', 'Expand Detail Pane (restore tabs)', 'Développer le panneau de détails')}
+                  >
+                    <span className="text-[10px] font-black tracking-widest uppercase [writing-mode:vertical-lr] select-none">
+                      {L('タスク詳細', 'TASK DETAIL', 'DÉTAILS')} ({openTaskIds.length})
+                    </span>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </main>
+    )}
 
       {/* Footer Info Bar */}
       <footer className="bg-white border-t border-slate-200 px-6 py-2 flex items-center justify-between shrink-0">

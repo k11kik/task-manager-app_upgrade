@@ -27,7 +27,8 @@ import {
   PinOff,
   Repeat,
   XSquare,
-  AlertCircle
+  AlertCircle,
+  RotateCcw
 } from 'lucide-react';
 import { Task, Category, RecurrenceType, TaskRecurrence, FolderMeta } from '../types';
 import { cn, tr } from '../lib/utils';
@@ -884,6 +885,33 @@ const SinglePane: React.FC<SinglePaneProps> = ({
 
             {/* Badges (Category / Star / Pin) */}
             <div className="flex flex-wrap items-center gap-1.5 pt-0.5 border-b border-slate-100 pb-2.5">
+              {/* Archive / Trash Status & Restore Badge */}
+              {(activeTask.category === 'Archive' || activeTask.category === 'Trash') && (
+                <div className="flex items-center gap-1">
+                  <span className={cn(
+                    "px-2 py-0.5 rounded-md text-[11px] font-bold flex items-center gap-1 border",
+                    activeTask.category === 'Trash'
+                      ? "bg-red-50 text-red-700 border-red-200"
+                      : "bg-slate-100 text-slate-700 border-slate-200"
+                  )}>
+                    {activeTask.category === 'Trash' ? <Trash2 size={11} /> : <Archive size={11} />}
+                    <span>{activeTask.category === 'Trash' ? L('ゴミ箱内', 'In Trash', 'Corbeille') : L('アーカイブ済', 'Archived', 'Archivé')}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPinTab(activeTask.id);
+                      onMoveTask(activeTask.id, 'Focus');
+                    }}
+                    className="px-2 py-0.5 rounded-md bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-bold flex items-center gap-1 transition-colors"
+                    title={L('ToDoリストへ復元', 'Restore to ToDo', 'Restaurer vers ToDo')}
+                  >
+                    <RotateCcw size={11} />
+                    <span>{L('復元', 'Restore', 'Restaurer')}</span>
+                  </button>
+                </div>
+              )}
+
               {/* Category */}
               <div className="flex items-center bg-slate-100 rounded-lg p-0.5 text-xs font-semibold">
                 <button
@@ -1261,7 +1289,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
               )}
             </div>
 
-            {/* Bottom Actions (Duplicate, Archive, Trash) */}
+            {/* Bottom Actions (Duplicate, Archive/Restore, Trash/Permanent Delete) */}
             <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
               <div className="flex items-center gap-1">
                 {onDuplicateTask && (
@@ -1277,29 +1305,50 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                     <span>{L('複製', 'Copy', 'Dupliquer')}</span>
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    onPinTab(activeTask.id);
-                    onMoveTask(activeTask.id, 'Archive');
-                  }}
-                  className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
-                >
-                  <Archive size={11} />
-                  <span>{L('アーカイブ', 'Archive', 'Archiver')}</span>
-                </button>
+                {activeTask.category === 'Archive' || activeTask.category === 'Trash' ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPinTab(activeTask.id);
+                      onMoveTask(activeTask.id, 'Focus');
+                    }}
+                    className="px-2 py-1 text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
+                  >
+                    <RotateCcw size={11} />
+                    <span>{L('ToDoへ復元', 'Restore to ToDo', 'Restaurer')}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPinTab(activeTask.id);
+                      onMoveTask(activeTask.id, 'Archive');
+                    }}
+                    className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
+                  >
+                    <Archive size={11} />
+                    <span>{L('アーカイブ', 'Archive', 'Archiver')}</span>
+                  </button>
+                )}
               </div>
 
               <button
                 type="button"
                 onClick={() => {
+                  const wasInTrash = activeTask.category === 'Trash';
                   onDeleteTask(activeTask.id);
-                  onCloseTab(activeTask.id);
+                  if (wasInTrash) {
+                    onCloseTab(activeTask.id);
+                  }
                 }}
                 className="px-2 py-1 text-red-600 hover:bg-red-50 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
               >
                 <Trash2 size={11} />
-                <span>{L('ゴミ箱', 'Trash', 'Corbeille')}</span>
+                <span>
+                  {activeTask.category === 'Trash'
+                    ? L('完全削除', 'Delete Permanently', 'Supprimer définitivement')
+                    : L('ゴミ箱', 'Trash', 'Corbeille')}
+                </span>
               </button>
             </div>
           </div>
@@ -2062,20 +2111,24 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   }, [layout]);
 
   // Overall left resize handle
+  const rootPaneRef = useRef<HTMLDivElement>(null);
   const handleResizeWidthMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     isResizingWidthRef.current = true;
+    const startX = e.clientX;
+    const startWidth = rootPaneRef.current?.getBoundingClientRect().width || width;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
 
     const handleMouseMove = (ev: MouseEvent) => {
       if (!isResizingWidthRef.current) return;
-      const newWidth = window.innerWidth - ev.clientX;
-      const minW = 280;
-      const maxW = Math.max(minW, window.innerWidth - 240);
-      if (newWidth >= minW && newWidth <= maxW) {
-        onWidthChange(newWidth);
-      }
+      const deltaX = startX - ev.clientX;
+      const parentWidth = rootPaneRef.current?.parentElement?.getBoundingClientRect().width || window.innerWidth;
+      const minW = 260;
+      const maxW = Math.max(minW, parentWidth - 220);
+      const nextWidth = Math.min(maxW, Math.max(minW, Math.round(startWidth + deltaX)));
+      onWidthChange(nextWidth);
     };
 
     const handleMouseUp = () => {
@@ -2153,15 +2206,21 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 z-[150] w-full h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-2xl lg:shadow-md select-text"
+      ref={rootPaneRef}
+      className="fixed inset-0 z-[150] max-sm:w-full! h-full sm:relative sm:inset-auto sm:z-20 sm:h-full sm:min-h-0 sm:max-w-[calc(100%-220px)] flex shrink-0 bg-white sm:border-l sm:border-slate-200/90 shadow-2xl sm:shadow-md select-text"
       style={{ width: `${width}px` }}
     >
-      {/* Left resize handle for the entire Task Detail area (Desktop only) */}
+      {/* Left resize handle for the entire Task Detail area */}
       <div 
         onMouseDown={handleResizeWidthMouseDown}
-        className="hidden lg:block absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-40"
-        title={L("ドラッグして詳細エリアの幅を調整", "Drag to resize detail pane", "Glisser pour redimensionner")}
-      />
+        onDoubleClick={() => onWidthChange(480)}
+        className="hidden sm:flex absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize items-center justify-center group/resizer z-40"
+        title={L("ドラッグして詳細エリアの幅を調整 (ダブルクリックでリセット)", "Drag to resize detail pane (Double-click to reset)", "Glisser pour redimensionner (Double-clic pour réinitialiser)")}
+      >
+        <div className="w-1 h-full group-hover/resizer:bg-indigo-500/60 group-active/resizer:bg-indigo-600 transition-colors flex items-center justify-center">
+          <div className="w-1 h-8 rounded-full bg-slate-300 group-hover/resizer:bg-indigo-500 transition-colors" />
+        </div>
+      </div>
 
       {/* Main Container */}
       <div 
