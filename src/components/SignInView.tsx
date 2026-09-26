@@ -29,6 +29,8 @@ interface SignInViewProps {
   onSuccess: () => void;
   onOpenDiagnostics: () => void;
   version?: string;
+  language?: SupportedLang;
+  onChangeLanguage?: (lang: SupportedLang) => void;
 }
 
 export type SupportedLang = 'ja' | 'en' | 'fr';
@@ -159,12 +161,14 @@ export const translations = {
 export const SignInView: React.FC<SignInViewProps> = ({
   onSuccess,
   onOpenDiagnostics,
-  version = "3.1.4"
+  version = "3.1.4",
+  language: externalLang,
+  onChangeLanguage
 }) => {
   // Detect language: stored preference or browser language
-  const [lang, setLang] = useState<SupportedLang>(() => {
+  const [localLang, setLocalLang] = useState<SupportedLang>(() => {
     try {
-      const saved = localStorage.getItem('navfor_lang') as SupportedLang;
+      const saved = (localStorage.getItem('navfor_lang') || localStorage.getItem('navfor_language')) as SupportedLang;
       if (saved === 'ja' || saved === 'en' || saved === 'fr') return saved;
       const browserLang = (typeof navigator !== 'undefined' ? navigator.language : '') || '';
       if (browserLang.startsWith('ja')) return 'ja';
@@ -175,13 +179,16 @@ export const SignInView: React.FC<SignInViewProps> = ({
     }
   });
 
+  const lang = externalLang || localLang;
   const t = translations[lang] || translations.en;
 
   const handleSetLang = (newLang: SupportedLang) => {
-    setLang(newLang);
+    setLocalLang(newLang);
     try {
       localStorage.setItem('navfor_lang', newLang);
+      localStorage.setItem('navfor_language', newLang);
     } catch {}
+    onChangeLanguage?.(newLang);
   };
 
   // Auth mode: 'google' or 'email'
@@ -216,7 +223,7 @@ export const SignInView: React.FC<SignInViewProps> = ({
       onSuccess();
     } catch (err: any) {
       console.error('Google Sign-In Error:', err);
-      const parsed = parseAuthError(err);
+      const parsed = parseAuthError(err, lang);
       setErrorInfo(parsed);
     } finally {
       setLoading(false);
@@ -283,7 +290,7 @@ export const SignInView: React.FC<SignInViewProps> = ({
       onSuccess();
     } catch (err: any) {
       console.error('Email Auth Error:', err);
-      const parsed = parseAuthError(err);
+      const parsed = parseAuthError(err, lang);
       setErrorInfo(parsed);
     } finally {
       setLoading(false);
@@ -311,7 +318,7 @@ export const SignInView: React.FC<SignInViewProps> = ({
       setInfoMessage(t.resetSentSuccess(email));
     } catch (err: any) {
       console.error('Reset Password Error:', err);
-      const parsed = parseAuthError(err);
+      const parsed = parseAuthError(err, lang);
       setErrorInfo(parsed);
     } finally {
       setLoading(false);
@@ -440,11 +447,13 @@ export const SignInView: React.FC<SignInViewProps> = ({
               </p>
               {errorInfo.suggestion && (
                 <div className="bg-white/80 p-2.5 rounded-xl border border-amber-200/60 text-[11px] text-amber-900 ml-6">
-                  <span className="font-bold">ヒント: </span>
+                  <span className="font-bold">
+                    {lang === 'ja' ? 'ヒント: ' : lang === 'fr' ? 'Astuce : ' : 'Tip: '}
+                  </span>
                   {errorInfo.suggestion}
                 </div>
               )}
-              {errorInfo.actionType === 'domain_config' && (
+              {(errorInfo.actionType === 'authorized_domain' || (errorInfo.actionType as string) === 'domain_config') && (
                 <div className="pl-6 pt-1">
                   <button
                     type="button"
@@ -452,7 +461,13 @@ export const SignInView: React.FC<SignInViewProps> = ({
                     className="text-xs font-bold text-indigo-600 hover:text-indigo-800 underline flex items-center gap-1"
                   >
                     <ShieldAlert size={13} />
-                    <span>設定診断画面を開いて詳細を確認</span>
+                    <span>
+                      {lang === 'ja'
+                        ? '設定診断画面を開いて詳細を確認'
+                        : lang === 'fr'
+                        ? 'Ouvrir le diagnostic pour plus de détails'
+                        : 'Open Diagnostics for details'}
+                    </span>
                   </button>
                 </div>
               )}

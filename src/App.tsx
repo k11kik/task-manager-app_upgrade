@@ -82,7 +82,7 @@ import {
 } from 'date-fns';
 import { ja, fr, enUS } from 'date-fns/locale';
 import { Category, Task, FolderMeta } from './types';
-import { cn, formatDate } from './lib/utils';
+import { cn, formatDate, tr } from './lib/utils';
 import { getParentFolderDeadline } from './lib/folderDeadlineUtils';
 import { isTaskOccurringOnDate } from './lib/taskDateUtils';
 import { auth, db, signIn, logOut } from './lib/firebase';
@@ -133,8 +133,122 @@ const THEME_CATEGORIES = [
   { id: 'Focus', label: 'ToDo', icon: Target, color: 'bg-indigo-50/50 border-indigo-100', accent: 'bg-indigo-500', text: 'text-indigo-700', badge: 'text-indigo-500', desc: 'Main' },
 ];
 
+interface LocalBackupSlotInfo {
+  slot: 1 | 2 | 3;
+  fileName: string;
+  timestamp: number;
+  taskCount: number;
+  signature?: string;
+}
+
+const IDB_NAME = 'navfor_local_sync_db';
+const IDB_STORE = 'handles';
+const IDB_KEY = 'backup_dir';
+
+async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          const tx = db.transaction(IDB_STORE, 'readwrite');
+          tx.objectStore(IDB_STORE).put(handle, IDB_KEY);
+          tx.oncomplete = () => {
+            db.close();
+            resolve();
+          };
+          tx.onerror = () => {
+            db.close();
+            resolve();
+          };
+        } catch {
+          resolve();
+        }
+      };
+      req.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function loadDirHandleFromIDB(): Promise<FileSystemDirectoryHandle | null> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          const tx = db.transaction(IDB_STORE, 'readonly');
+          const getReq = tx.objectStore(IDB_STORE).get(IDB_KEY);
+          getReq.onsuccess = () => {
+            db.close();
+            resolve((getReq.result as FileSystemDirectoryHandle) || null);
+          };
+          getReq.onerror = () => {
+            db.close();
+            resolve(null);
+          };
+        } catch {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function clearDirHandleFromIDB(): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          const tx = db.transaction(IDB_STORE, 'readwrite');
+          tx.objectStore(IDB_STORE).delete(IDB_KEY);
+          tx.oncomplete = () => {
+            db.close();
+            resolve();
+          };
+          tx.onerror = () => {
+            db.close();
+            resolve();
+          };
+        } catch {
+          resolve();
+        }
+      };
+      req.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 export default function App() {
-  const APP_VERSION = "3.1.9";
+  const APP_VERSION = "3.1.10";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -349,6 +463,7 @@ export default function App() {
     isAllDay?: boolean;
     notes?: string;
     timelineColumn?: string;
+    timelineStep?: number;
     timelinePresetColumns?: Record<string, string>;
     order?: number;
   }) => {
@@ -371,6 +486,7 @@ export default function App() {
       isAllDay: taskData.isAllDay ?? true,
       ...(taskData.deadline ? { deadline: taskData.deadline } : {}),
       ...(taskData.timelineColumn ? { timelineColumn: taskData.timelineColumn } : {}),
+      ...(taskData.timelineStep !== undefined ? { timelineStep: taskData.timelineStep } : {}),
       ...(taskData.timelinePresetColumns ? { timelinePresetColumns: taskData.timelinePresetColumns } : {}),
       ...(taskData.order !== undefined ? { order: taskData.order } : {})
     };
@@ -387,7 +503,7 @@ export default function App() {
         syncLocalTasks([created, ...tasks]);
       }
       handleOpenTaskInTab(newId);
-      setMessage({ text: "タスクを追加しました。", type: 'info' });
+      setMessage({ text: L("タスクを追加しました。", "Task added.", "Tâche ajoutée."), type: 'info' });
     } catch (err) {
       if (user) {
         handleFirestoreError(err, OperationType.CREATE, 'tasks');
@@ -396,13 +512,106 @@ export default function App() {
   };
 
   const handleDuplicateTask = async (task: Task, targetProject?: string) => {
-    const copySuffix = settings.language === 'ja' ? ' (コピー)' : ' (Copy)';
+    const copySuffix = L(' (コピー)', ' (Copy)', ' (Copie)');
     await handleCreateTaskDirect({
       title: `${task.title}${copySuffix}`,
       project: targetProject || task.project,
       notes: task.notes,
       deadline: task.deadline,
-      isAllDay: task.isAllDay
+      isAllDay: task.isAllDay,
+      timelineColumn: task.timelineColumn,
+      timelineStep: task.timelineStep,
+      timelinePresetColumns: task.timelinePresetColumns
+    });
+  };
+
+  const handleDuplicateFolder = async (folderPath: string) => {
+    if (!folderPath) return;
+    const copySuffix = L(' (コピー)', ' (Copy)', ' (Copie)');
+    const newFolderPath = `${folderPath}${copySuffix}`;
+    const isInsideFolder = (p: string) => p === folderPath || p.startsWith(folderPath + '/');
+    const tasksToCopy = tasks.filter(t => t.category !== 'Trash' && isInsideFolder(t.project));
+    const now = Date.now();
+
+    pushToHistory();
+
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        tasksToCopy.forEach(t => {
+          const updatedProject = t.project === folderPath
+            ? newFolderPath
+            : newFolderPath + t.project.slice(folderPath.length);
+          const newDocRef = doc(collection(db, 'tasks'));
+          const newTaskData: Record<string, any> = {
+            userId: user.uid,
+            title: t.title,
+            project: updatedProject,
+            notes: t.notes || '',
+            urls: t.urls || [],
+            section: t.section || activeSection,
+            category: (t.category === 'Urgent' ? 'Focus' : t.category) as Category,
+            createdAt: now,
+            updatedAt: now,
+            isDone: t.isDone || false,
+            isStarred: t.isStarred || false,
+            isPinned: false,
+            isAllDay: t.isAllDay ?? true,
+            ...(t.deadline !== undefined ? { deadline: t.deadline } : {}),
+            ...(t.startDate !== undefined ? { startDate: t.startDate } : {}),
+            ...(t.timelineColumn !== undefined ? { timelineColumn: t.timelineColumn } : {}),
+            ...(t.timelineStep !== undefined ? { timelineStep: t.timelineStep } : {}),
+            ...(t.timelinePresetColumns !== undefined ? { timelinePresetColumns: t.timelinePresetColumns } : {}),
+            ...(t.order !== undefined ? { order: t.order } : {}),
+            ...(t.recurrence !== undefined ? { recurrence: sanitizeForFirestore(t.recurrence) } : {})
+          };
+          batch.set(newDocRef, newTaskData);
+        });
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, 'tasks');
+      }
+    } else {
+      const copiedTasks: Task[] = tasksToCopy.map((t, idx) => {
+        const updatedProject = t.project === folderPath
+          ? newFolderPath
+          : newFolderPath + t.project.slice(folderPath.length);
+        return {
+          ...t,
+          id: `local_${now}_${idx}_${Math.random().toString(36).substring(2, 8)}`,
+          project: updatedProject,
+          category: (t.category === 'Urgent' ? 'Focus' : t.category) as Category,
+          isPinned: false,
+          createdAt: now,
+          updatedAt: now
+        };
+      });
+      syncLocalTasks([...copiedTasks, ...tasks]);
+    }
+
+    // Also update custom folders in localStorage so empty or nested custom folders are duplicated
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      const currentFolders: string[] = saved ? JSON.parse(saved) : [];
+      const additionalFolders = [newFolderPath];
+      currentFolders.forEach(f => {
+        if (f.startsWith(folderPath + '/')) {
+          additionalFolders.push(newFolderPath + f.slice(folderPath.length));
+        }
+      });
+      const merged = Array.from(new Set([...currentFolders, ...additionalFolders]));
+      localStorage.setItem(storageKey, JSON.stringify(merged));
+      window.dispatchEvent(new Event('navfor_folders_updated'));
+    } catch {}
+
+    setMessage({
+      text: L(
+        `フォルダ「${folderPath}」を複製しました。`,
+        `Duplicated folder "${folderPath}".`,
+        `Dossier « ${folderPath} » dupliqué.`
+      ),
+      type: 'info'
     });
   };
   
@@ -544,12 +753,51 @@ export default function App() {
 
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncTime, setLastSyncTime] = useState<number | null>(null);
+  const [lastSyncTime, setLastSyncTime] = useState<number | null>(() => {
+    const saved = Number(localStorage.getItem('trifocus_last_backup'));
+    return saved > 0 ? saved : null;
+  });
+  const [backupSlots, setBackupSlots] = useState<Record<1 | 2 | 3, LocalBackupSlotInfo | null>>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_local_backup_slots');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          1: parsed[1] || null,
+          2: parsed[2] || null,
+          3: parsed[3] || null,
+        };
+      }
+    } catch {}
+    return { 1: null, 2: null, 3: null };
+  });
+  const [nextBackupSlot, setNextBackupSlot] = useState<1 | 2 | 3>(() => {
+    try {
+      const saved = Number(localStorage.getItem('navfor_local_backup_next_slot'));
+      if (saved === 1 || saved === 2 || saved === 3) return saved;
+    } catch {}
+    return 1;
+  });
+  const localLogSettingsRef = useRef<HTMLDivElement>(null);
+  const [highlightLocalSettings, setHighlightLocalSettings] = useState(false);
   const [showCleanupMenu, setShowCleanupMenu] = useState(false);
   const [showSectionMenu, setShowSectionMenu] = useState(false);
   const [showSyncDetails, setShowSyncDetails] = useState(false);
   const [showTrashMenu, setShowTrashMenu] = useState(false);
   const [showProjectFilter, setShowProjectFilter] = useState(false);
+
+  // Restore saved FileSystemDirectoryHandle from IndexedDB on startup
+  useEffect(() => {
+    let mounted = true;
+    loadDirHandleFromIDB().then((handle) => {
+      if (mounted && handle) {
+        setDirHandle(handle);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (message && message.type !== 'error') {
@@ -577,6 +825,10 @@ export default function App() {
     language: 'en' as 'en' | 'ja' | 'fr',
     sections: []
   });
+
+  function L(jaText: string, enText: string, frText: string): string {
+    return tr(settings.language, jaText, enText, frText);
+  }
 
   const t = (key: string, data?: Record<string, string | number>) => {
     const translations: Record<string, Record<string, string>> = {
@@ -1151,21 +1403,20 @@ export default function App() {
     throw new Error(JSON.stringify(errInfo));
   };
 
-  // Browser Exit Confirmation
-  useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      // Only show confirmation if no backup path is set
-      if (!dirHandle) {
-        const msg = "Local backup folder is not configured. Please set a backup path in Settings to ensure your logs are saved locally.";
-        e.preventDefault();
-        e.returnValue = msg;
-        return msg;
-      }
-    };
+  const isLocalLogConfigured = Boolean(settings.isLocalBackupEnabled && settings.localBackupPath);
 
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [dirHandle]);
+  const jumpToLocalLogSettings = () => {
+    setShowSyncDetails(false);
+    setViewMode('settings');
+    setMobileView('settings');
+    setHighlightLocalSettings(true);
+    setTimeout(() => {
+      localLogSettingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 250);
+    setTimeout(() => {
+      setHighlightLocalSettings(false);
+    }, 3200);
+  };
 
   // Auth State
   useEffect(() => {
@@ -1334,7 +1585,7 @@ export default function App() {
           localStorage.removeItem('focusflow_tasks');
           localStorage.removeItem('focusflow_settings');
           localStorage.removeItem('navfor_mode');
-          setMessage({ text: "ローカルデータをクラウドに同期しました。", type: 'info' });
+          setMessage({ text: L("ローカルデータをクラウドに同期しました。", "Synced local data to the cloud.", "Données locales synchronisées avec le cloud."), type: 'info' });
         }
       }
     };
@@ -1366,9 +1617,10 @@ export default function App() {
     setSettings(prev => {
       const next = { ...prev, ...updates };
 
-      // If sync is disabled, clear the directory handle and local path inside the update logic
+      // If sync is disabled, clear the directory handle inside the update logic
       if ('isLocalBackupEnabled' in updates && !updates.isLocalBackupEnabled) {
         setDirHandle(null);
+        clearDirHandleFromIDB();
       }
 
       if (user) {
@@ -1845,7 +2097,7 @@ export default function App() {
       setNewTaskUrls(['']);
       setNewTaskDeadline('');
       setIsTaskAllDay(true);
-      setMessage({ text: "タスクを追加しました。", type: 'info' });
+      setMessage({ text: L("タスクを追加しました。", "Task added.", "Tâche ajoutée."), type: 'info' });
     } catch (err) {
       if (user) {
         handleFirestoreError(err, OperationType.CREATE, 'tasks');
@@ -1914,9 +2166,11 @@ export default function App() {
         const parentLimit = getParentFolderDeadline(targetProj, folderMetas, true);
         if (parentLimit !== undefined && updates.deadline > parentLimit) {
           setMessage({
-            text: settings.language === 'ja'
-              ? '親フォルダの締切以降は設定できません'
-              : "Cannot set deadline after parent folder's deadline",
+            text: L(
+              '親フォルダの締切以降は設定できません',
+              "Cannot set deadline after parent folder's deadline",
+              "Impossible de définir une échéance après celle du dossier parent"
+            ),
             type: 'error'
           });
           return;
@@ -2179,7 +2433,7 @@ export default function App() {
     } else {
       const visibleIds = new Set(trashTasksVisible.map(t => t.id));
       syncLocalTasks(tasks.filter(t => !visibleIds.has(t.id)));
-      setMessage({ text: `${trashTasksVisible.length} 件のアイテムを完全に削除しました。`, type: 'info' });
+      setMessage({ text: L(`${trashTasksVisible.length} 件のアイテムを完全に削除しました。`, `${trashTasksVisible.length} items permanently deleted.`, `${trashTasksVisible.length} éléments supprimés définitivement.`), type: 'info' });
     }
   };
 
@@ -2290,9 +2544,11 @@ export default function App() {
     }
 
     setMessage({
-      text: settings.language === 'ja'
-        ? `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をアーカイブしました。`
-        : `Archived folder "${folderPath}" and ${affectedTasks.length} tasks.`,
+      text: L(
+        `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をアーカイブしました。`,
+        `Archived folder "${folderPath}" and ${affectedTasks.length} tasks.`,
+        `Dossier « ${folderPath} » et ${affectedTasks.length} tâches archivés.`
+      ),
       type: 'info'
     });
   };
@@ -2370,9 +2626,11 @@ export default function App() {
     } catch {}
 
     setMessage({
-      text: settings.language === 'ja'
-        ? `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をゴミ箱へ移動しました。`
-        : `Moved folder "${folderPath}" and ${affectedTasks.length} tasks to trash.`,
+      text: L(
+        `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をゴミ箱へ移動しました。`,
+        `Moved folder "${folderPath}" and ${affectedTasks.length} tasks to trash.`,
+        `Dossier « ${folderPath} » et ${affectedTasks.length} tâches déplacés vers la corbeille.`
+      ),
       type: 'info'
     });
   };
@@ -2460,9 +2718,11 @@ export default function App() {
     if (!sourceFolderPath || sourceFolderPath === targetFolderPath) return;
     if (targetFolderPath && targetFolderPath !== 'General' && targetFolderPath.startsWith(sourceFolderPath + '/')) {
       setMessage({ 
-        text: settings.language === 'ja' 
-          ? "親フォルダを自身の子フォルダ内に移動することはできません。" 
-          : "Cannot move a parent folder inside its own subfolder.", 
+        text: L(
+          "親フォルダを自身の子フォルダ内に移動することはできません。",
+          "Cannot move a parent folder inside its own subfolder.",
+          "Impossible de déplacer un dossier parent dans son propre sous-dossier."
+        ), 
         type: 'error' 
       });
       return;
@@ -2537,7 +2797,7 @@ export default function App() {
       await signIn();
       setIsAuthModalOpen(false);
       setAuthModalError(null);
-      setMessage({ text: "Googleアカウントでログインしました。", type: 'info' });
+      setMessage({ text: L("Googleアカウントでログインしました。", "Signed in with Google account.", "Connecté avec un compte Google."), type: 'info' });
     } catch (err: any) {
       console.error("Sign in failed:", err);
       setAuthModalError(err);
@@ -2669,14 +2929,82 @@ export default function App() {
     });
   };
 
+  const getTasksSignature = () => {
+    return tasks
+      .map(t => `${t.id}:${t.updatedAt || 0}:${t.isDone ? 1 : 0}:${t.category}:${t.project}:${t.title}`)
+      .sort()
+      .join('|');
+  };
+
+  const recordBackupSlot = (
+    slot: 1 | 2 | 3,
+    fileName: string,
+    csvContent: string,
+    taskCount: number,
+    signature: string,
+    now: number
+  ) => {
+    const nextSlot = ((slot % 3) + 1) as 1 | 2 | 3;
+    const slotInfo: LocalBackupSlotInfo = {
+      slot,
+      fileName,
+      timestamp: now,
+      taskCount,
+      signature,
+    };
+
+    setBackupSlots(prev => {
+      const updated = { ...prev, [slot]: slotInfo };
+      try {
+        localStorage.setItem('navfor_local_backup_slots', JSON.stringify(updated));
+      } catch (e) {
+        console.warn('Failed to save backup slot metadata', e);
+      }
+      return updated;
+    });
+
+    setNextBackupSlot(nextSlot);
+    try {
+      localStorage.setItem('navfor_local_backup_next_slot', String(nextSlot));
+      localStorage.setItem(`navfor_local_backup_csv_${slot}`, csvContent);
+      localStorage.setItem('trifocus_last_backup', String(now));
+    } catch (e) {
+      console.warn('Failed to store backup CSV in localStorage', e);
+    }
+
+    setLastBackupTime(now);
+    setLastSyncTime(now);
+  };
+
+  const downloadBackupSlot = (slot: 1 | 2 | 3) => {
+    const userPart = user?.email?.split('@')[0] || 'local';
+    const slotInfo = backupSlots[slot];
+    const savedCsv = localStorage.getItem(`navfor_local_backup_csv_${slot}`);
+    const csv = savedCsv || getCSVData();
+    const fileName = slotInfo?.fileName || `NavFOR_Log_${userPart}_${slot}.csv`;
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', fileName);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const downloadBackup = async () => {
     const csv = getCSVData();
     const userPart = user?.email?.split('@')[0] || 'local';
-    const fileName = `NavFOR_Log_${userPart}_Manual.csv`;
+    const slot: 1 | 2 | 3 = nextBackupSlot;
+    const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
     const now = Date.now();
+    const signature = getTasksSignature();
 
     try {
-      if ((window as any).showSaveFilePicker) {
+      if ((window as any).showSaveFilePicker && window.self === window.top) {
         const handle = await (window as any).showSaveFilePicker({
           suggestedName: fileName,
           types: [{
@@ -2688,7 +3016,6 @@ export default function App() {
         await writable.write(csv);
         await writable.close();
       } else {
-        // Fallback for older browsers or restricted environments
         const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -2701,9 +3028,21 @@ export default function App() {
         URL.revokeObjectURL(url);
       }
       
-      setLastBackupTime(now);
-      localStorage.setItem('trifocus_last_backup', now.toString());
-      setMessage({ text: "Backup saved successfully.", type: 'info' });
+      recordBackupSlot(slot, fileName, csv, tasks.length, signature, now);
+      if (!settings.isLocalBackupEnabled || !settings.localBackupPath) {
+        await saveSettings({
+          isLocalBackupEnabled: true,
+          localBackupPath: settings.localBackupPath || 'Local_Backup_Folder'
+        });
+      }
+      setMessage({
+        text: L(
+          `バックアップ (#${slot}: ${fileName}) を保存しました。`,
+          `Backup (#${slot}: ${fileName}) saved successfully.`,
+          `Sauvegarde (#${slot} : ${fileName}) enregistrée.`
+        ),
+        type: 'info'
+      });
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         console.error("Backup Save Error", err);
@@ -2715,8 +3054,17 @@ export default function App() {
   const selectBackupFolder = async () => {
     try {
       if (!window.showDirectoryPicker) {
+        await saveSettings({
+          localBackupPath: settings.localBackupPath || 'Browser_Local_Log (Max 3)',
+          isLocalBackupEnabled: true
+        });
+        await syncToLocalSystem(true);
         setMessage({ 
-          text: "Safari Notice: Full folder sync is not supported by Safari yet. Please use Chrome/Edge for auto-sync, or use 'Manual Local Backup' below to save your data.",
+          text: L(
+            'ローカルログ設定を有効化しました（最大3ファイルのローテーション保存）。',
+            'Local log backup enabled (rotating up to 3 backup files).',
+            'Sauvegarde locale activée (rotation sur 3 fichiers max).'
+          ),
           type: 'info'
         });
         return;
@@ -2725,16 +3073,52 @@ export default function App() {
         mode: 'readwrite'
       });
       setDirHandle(handle);
+      await saveDirHandleToIDB(handle);
       
       await saveSettings({ 
         localBackupPath: handle.name, 
         isLocalBackupEnabled: true 
       });
+
+      // Immediately create initial numbered backup in the selected folder
+      const csvContent = getCSVData();
+      const userPart = user?.email?.split('@')[0] || 'local';
+      const slot: 1 | 2 | 3 = nextBackupSlot;
+      const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
+      const now = Date.now();
+      const fileHandle = await handle.getFileHandle(fileName, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(csvContent);
+      await writable.close();
+      recordBackupSlot(slot, fileName, csvContent, tasks.length, getTasksSignature(), now);
+      setMessage({
+        text: L(
+          `保存先フォルダ「${handle.name}」を設定し、${fileName} を保存しました。`,
+          `Configured folder "${handle.name}" and saved ${fileName}.`,
+          `Dossier « ${handle.name} » configuré et ${fileName} enregistré.`
+        ),
+        type: 'info'
+      });
     } catch (err: any) {
       if (err.name === 'SecurityError' || err.message?.includes('Cross origin sub frames')) {
+        // In preview iframe where native folder picker is blocked by browser security, still enable 3-slot local backup
+        const fallbackPath = settings.localBackupPath || 'Local_Log_Storage (Max 3)';
+        await saveSettings({
+          localBackupPath: fallbackPath,
+          isLocalBackupEnabled: true
+        });
+        const csvContent = getCSVData();
+        const userPart = user?.email?.split('@')[0] || 'local';
+        const slot: 1 | 2 | 3 = nextBackupSlot;
+        const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
+        recordBackupSlot(slot, fileName, csvContent, tasks.length, getTasksSignature(), Date.now());
         setMessage({ 
-          text: "Security Restriction: Local folder access is blocked in the preview window. Please click 'Open in New Tab' to use this feature.",
-          type: 'error'
+          text: L(
+            'プレビュー環境のためブラウザ内ローカルバックアップ（最大3ファイル: 1, 2, 3）を有効化しました。PCフォルダ直接同期は「新しいタブで開く」から利用可能です。',
+            'Enabled 3-file local backup (1, 2, 3) in browser storage. Open in a new tab if you want direct OS folder access.',
+            'Sauvegarde locale sur 3 fichiers (1, 2, 3) activée. Ouvrez dans un nouvel onglet pour un accès direct au dossier.'
+          ),
+          type: 'info'
         });
       } else if (err.name !== 'AbortError') {
         setMessage({ text: `Folder selection failed: ${err.message}`, type: 'error' });
@@ -2743,53 +3127,83 @@ export default function App() {
   };
 
   const syncToLocalSystem = async (manual = false, customName?: string) => {
-    if (!settings.isLocalBackupEnabled || tasks.length === 0 || !dirHandle) {
-      if (manual && !dirHandle) setMessage({ text: "Please select a backup folder first.", type: 'error' });
+    const configured = Boolean(settings.isLocalBackupEnabled && settings.localBackupPath);
+    if ((!configured && !manual) || (tasks.length === 0 && !manual)) {
       return;
+    }
+
+    const signature = getTasksSignature();
+    if (!manual && !customName) {
+      // Find most recent slot and check if signature is unchanged
+      const existingSlots = ([backupSlots[1], backupSlots[2], backupSlots[3]].filter(Boolean) as LocalBackupSlotInfo[])
+        .sort((a, b) => b.timestamp - a.timestamp);
+      if (existingSlots.length > 0 && existingSlots[0].signature === signature) {
+        return;
+      }
     }
 
     setIsSyncing(true);
     try {
       const csvContent = getCSVData();
       const userPart = user?.email?.split('@')[0] || 'local';
-      const fileName = customName || `NavFOR_Log_${userPart}.csv`;
-      
-      const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-      const writable = await fileHandle.createWritable();
-      await writable.write(csvContent);
-      await writable.close();
-      
-      setLastSyncTime(Date.now());
-      if (manual) setMessage({ text: customName ? `Emergency backup created: ${fileName}` : "Log saved to selected folder.", type: 'info' });
+      const slot: 1 | 2 | 3 = nextBackupSlot;
+      const fileName = customName || `NavFOR_Log_${userPart}_${slot}.csv`;
+      const now = Date.now();
+
+      // Always record into the 3-slot rotating local backup (1, 2, 3)
+      recordBackupSlot(slot, fileName, csvContent, tasks.length, signature, now);
+
+      // Also write to the native OS directory if dirHandle is available
+      if (dirHandle) {
+        let perm = 'granted';
+        if (typeof (dirHandle as any).queryPermission === 'function') {
+          perm = await (dirHandle as any).queryPermission({ mode: 'readwrite' });
+          if (perm !== 'granted' && manual && typeof (dirHandle as any).requestPermission === 'function') {
+            perm = await (dirHandle as any).requestPermission({ mode: 'readwrite' });
+          }
+        }
+        if (perm === 'granted') {
+          const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(csvContent);
+          await writable.close();
+        }
+      }
+
+      if (manual) {
+        setMessage({
+          text: customName
+            ? `Emergency backup created: ${fileName}`
+            : L(
+                `ローカルログ (#${slot}: ${fileName}) を更新しました。`,
+                `Local log backup (#${slot}: ${fileName}) updated.`,
+                `Journal local (#${slot} : ${fileName}) mis à jour.`
+              ),
+          type: 'info'
+        });
+      }
     } catch (err: any) {
       console.error("Local backup failed", err);
-      setMessage({ 
-        text: `Local Backup Error: ${err.message}. You may need to grant permission again.`,
-        type: 'error'
-      });
+      if (manual) {
+        setMessage({ 
+          text: `Local Backup Error: ${err.message}.`,
+          type: 'error'
+        });
+      }
     } finally {
       setIsSyncing(false);
     }
   };
 
-  // Auto-sync effect
+  // Auto-sync effect (rotates across up to 3 numbered files: 1, 2, 3)
   useEffect(() => {
-    if (settings.isLocalBackupEnabled && tasks.length > 0) {
-      if (dirHandle) {
-        const timer = setTimeout(() => {
-          syncToLocalSystem();
-        }, 5000); // 5s debounce
-        return () => clearTimeout(timer);
-      } else if (!window.showDirectoryPicker) {
-        // Safari fallback: If it's been more than 4 hours since last backup, 
-        // we can't auto-save but we can notify the user more strongly.
-        const fourHours = 4 * 60 * 60 * 1000;
-        if (Date.now() - lastBackupTime > fourHours) {
-          // Just a subtle hint in the state or message if they are active
-        }
-      }
+    if (isLocalLogConfigured && tasks.length > 0) {
+      const timer = setTimeout(() => {
+        syncToLocalSystem(false);
+      }, 5000); // 5s debounce
+      return () => clearTimeout(timer);
     }
-  }, [tasks, settings.isLocalBackupEnabled, dirHandle, lastBackupTime]);
+  }, [tasks, isLocalLogConfigured, dirHandle]);
 
   // Safari/PWA Persistence Request
   useEffect(() => {
@@ -3169,7 +3583,9 @@ export default function App() {
     return (
       <div className="h-screen w-full bg-[#f8fafc] text-slate-800 flex flex-col items-center justify-center font-sans">
         <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4" />
-        <p className="text-xs font-bold uppercase tracking-widest text-slate-500">NavFOR 認証状態を確認中...</p>
+        <p className="text-xs font-bold uppercase tracking-widest text-slate-500">
+          {L('NavFOR 認証状態を確認中...', 'Checking NavFOR authentication...', "Vérification de l'authentification NavFOR...")}
+        </p>
       </div>
     );
   }
@@ -3464,92 +3880,146 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Sync Toggle */}
+                {/* Sync Status / Local Setting Button */}
                 <div className="relative ml-1">
-                  <button 
-                    onClick={() => {
-                      if (!dirHandle) {
-                        if (!window.showDirectoryPicker) {
-                          downloadBackup();
-                        } else {
-                          selectBackupFolder();
-                        }
-                      } else {
-                        syncToLocalSystem(true);
-                        setShowSyncDetails(!showSyncDetails);
-                      }
-                    }}
-                    className={cn(
-                      "flex items-center gap-1.5 px-3 py-1.5 rounded-xl border transition-all",
-                      dirHandle ? "bg-emerald-50 border-emerald-100" : (
-                        !window.showDirectoryPicker && (!lastBackupTime || Date.now() - lastBackupTime > 24*60*60*1000)
-                        ? "bg-amber-50 border-amber-100 animate-pulse"
-                        : "bg-slate-50/50 border-slate-100 hover:bg-white"
-                      )
-                    )}
-                  >
-                    <Globe size={12} className={cn(
-                      isSyncing ? "text-indigo-500 animate-spin" : (
-                        dirHandle ? "text-emerald-500" : (
-                          !window.showDirectoryPicker && (!lastBackupTime || Date.now() - lastBackupTime > 24*60*60*1000)
-                          ? "text-amber-500"
-                          : "text-slate-300"
-                        )
-                      )
-                    )} />
-                    <span className={cn("text-[10px] font-bold uppercase tracking-tighter", 
-                      dirHandle ? "text-emerald-600" : (
-                        !window.showDirectoryPicker && (!lastBackupTime || Date.now() - lastBackupTime > 24*60*60*1000)
-                        ? "text-amber-600"
-                        : "text-slate-500"
-                      )
-                    )}>
-                      {isSyncing ? t('Syncing') : (
-                        dirHandle ? t('SyncActive') : (
-                          !window.showDirectoryPicker ? (
-                            !lastBackupTime || Date.now() - lastBackupTime > 24*60*60*1000 ? t('BackupNeeded') : t('BackedUp')
-                          ) : t('SyncOffUppercase')
-                        )
+                  {!isLocalLogConfigured ? (
+                    <button
+                      onClick={jumpToLocalLogSettings}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-amber-50/90 border-amber-200 hover:bg-amber-100/80 text-amber-700 transition-all shadow-sm cursor-pointer"
+                      title={L(
+                        'ローカルログ設定が未完了です。クリックして設定画面へ移動します',
+                        'Local log is not configured. Click to open Local Log Settings',
+                        'Le journal local n\'est pas configuré. Cliquez pour ouvrir les paramètres'
                       )}
-                    </span>
-                  </button>
+                    >
+                      <SettingsIcon size={12} className="text-amber-600 shrink-0" />
+                      <span className="text-[10px] font-bold uppercase tracking-tighter">
+                        {L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
+                      </span>
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={() => setShowSyncDetails(!showSyncDetails)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70 transition-all cursor-pointer"
+                      title={L(
+                        'ローカルログ同期が有効です（最大3ファイルでバックアップ中）',
+                        'Local log sync is active (rotating up to 3 backup files)',
+                        'La synchro locale est active (rotation sur 3 fichiers max)'
+                      )}
+                    >
+                      <Globe size={12} className={cn(
+                        isSyncing ? "text-indigo-500 animate-spin" : "text-emerald-500"
+                      )} />
+                      <span className="text-[10px] font-bold uppercase tracking-tighter text-emerald-700">
+                        {isSyncing ? t('Syncing') : t('SyncActive')}
+                      </span>
+                    </button>
+                  )}
                   
-                  {showSyncDetails && dirHandle && (
+                  {showSyncDetails && isLocalLogConfigured && (
                     <>
                       <div className="fixed inset-0 z-[55]" onClick={() => setShowSyncDetails(false)} />
-                      <div className="absolute top-full right-0 mt-2 w-64 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] p-4">
-                        <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-50">
+                      <div className="absolute top-full right-0 mt-2 w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] p-4">
+                        <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
                           <div className="flex items-center gap-2 text-slate-800">
-                            <Activity size={12} className="text-indigo-500" />
+                            <Activity size={13} className="text-emerald-500" />
                             <p className="text-[10px] font-black uppercase tracking-widest">{t('AutomatedSyncStatus')}</p>
                           </div>
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); syncToLocalSystem(true); }}
-                            className="p-1 hover:bg-slate-100 rounded-lg transition-colors text-indigo-600"
-                            title={t('ForceBackupNow')}
-                            disabled={isSyncing}
-                          >
-                            <RefreshCcw size={12} className={cn(isSyncing && "animate-spin")} />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); syncToLocalSystem(true); }}
+                              className="p-1.5 hover:bg-indigo-50 rounded-lg transition-colors text-indigo-600 flex items-center gap-1 text-[9px] font-bold"
+                              title={t('ForceBackupNow')}
+                              disabled={isSyncing}
+                            >
+                              <RefreshCcw size={12} className={cn(isSyncing && "animate-spin")} />
+                              <span>{L('今すぐ保存', 'Backup Now', 'Sauvegarder')}</span>
+                            </button>
+                          </div>
                         </div>
                         <div className="space-y-3">
-                           <div className="bg-slate-50 rounded-lg p-2.5">
-                            <label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Local Directory Path</label>
-                            <p className="text-[10px] font-mono break-all text-slate-600 leading-tight">
-                              {settings.localBackupPath || 'Authorized Local Folder'}
+                          <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100">
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-[8px] font-black text-slate-400 uppercase">{t('LocalDirectoryPath')}</label>
+                              <span className="text-[8px] font-black uppercase px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
+                                {t('SyncActive')}
+                              </span>
+                            </div>
+                            <p className="text-[10px] font-mono break-all text-slate-700 leading-tight">
+                              {settings.localBackupPath || t('AuthorizedLocalFolder')}
                             </p>
                           </div>
-                          <div className="flex justify-between items-center text-[10px] font-bold text-slate-500">
+
+                          {/* 3-File Rotating Backup List (1, 2, 3) */}
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">
+                                {L('ローテーションバックアップ (最大3ファイル)', 'Rotating Backups (Max 3 Files)', 'Sauvegardes rotatives (Max 3)')}
+                              </span>
+                              <span className="text-[8px] font-mono text-indigo-600 font-bold">
+                                {L(`次回: #${nextBackupSlot}`, `Next: #${nextBackupSlot}`, `Suiv: #${nextBackupSlot}`)}
+                              </span>
+                            </div>
+                            <div className="space-y-1">
+                              {([1, 2, 3] as const).map((slotNum) => {
+                                const info = backupSlots[slotNum];
+                                const userPart = user?.email?.split('@')[0] || 'local';
+                                const defaultName = `NavFOR_Log_${userPart}_${slotNum}.csv`;
+                                return (
+                                  <div
+                                    key={slotNum}
+                                    className="flex items-center justify-between bg-slate-50/80 border border-slate-100 rounded-lg px-2.5 py-1.5 text-[10px]"
+                                  >
+                                    <div className="min-w-0 flex-1 pr-2">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className={cn(
+                                          "w-4 h-4 rounded text-[9px] font-black flex items-center justify-center shrink-0",
+                                          info ? "bg-indigo-100 text-indigo-700" : "bg-slate-200 text-slate-500"
+                                        )}>
+                                          {slotNum}
+                                        </span>
+                                        <span className="font-mono font-bold text-slate-700 truncate">
+                                          {info?.fileName || defaultName}
+                                        </span>
+                                      </div>
+                                      <p className="text-[8px] text-slate-400 pl-5 mt-0.5">
+                                        {info
+                                          ? `${format(info.timestamp, 'MM/dd HH:mm:ss')} (${info.taskCount} ${t('Items')})`
+                                          : L('未作成', 'Empty slot', 'Vide')}
+                                      </p>
+                                    </div>
+                                    {info && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          downloadBackupSlot(slotNum);
+                                        }}
+                                        className="p-1 hover:bg-white rounded border border-transparent hover:border-slate-200 text-slate-500 hover:text-indigo-600 transition-colors shrink-0"
+                                        title={L(`#${slotNum} をダウンロード`, `Download #${slotNum}`, `Télécharger #${slotNum}`)}
+                                      >
+                                        <Download size={11} />
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 pt-1 border-t border-slate-100">
                             <span>{t('LastSuccessfulLog')}:</span>
-                            <span className="text-slate-900 border-b border-indigo-100">
-                              {lastSyncTime ? format(lastSyncTime, 'HH:mm:ss') : 'Waiting...'}
+                            <span className="text-slate-900 font-mono">
+                              {lastSyncTime ? format(lastSyncTime, 'MM/dd HH:mm:ss') : L('待機中...', 'Waiting...', 'En attente...')}
                             </span>
                           </div>
-                          {isSyncing && (
-                            <div className="flex items-center gap-1 text-[9px] text-indigo-600 font-bold animate-pulse">
-                              <RefreshCcw size={10} className="animate-spin" /> {t('CommittingChanges')}
-                            </div>
-                          )}
+
+                          <button
+                            onClick={jumpToLocalLogSettings}
+                            className="w-full py-1.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[10px] font-bold transition-colors flex items-center justify-center gap-1.5"
+                          >
+                            <SettingsIcon size={11} />
+                            {L('ローカルログ設定を開く', 'Open Local Log Settings', 'Ouvrir les paramètres locaux')}
+                          </button>
                         </div>
                       </div>
                     </>
@@ -3613,6 +4083,27 @@ export default function App() {
                   {settings.displayMode === 'compact' ? <LayoutList size={16} /> : 
                    settings.displayMode === 'large' ? <Grid2X2 size={16} /> : <LayoutGrid size={16} />}
                 </button>
+
+                {/* Mobile Sync Status / Local Setting Button */}
+                {!isLocalLogConfigured ? (
+                  <button
+                    onClick={jumpToLocalLogSettings}
+                    className="h-9 px-2.5 rounded-xl flex items-center gap-1 bg-amber-50 border border-amber-200 text-amber-700 text-[9px] font-bold shadow-sm"
+                    title={L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
+                  >
+                    <SettingsIcon size={13} className="text-amber-600 shrink-0" />
+                    <span className="truncate max-w-[72px]">{L('要ローカル設定', 'Local Setup', 'Config.')}</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={jumpToLocalLogSettings}
+                    className="h-9 px-2.5 rounded-xl flex items-center gap-1 bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-bold shadow-sm"
+                    title={t('SyncActive')}
+                  >
+                    <Globe size={13} className="text-emerald-600 shrink-0" />
+                    <span className="truncate max-w-[72px]">{t('SyncActive')}</span>
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -3623,10 +4114,10 @@ export default function App() {
               <>
                 <div className="text-right flex flex-col items-end leading-none hidden sm:flex">
                   <span className="text-[9px] font-black uppercase tracking-[0.2em] text-indigo-500/50 mb-0.5">
-                    {user.isAnonymous ? 'ゲスト (匿名)' : t('Authenticated')}
+                    {user.isAnonymous ? L('ゲスト (匿名)', 'Guest (Anonymous)', 'Invité (Anonyme)') : t('Authenticated')}
                   </span>
                   <span className="text-xs font-bold text-slate-700 max-w-[120px] truncate">
-                    {user.displayName || user.email?.split('@')[0] || 'ゲスト'}
+                    {user.displayName || user.email?.split('@')[0] || L('ゲスト', 'Guest', 'Invité')}
                   </span>
                 </div>
                 <div className="w-9 h-9 rounded-xl overflow-hidden border-2 border-white shadow-xl shadow-indigo-100/50 bg-indigo-50 flex items-center justify-center text-indigo-400 shrink-0">
@@ -3649,10 +4140,10 @@ export default function App() {
                 <button 
                   onClick={() => setIsAuthModalOpen(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer"
-                  title="設定診断 & トラブルシューティング / Diagnostics"
+                  title={L("設定診断 & トラブルシューティング", "Diagnostics & Troubleshooting", "Diagnostic & Dépannage")}
                 >
                   <ShieldAlert size={14} className="text-indigo-600" />
-                  <span className="hidden sm:inline">設定診断</span>
+                  <span className="hidden sm:inline">{L("設定診断", "Diagnostics", "Diagnostic")}</span>
                 </button>
               </div>
             )}
@@ -3665,10 +4156,12 @@ export default function App() {
         <main className="flex-1 min-h-0 overflow-y-auto relative bg-[#f8fafc]">
           <SignInView
             onSuccess={() => {
-              setMessage({ text: "サインインしました。アカウントデータを読み込んでいます...", type: 'info' });
+              setMessage({ text: L("サインインしました。アカウントデータを読み込んでいます...", "Signed in. Loading your account data...", "Connecté. Chargement des données du compte..."), type: 'info' });
             }}
             onOpenDiagnostics={() => setIsAuthModalOpen(true)}
             version={APP_VERSION}
+            language={settings.language}
+            onChangeLanguage={(lang) => saveSettings({ language: lang })}
           />
         </main>
       ) : (
@@ -3683,14 +4176,14 @@ export default function App() {
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'summary' ? "text-indigo-600" : "text-slate-400")}
           >
             <Layers size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">{settings.language === 'ja' ? 'ツリー' : 'Tree'}</span>
+            <span className="text-[9px] font-bold uppercase tracking-tighter">{L('ツリー', 'Tree', 'Arbre')}</span>
           </button>
           <button 
             onClick={() => { setViewMode('dashboard'); setMobileView('focus'); }}
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'focus' ? "text-indigo-600" : "text-slate-400")}
           >
             <CalendarDays size={20} />
-            <span className="text-[9px] font-bold uppercase tracking-tighter">{settings.language === 'ja' ? 'タイムライン' : 'Timeline'}</span>
+            <span className="text-[9px] font-bold uppercase tracking-tighter">{L('タイムライン', 'Timeline', 'Chrono')}</span>
           </button>
           <button 
             onClick={() => { setViewMode('calendar'); setMobileView('calendar'); }}
@@ -3732,14 +4225,14 @@ export default function App() {
               <button
                 onClick={handleToggleExplorerCollapse}
                 className="p-1.5 hover:bg-slate-200 text-slate-600 hover:text-indigo-600 rounded-md transition-colors"
-                title={settings.language === 'ja' ? 'Explorerを展開 (タイムラインを縮小)' : 'Expand Explorer'}
+                title={L('Explorerを展開 (タイムラインを縮小)', 'Expand Explorer', "Développer l'explorateur")}
               >
                 <Layers size={16} />
               </button>
               <div 
                 onClick={handleToggleExplorerCollapse}
                 className="mt-6 flex-1 cursor-pointer flex flex-col items-center justify-start text-slate-400 hover:text-slate-700 transition-colors w-full"
-                title={settings.language === 'ja' ? 'Explorerを展開' : 'Expand Explorer'}
+                title={L('Explorerを展開', 'Expand Explorer', "Développer l'explorateur")}
               >
                 <span className="text-[10px] font-black tracking-widest uppercase [writing-mode:vertical-lr] rotate-180 select-none">
                   Explorer
@@ -3765,6 +4258,7 @@ export default function App() {
                 onMoveFolder={handleMoveFolder}
                 onRenameFolder={handleRenameFolder}
                 onDeleteFolder={handleDeleteFolder}
+                onDuplicateFolder={handleDuplicateFolder}
                 onRenameTask={(taskId, newTitle) => updateTask(taskId, { title: newTitle })}
                 onDeleteTask={deleteTask}
                 onDuplicateTask={handleDuplicateTask}
@@ -3810,7 +4304,12 @@ export default function App() {
                       onUpdateTask={updateTask}
                       onScheduleTask={(taskId, deadline) => updateTask(taskId, { deadline })}
                       onRenameFolder={handleRenameFolder}
+                      onDeleteFolder={handleDeleteFolder}
+                      onDuplicateFolder={handleDuplicateFolder}
                       onRenameTask={(taskId, newTitle) => updateTask(taskId, { title: newTitle })}
+                      onDeleteTask={deleteTask}
+                      onDuplicateTask={handleDuplicateTask}
+                      onMoveTask={moveTask}
                       onToggleDone={toggleDone}
                       onToggleStar={toggleStar}
                       onTogglePin={togglePin}
@@ -3872,17 +4371,17 @@ export default function App() {
                         type="button"
                         onClick={handleExpandDetailPane}
                         className="p-1.5 hover:bg-slate-200 text-slate-600 hover:text-indigo-600 rounded-md transition-colors"
-                        title={settings.language === 'ja' ? '詳細ペインを展開 (タブを復元)' : 'Expand Detail Pane (restore tabs)'}
+                        title={L('詳細ペインを展開 (タブを復元)', 'Expand Detail Pane (restore tabs)', 'Développer le panneau de détails')}
                       >
                         <FileText size={16} />
                       </button>
                       <div
                         onClick={handleExpandDetailPane}
                         className="mt-6 flex-1 cursor-pointer flex flex-col items-center justify-start text-slate-400 hover:text-indigo-600 transition-colors w-full"
-                        title={settings.language === 'ja' ? '詳細ペインを展開 (タブを復元)' : 'Expand Detail Pane (restore tabs)'}
+                        title={L('詳細ペインを展開 (タブを復元)', 'Expand Detail Pane (restore tabs)', 'Développer le panneau de détails')}
                       >
                         <span className="text-[10px] font-black tracking-widest uppercase [writing-mode:vertical-lr] select-none">
-                          {settings.language === 'ja' ? 'タスク詳細' : 'TASK DETAIL'} ({openTaskIds.length})
+                          {L('タスク詳細', 'TASK DETAIL', 'DÉTAILS')} ({openTaskIds.length})
                         </span>
                       </div>
                     </div>
@@ -4321,20 +4820,52 @@ export default function App() {
                       </div>
 
                       {/* Local Backup */}
-                      <div className="pb-6 border-b border-slate-200">
+                      <div
+                        id="local-log-settings"
+                        ref={localLogSettingsRef}
+                        className={cn(
+                          "pb-6 border-b border-slate-200 rounded-2xl transition-all duration-500",
+                          highlightLocalSettings && "ring-2 ring-indigo-500 bg-indigo-50/30 p-4 -mx-4"
+                        )}
+                      >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
                           <div className="flex-1">
-                            <p className="font-bold text-slate-900">{t('LocalFolderLog')}</p>
-                            <p className="text-xs text-slate-500">{t('LocalFolderLogDesc')}</p>
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-slate-900">{t('LocalFolderLog')}</p>
+                              <span className={cn(
+                                "text-[9px] font-black uppercase px-2 py-0.5 rounded-full border",
+                                isLocalLogConfigured
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-amber-50 text-amber-700 border-amber-200"
+                              )}>
+                                {isLocalLogConfigured
+                                  ? t('SyncActive')
+                                  : L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              {L(
+                                'PCへの自動CSVバックアップを有効にします（通し番号 1, 2, 3 の最大3ファイルでローテーション保存）。',
+                                'Enable automatic CSV backup (rotates across up to 3 numbered files: 1, 2, 3).',
+                                'Activer la sauvegarde CSV automatique (rotation sur 3 fichiers numérotés : 1, 2, 3).'
+                              )}
+                            </p>
                           </div>
                           <button 
-                            onClick={() => saveSettings({ isLocalBackupEnabled: !settings.isLocalBackupEnabled })}
-                            disabled={!dirHandle}
+                            onClick={() => {
+                              const nextEnabled = !settings.isLocalBackupEnabled;
+                              saveSettings({
+                                isLocalBackupEnabled: nextEnabled,
+                                localBackupPath: nextEnabled
+                                  ? (settings.localBackupPath || 'NavFOR_Local_Backup')
+                                  : settings.localBackupPath
+                              });
+                            }}
                             className={cn(
-                                "w-12 h-6 rounded-full p-1 transition-all duration-300 shrink-0",
-                                settings.isLocalBackupEnabled ? "bg-indigo-600" : "bg-slate-300",
-                                !dirHandle && "opacity-50 cursor-not-allowed"
+                              "w-12 h-6 rounded-full p-1 transition-all duration-300 shrink-0 cursor-pointer",
+                              settings.isLocalBackupEnabled ? "bg-indigo-600" : "bg-slate-300"
                             )}
+                            title={L('ローカルログの有効/無効を切り替え', 'Toggle Local Folder Log', 'Activer/désactiver le journal local')}
                           >
                             <div className={cn(
                               "w-4 h-4 bg-white rounded-full shadow-sm transition-all duration-300",
@@ -4343,68 +4874,95 @@ export default function App() {
                           </button>
                         </div>
                         
-                        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-inner">
+                        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-inner space-y-4">
                           <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                             <div className="flex-1 min-w-0 w-full">
                               <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">{t('LocalDirectoryPath')}</label>
-                              <div className="text-xs font-mono break-all py-1.5 text-slate-600 bg-slate-50 px-2 rounded border border-slate-100 flex items-center gap-2">
-                                <Activity size={10} className="shrink-0 opacity-50" />
-                                {settings.localBackupPath || t('NoFolderSelected')}
+                              <div className="text-xs font-mono break-all py-1.5 text-slate-600 bg-slate-50 px-2.5 rounded border border-slate-100 flex items-center gap-2">
+                                <Activity size={12} className={cn("shrink-0", isLocalLogConfigured ? "text-emerald-500" : "opacity-50")} />
+                                <span>{settings.localBackupPath || t('NoFolderSelected')}</span>
                               </div>
                             </div>
                             <div className="flex flex-col gap-2 shrink-0 sm:pt-5 w-full sm:w-48">
                               <button 
                                 onClick={selectBackupFolder}
-                                className={cn(
-                                  "p-2 px-3 rounded text-[10px] font-bold transition-colors w-full h-10 flex items-center justify-center",
-                                  !dirHandle && settings.localBackupPath 
-                                    ? "bg-amber-500 hover:bg-amber-600 text-white animate-pulse" 
-                                    : "bg-indigo-600 hover:bg-indigo-700 text-white"
-                                )}
+                                className="p-2 px-3 rounded-lg text-[10px] font-bold transition-colors w-full h-10 flex items-center justify-center bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
                               >
-                                {!dirHandle && settings.localBackupPath ? t('AuthorizeSession') : t('SelectFolder')}
+                                {t('SelectFolder')}
                               </button>
                               <button 
                                 onClick={downloadBackup}
-                                className={cn(
-                                  "p-2 px-3 rounded text-[10px] font-bold transition-all w-full h-10 flex items-center justify-center gap-1.5",
-                                  !window.showDirectoryPicker 
-                                    ? "bg-emerald-500 hover:bg-emerald-600 text-white shadow-lg shadow-emerald-200" 
-                                    : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
-                                )}
+                                className="p-2 px-3 rounded-lg text-[10px] font-bold transition-all w-full h-10 flex items-center justify-center gap-1.5 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
                               >
-                                <Download size={12} /> {window.showDirectoryPicker ? t('ManualLocalBackup') : t('SaveBackupToLocal')}
+                                <Download size={12} /> {L(`手動バックアップ (#${nextBackupSlot})`, `Manual Backup (#${nextBackupSlot})`, `Sauvegarde (#${nextBackupSlot})`)}
                               </button>
-                                {!window.showDirectoryPicker && (
-                                  <div className="mt-1 flex flex-col gap-0.5">
-                                    <div className="flex items-center gap-1 text-[8px] text-slate-400 font-bold uppercase tracking-widest">
-                                      <Clock size={8} />
-                                      {t('LastSaved')}: {lastBackupTime ? format(lastBackupTime, 'MM/dd HH:mm') : t('Never')}
-                                    </div>
-                                    {lastBackupTime && (Date.now() - lastBackupTime > 24 * 60 * 60 * 1000) && (
-                                      <div className="flex items-center gap-1 text-[8px] text-amber-500 font-bold uppercase tracking-widest animate-pulse">
-                                        <AlertTriangle size={8} /> {t('DailyUpdateRecommendation')}
-                                      </div>
+                            </div>
+                            {window.self !== window.top && (
+                              <button 
+                                onClick={() => window.open(window.location.href, '_blank')}
+                                className="p-1.5 px-2 bg-slate-100 text-slate-600 rounded text-[10px] font-bold hover:bg-slate-200 transition-colors self-start sm:mt-5"
+                                title="Open in new tab to enable direct OS folder access"
+                              >
+                                <ArrowUpRight size={14} />
+                              </button>
+                            )}
+                          </div>
+
+                          {/* 3-File Backup Slots Status in Settings */}
+                          <div className="pt-3 border-t border-slate-100">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-[10px] font-black text-slate-500 uppercase tracking-wider">
+                                {L('バックアップファイル一覧 (最大3ファイル: 1, 2, 3)', 'Backup Files (Max 3 Files: 1, 2, 3)', 'Fichiers de sauvegarde (Max 3 : 1, 2, 3)')}
+                              </span>
+                              <span className="text-[10px] font-mono font-bold text-indigo-600">
+                                {L(`次回保存先: #${nextBackupSlot}`, `Next Slot: #${nextBackupSlot}`, `Prochain slot : #${nextBackupSlot}`)}
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                              {([1, 2, 3] as const).map((slotNum) => {
+                                const info = backupSlots[slotNum];
+                                const userPart = user?.email?.split('@')[0] || 'local';
+                                const defaultName = `NavFOR_Log_${userPart}_${slotNum}.csv`;
+                                return (
+                                  <div
+                                    key={slotNum}
+                                    className={cn(
+                                      "p-2.5 rounded-lg border flex flex-col justify-between gap-1.5",
+                                      info ? "bg-slate-50 border-slate-200" : "bg-slate-50/40 border-dashed border-slate-200"
                                     )}
+                                  >
+                                    <div>
+                                      <div className="flex items-center justify-between gap-1 mb-1">
+                                        <span className={cn(
+                                          "px-1.5 py-0.5 rounded text-[9px] font-black",
+                                          info ? "bg-indigo-100 text-indigo-700" : "bg-slate-200 text-slate-500"
+                                        )}>
+                                          #{slotNum}
+                                        </span>
+                                        {info && (
+                                          <button
+                                            onClick={() => downloadBackupSlot(slotNum)}
+                                            className="text-[9px] font-bold text-indigo-600 hover:underline flex items-center gap-0.5"
+                                            title={L('このバックアップをダウンロード', 'Download this backup file', 'Télécharger ce fichier')}
+                                          >
+                                            <Download size={10} /> CSV
+                                          </button>
+                                        )}
+                                      </div>
+                                      <p className="text-[10px] font-mono font-bold text-slate-700 break-all leading-tight">
+                                        {info?.fileName || defaultName}
+                                      </p>
+                                    </div>
+                                    <div className="text-[9px] text-slate-400 font-medium">
+                                      {info
+                                        ? `${format(info.timestamp, 'yyyy/MM/dd HH:mm')} (${info.taskCount} ${t('Items')})`
+                                        : L('未保存', 'Not saved yet', 'Non enregistré')}
+                                    </div>
                                   </div>
-                                )}
-                              </div>
-                              {window.self !== window.top && (
-                                <button 
-                                  onClick={() => window.open(window.location.href, '_blank')}
-                                  className="p-1.5 px-2 bg-slate-100 text-slate-600 rounded text-[10px] font-bold hover:bg-slate-200 transition-colors"
-                                  title="Open in new tab to enable"
-                                >
-                                  <ArrowUpRight size={14} />
-                                </button>
-                              )}
+                                );
+                              })}
                             </div>
                           </div>
-                          {settings.localBackupPath && !dirHandle && (
-                            <p className="text-[9px] text-amber-600 mt-2 font-bold flex items-center gap-1">
-                              <Zap size={10} /> {t('PermissionNeeded')}
-                            </p>
-                          )}
                         </div>
                       </div>
 
@@ -4450,9 +5008,8 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-
-
-              </section>
+              </div>
+            </section>
             )}
           </motion.div>
         </AnimatePresence>
@@ -4511,8 +5068,10 @@ export default function App() {
             onSuccess={() => {
               setIsAuthModalOpen(false);
               setAuthModalError(null);
-              setMessage({ text: "サインインに成功しました。クラウド同期が有効です。", type: 'info' });
+              setMessage({ text: L("サインインに成功しました。クラウド同期が有効です。", "Signed in successfully. Cloud sync is active.", "Connexion réussie. La synchronisation cloud est active."), type: 'info' });
             }}
+            language={settings.language}
+            onChangeLanguage={(lang) => saveSettings({ language: lang })}
           />
         )}
       </AnimatePresence>
@@ -4958,7 +5517,8 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
     setTimeout(() => { isTransitioning.current = false; }, 500);
   };
 
-  const isJa = locale?.code?.startsWith('ja');
+  const lang = locale?.code?.startsWith('ja') ? 'ja' : locale?.code?.startsWith('fr') ? 'fr' : 'en';
+  const L = (ja: string, en: string, fr: string) => tr(lang, ja, en, fr);
 
   return (
     <div className="h-full flex flex-col bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
@@ -4998,7 +5558,7 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
           {/* Recurrence Toggle (繰り返しを表示する/しない) */}
           <label 
             className="flex items-center gap-1.5 px-2 md:px-2.5 py-1 md:py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-[8px] md:text-[10px] font-bold text-slate-700 cursor-pointer select-none transition-colors"
-            title={isJa ? "繰り返しのタスクを表示するか切り替えます" : "Toggle display of repeating tasks"}
+            title={L("繰り返しのタスクを表示するか切り替えます", "Toggle display of repeating tasks", "Afficher/masquer les tâches récurrentes")}
           >
             <input
               type="checkbox"
@@ -5013,8 +5573,8 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
               className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 scale-90"
             />
             <Repeat size={12} className={showRecurrence ? "text-indigo-600 shrink-0" : "text-slate-400 shrink-0"} />
-            <span className="hidden sm:inline">{isJa ? '繰り返しを表示' : 'Show Repeats'}</span>
-            <span className="sm:hidden">{isJa ? '繰返' : 'Repeat'}</span>
+            <span className="hidden sm:inline">{L('繰り返しを表示', 'Show Repeats', 'Afficher répétitions')}</span>
+            <span className="sm:hidden">{L('繰返', 'Repeat', 'Répét.')}</span>
           </label>
 
           <div className="flex items-center gap-1.5 md:gap-2">
@@ -5526,6 +6086,8 @@ function WeekView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curr
 
 function DayView({ currentDate, tasks, showRecurrence, onEdit, locale }: { currentDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; locale: any }) {
   const dayTasks = tasks.filter(t => isTaskOccurringOnDate(t, currentDate, showRecurrence));
+  const lang = locale?.code?.startsWith('ja') ? 'ja' : locale?.code?.startsWith('fr') ? 'fr' : 'en';
+  const L = (ja: string, en: string, fr: string) => tr(lang, ja, en, fr);
   
   return (
     <div className="max-w-4xl mx-auto p-8 lg:p-12">
@@ -5566,7 +6128,13 @@ function DayView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curre
                   <span className="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-600 bg-indigo-50/80 px-1.5 py-0.5 rounded">
                     <Repeat size={10} />
                     <span>
-                      {task.recurrence.type === 'daily' ? '毎日' : task.recurrence.type === 'every_x_days' ? `${task.recurrence.interval || 1}日ごと` : task.recurrence.type === 'weekly' ? '毎週' : `${task.recurrence.interval || 1}週ごと`}
+                      {task.recurrence.type === 'daily'
+                        ? L('毎日', 'Daily', 'Quotidien')
+                        : task.recurrence.type === 'every_x_days'
+                          ? L(`${task.recurrence.interval || 1}日ごと`, `Every ${task.recurrence.interval || 1}d`, `Tous les ${task.recurrence.interval || 1} j`)
+                          : task.recurrence.type === 'weekly'
+                            ? L('毎週', 'Weekly', 'Hebdomadaire')
+                            : L(`${task.recurrence.interval || 1}週ごと`, `Every ${task.recurrence.interval || 1}w`, `Toutes les ${task.recurrence.interval || 1} sem`)}
                     </span>
                   </span>
                 )}

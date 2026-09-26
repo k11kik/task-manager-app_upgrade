@@ -28,7 +28,7 @@ import {
   PanelLeftClose
 } from 'lucide-react';
 import { Task, Category, FolderMeta } from '../types';
-import { cn } from '../lib/utils';
+import { cn, tr } from '../lib/utils';
 import { format, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
 
 export interface FolderNode {
@@ -52,6 +52,7 @@ interface TaskExplorerTreeProps {
   onMoveFolder?: (sourceFolderPath: string, targetFolderPath: string) => void;
   onRenameFolder?: (oldFolderPath: string, newFolderPath: string) => void;
   onDeleteFolder?: (folderPath: string) => void;
+  onDuplicateFolder?: (folderPath: string) => void;
   onRenameTask?: (taskId: string, newTitle: string) => void;
   onDeleteTask?: (taskId: string) => void;
   onDuplicateTask?: (task: Task, targetProject?: string) => void;
@@ -83,6 +84,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   onMoveFolder,
   onRenameFolder,
   onDeleteFolder,
+  onDuplicateFolder,
   onRenameTask,
   onDeleteTask,
   onDuplicateTask,
@@ -99,7 +101,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   onToggleFolderPin,
   t
 }) => {
-  const isJa = language === 'ja';
+  const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
   const copiedTaskIdRef = useRef<string | null>(null);
   const lastPasteTimeRef = useRef<number>(0);
 
@@ -999,7 +1001,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
   // Folder deletion
   const handleDeleteFolderAction = (folderPath: string) => {
-    if (!window.confirm(isJa ? `フォルダ「${folderPath}」および中の項目を削除しますか？` : `Delete folder "${folderPath}" and its items?`)) {
+    if (!window.confirm(L(`フォルダ「${folderPath}」および中の項目を削除しますか？`, `Delete folder "${folderPath}" and its items?`, `Supprimer le dossier « ${folderPath} » et son contenu ?`))) {
       return;
     }
     if (onDeleteFolder) {
@@ -1130,16 +1132,16 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const daysDiff = differenceInCalendarDays(targetDate, new Date());
 
     if (isOverdue) {
-      return { status: 'expired', label: isJa ? '期限切' : 'Overdue' };
+      return { status: 'expired', label: L('期限切', 'Overdue', 'Retard') };
     }
     if (isToday(targetDate)) {
-      return { status: 'approaching', label: isJa ? '本日' : 'Today' };
+      return { status: 'approaching', label: L('本日', 'Today', 'Auj.') };
     }
     if (isTomorrow(targetDate)) {
-      return { status: 'approaching', label: isJa ? '明日' : 'Tomorrow' };
+      return { status: 'approaching', label: L('明日', 'Tomorrow', 'Demain') };
     }
     if (daysDiff <= (deadlineThresholdDays || 3)) {
-      return { status: 'approaching', label: isJa ? `${daysDiff}日後` : `In ${daysDiff}d` };
+      return { status: 'approaching', label: L(`${daysDiff}日後`, `In ${daysDiff}d`, `Dans ${daysDiff}j`) };
     }
     return { status: 'normal', label: format(targetDate, 'M/d') };
   };
@@ -1286,7 +1288,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     onToggleFolderStar?.(node.fullPath);
                   }}
                   className="text-amber-400 hover:text-amber-500 shrink-0"
-                  title={isJa ? "スター解除" : "Unstar folder"}
+                  title={L("スター解除", "Unstar folder", "Retirer des favoris")}
                 >
                   <Star size={11} fill="currentColor" />
                 </button>
@@ -1298,7 +1300,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     onToggleFolderStar?.(node.fullPath);
                   }}
                   className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                  title={isJa ? "スターを付ける" : "Star folder"}
+                  title={L("スターを付ける", "Star folder", "Ajouter aux favoris")}
                 >
                   <Star size={11} />
                 </button>
@@ -1313,7 +1315,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     onToggleFolderPin?.(node.fullPath);
                   }}
                   className="text-indigo-500 hover:text-indigo-600 shrink-0"
-                  title={isJa ? "ピン留め解除" : "Unpin folder"}
+                  title={L("ピン留め解除", "Unpin folder", "Désépingler le dossier")}
                 >
                   <Pin size={11} fill="currentColor" />
                 </button>
@@ -1361,7 +1363,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 setInlineInputValue('');
               }}
               className="p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-slate-300/40 rounded transition-colors"
-              title={isJa ? "このフォルダにタスク作成" : "New task in folder"}
+              title={L("このフォルダにタスク作成", "New task in folder", "Nouvelle tâche dans ce dossier")}
             >
               <FilePlus size={12} />
             </button>
@@ -1379,7 +1381,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 setInlineInputValue('');
               }}
               className="p-0.5 text-slate-400 hover:text-amber-600 hover:bg-slate-300/40 rounded transition-colors"
-              title={isJa ? "このフォルダにサブフォルダ作成" : "New subfolder in folder"}
+              title={L("このフォルダにサブフォルダ作成", "New subfolder in folder", "Nouveau sous-dossier")}
             >
               <FolderPlus size={12} />
             </button>
@@ -1397,7 +1399,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 });
               }}
               className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-300/40 rounded transition-colors"
-              title={isJa ? "操作オプション" : "Folder options"}
+              title={L("操作オプション", "Folder options", "Options du dossier")}
             >
               <MoreHorizontal size={13} />
             </button>
@@ -1419,8 +1421,8 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 type="text"
                 placeholder={
                   creatingInFolder.type === 'folder' 
-                    ? (isJa ? "フォルダ名..." : "Folder name...") 
-                    : (isJa ? "タスク名..." : "Task name...")
+                    ? L("フォルダ名...", "Folder name...", "Nom du dossier...") 
+                    : L("タスク名...", "Task name...", "Nom de la tâche...")
                 }
                 value={inlineInputValue}
                 onChange={(e) => setInlineInputValue(e.target.value)}
@@ -1555,7 +1557,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             onToggleDone(task.id);
           }}
           className="text-slate-400 hover:text-indigo-600 transition-colors shrink-0"
-          title={task.isDone ? (isJa ? "未完了に戻す" : "Mark undone") : (isJa ? "完了にする" : "Mark done")}
+          title={task.isDone ? L("未完了に戻す", "Mark undone", "Marquer non terminé") : L("完了にする", "Mark done", "Marquer terminé")}
         >
           {task.isDone ? (
             <CheckCircle2 size={12} className="text-emerald-500" />
@@ -1611,7 +1613,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 ? "text-red-500 hover:text-red-700 hover:bg-red-50"
                 : "text-slate-300 hover:text-amber-500 hover:bg-slate-100 opacity-0 group-hover:opacity-100"
             )}
-            title={isUrgent ? (isJa ? "フォーカスを解除 (ToDoへ)" : "Remove from Focus") : (isJa ? "フォーカスに追加" : "Move to Focus")}
+            title={isUrgent ? L("フォーカスを解除 (ToDoへ)", "Remove from Focus", "Retirer du Focus") : L("フォーカスに追加", "Move to Focus", "Ajouter au Focus")}
           >
             <Zap size={11} fill={isUrgent ? "currentColor" : "none"} />
           </button>
@@ -1626,7 +1628,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               onToggleStar(task.id);
             }}
             className="text-amber-400 hover:text-amber-500 shrink-0"
-            title={isJa ? "重要フラグ解除" : "Unstar"}
+            title={L("重要フラグ解除", "Unstar", "Retirer des favoris")}
           >
             <Star size={11} fill="currentColor" />
           </button>
@@ -1638,7 +1640,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               onToggleStar(task.id);
             }}
             className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-            title={isJa ? "重要フラグを付ける" : "Star"}
+            title={L("重要フラグを付ける", "Star", "Ajouter aux favoris")}
           >
             <Star size={11} />
           </button>
@@ -1673,7 +1675,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               });
             }}
             className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-300/40 rounded transition-colors opacity-0 group-hover:opacity-100 shrink-0 ml-0.5"
-            title={isJa ? "タスクオプション" : "Task options"}
+            title={L("タスクオプション", "Task options", "Options de la tâche")}
           >
             <MoreHorizontal size={12} />
           </button>
@@ -1706,13 +1708,13 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         }}
         onDrop={(e) => handleFolderDrop(e, 'General')}
         className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white/70 shrink-0"
-        title={isJa ? "サブフォルダをここにドロップすると最上位フォルダ化できます" : "Drop subfolder here to make it a root folder"}
+        title={L("サブフォルダをここにドロップすると最上位フォルダ化できます", "Drop subfolder here to make it a root folder", "Déposez un sous-dossier ici pour en faire un dossier racine")}
       >
         <button
           type="button"
           onClick={onToggleCollapse}
           className="flex items-center gap-1.5 min-w-0 hover:bg-slate-200/60 p-1 -ml-1 rounded transition-colors group cursor-pointer text-left"
-          title={isJa ? "Explorerを折りたたむ (タイムラインを拡大)" : "Collapse Explorer (Expand timeline)"}
+          title={L("Explorerを折りたたむ (タイムラインを拡大)", "Collapse Explorer (Expand timeline)", "Réduire l'explorateur (Agrandir la chronologie)")}
         >
           <Layers size={14} className="text-indigo-600 shrink-0 group-hover:scale-105 transition-transform" />
           <span className="text-[11px] font-black uppercase tracking-wider text-slate-700 truncate group-hover:text-indigo-600 transition-colors">
@@ -1730,7 +1732,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               "p-1 rounded transition-colors",
               isSearchOpen || searchQuery ? "text-indigo-600 bg-indigo-50" : "text-slate-400 hover:text-slate-700 hover:bg-slate-200/60"
             )}
-            title={isJa ? "検索" : "Search"}
+            title={L("検索", "Search", "Rechercher")}
           >
             <Search size={14} />
           </button>
@@ -1742,7 +1744,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               "p-1 rounded transition-colors",
               isFilterActiveOnly ? "text-indigo-600 bg-indigo-50" : "text-slate-400 hover:text-slate-700 hover:bg-slate-200/60"
             )}
-            title={isFilterActiveOnly ? (isJa ? "未完了のみ表示中 (クリックで全表示)" : "Active only") : (isJa ? "全表示中 (クリックで未完了のみ)" : "All tasks")}
+            title={isFilterActiveOnly ? L("未完了のみ表示中 (クリックで全表示)", "Active only", "Actives uniquement") : L("全表示中 (クリックで未完了のみ)", "All tasks", "Toutes les tâches")}
           >
             <Filter size={14} />
           </button>
@@ -1760,7 +1762,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               setInlineInputValue('');
             }}
             className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-200/60 rounded transition-colors"
-            title={isJa ? "新規タスク作成" : "New task"}
+            title={L("新規タスク作成", "New task", "Nouvelle tâche")}
           >
             <FilePlus size={14} />
           </button>
@@ -1778,7 +1780,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               setInlineInputValue('');
             }}
             className="p-1 text-slate-400 hover:text-amber-600 hover:bg-slate-200/60 rounded transition-colors"
-            title={isJa ? "新規フォルダ作成" : "New folder"}
+            title={L("新規フォルダ作成", "New folder", "Nouveau dossier")}
           >
             <FolderPlus size={14} />
           </button>
@@ -1787,7 +1789,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           <button
             onClick={expandAll}
             className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors"
-            title={isJa ? "すべて展開" : "Expand all"}
+            title={L("すべて展開", "Expand all", "Tout développer")}
           >
             <ChevronDown size={14} />
           </button>
@@ -1796,7 +1798,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           <button
             onClick={() => collapseAll(rootFolderList)}
             className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors"
-            title={isJa ? "すべて折りたたむ" : "Collapse all"}
+            title={L("すべて折りたたむ", "Collapse all", "Tout réduire")}
           >
             <ChevronRight size={14} />
           </button>
@@ -1811,7 +1813,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             <input
               autoFocus
               type="text"
-              placeholder={isJa ? "タスク・フォルダを検索..." : "Search tasks and folders..."}
+              placeholder={L("タスク・フォルダを検索...", "Search tasks and folders...", "Rechercher des tâches et dossiers...")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full bg-slate-100/80 border border-slate-200 rounded-md pl-7 pr-7 py-1 text-[11px] text-slate-700 outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500"
@@ -1862,7 +1864,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           <div className="max-h-48 overflow-y-auto custom-scrollbar p-1 space-y-0.5">
             {urgentTasks.length === 0 ? (
               <div className="px-3 py-2 text-center text-[10px] text-red-500/70 italic">
-                {isJa ? "⚡ タスクをドラッグまたは⚡をクリックして追加" : "⚡ Drag tasks here or click ⚡ to focus"}
+                {L("⚡ タスクをドラッグまたは⚡をクリックして追加", "⚡ Drag tasks here or click ⚡ to focus", "⚡ Glissez des tâches ici ou cliquez sur ⚡")}
               </div>
             ) : (
               urgentTasks.map(task => renderTaskItem(task, 0.5, '__focus__'))
@@ -1917,8 +1919,8 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                 type="text"
                 placeholder={
                   creatingInFolder.type === 'folder' 
-                    ? (isJa ? "フォルダ名..." : "Folder name...") 
-                    : (isJa ? "タスク名..." : "Task name...")
+                    ? L("フォルダ名...", "Folder name...", "Nom du dossier...") 
+                    : L("タスク名...", "Task name...", "Nom de la tâche...")
                 }
                 value={inlineInputValue}
                 onChange={(e) => setInlineInputValue(e.target.value)}
@@ -1952,7 +1954,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
 
         {rootFolderList.length === 0 && (
           <div className="p-4 text-center text-xs text-slate-400 italic">
-            {isJa ? "フォルダやタスクがありません" : "No folders or tasks"}
+            {L("フォルダやタスクがありません", "No folders or tasks", "Aucun dossier ou tâche")}
           </div>
         )}
       </div>
@@ -1960,63 +1962,105 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       {/* 3-dots Context Menu Popover */}
       {activeMenu && (
         <div 
-          style={{ top: `${Math.min(activeMenu.y, window.innerHeight - 180)}px`, left: `${Math.min(activeMenu.x, window.innerWidth - 180)}px` }}
-          className="fixed z-50 bg-white border border-slate-200 rounded-lg shadow-xl py-1 min-w-[150px] text-xs font-medium text-slate-700 animate-fade-in"
+          style={{ top: `${Math.max(8, Math.min(activeMenu.y, window.innerHeight - 250))}px`, left: `${Math.max(8, Math.min(activeMenu.x, window.innerWidth - 180))}px` }}
+          className="fixed z-50 bg-white border border-slate-200 rounded-lg shadow-xl py-1 min-w-[160px] text-xs font-medium text-slate-700 animate-fade-in"
           onClick={(e) => e.stopPropagation()}
         >
           {activeMenu.type === 'folder' ? (
-            <>
-              <button
-                onClick={() => {
-                  const parts = activeMenu.idOrPath.split('/');
-                  startRenaming('folder', activeMenu.idOrPath, parts[parts.length - 1]);
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
-              >
-                <Edit2 size={13} className="text-slate-400" />
-                <span>{isJa ? "名前を変更" : "Rename"}</span>
-              </button>
-              <button
-                onClick={() => {
-                  if (activeMenu.idOrPath && collapsedFolders.has(activeMenu.idOrPath)) {
-                    const next = new Set<string>(collapsedFolders);
-                    next.delete(activeMenu.idOrPath);
-                    saveCollapsed(next);
-                  }
-                  setCreatingInFolder({ path: activeMenu.idOrPath, type: 'task' });
-                  setInlineInputValue('');
-                  setActiveMenu(null);
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
-              >
-                <FilePlus size={13} className="text-indigo-600" />
-                <span>{isJa ? "新規タスク作成" : "New Task"}</span>
-              </button>
-              <button
-                onClick={() => {
-                  if (activeMenu.idOrPath && collapsedFolders.has(activeMenu.idOrPath)) {
-                    const next = new Set<string>(collapsedFolders);
-                    next.delete(activeMenu.idOrPath);
-                    saveCollapsed(next);
-                  }
-                  setCreatingInFolder({ path: activeMenu.idOrPath, type: 'folder' });
-                  setInlineInputValue('');
-                  setActiveMenu(null);
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
-              >
-                <FolderPlus size={13} className="text-amber-500" />
-                <span>{isJa ? "サブフォルダ作成" : "New Subfolder"}</span>
-              </button>
-              <div className="h-px bg-slate-100 my-1" />
-              <button
-                onClick={() => handleDeleteFolderAction(activeMenu.idOrPath)}
-                className="w-full px-3 py-1.5 text-left hover:bg-red-50 text-red-600 flex items-center gap-2"
-              >
-                <Trash2 size={13} />
-                <span>{isJa ? "フォルダ削除" : "Delete Folder"}</span>
-              </button>
-            </>
+            (() => {
+              const fMeta = folderMetas?.[activeMenu.idOrPath];
+              return (
+                <>
+                  <button
+                    onClick={() => {
+                      const parts = activeMenu.idOrPath.split('/');
+                      startRenaming('folder', activeMenu.idOrPath, parts[parts.length - 1]);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <Edit2 size={13} className="text-slate-400" />
+                    <span>{L("名前を変更", "Rename", "Renommer")}</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (activeMenu.idOrPath && collapsedFolders.has(activeMenu.idOrPath)) {
+                        const next = new Set<string>(collapsedFolders);
+                        next.delete(activeMenu.idOrPath);
+                        saveCollapsed(next);
+                      }
+                      setCreatingInFolder({ path: activeMenu.idOrPath, type: 'task' });
+                      setInlineInputValue('');
+                      setActiveMenu(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <FilePlus size={13} className="text-indigo-600" />
+                    <span>{L("新規タスク作成", "New Task", "Nouvelle tâche")}</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (activeMenu.idOrPath && collapsedFolders.has(activeMenu.idOrPath)) {
+                        const next = new Set<string>(collapsedFolders);
+                        next.delete(activeMenu.idOrPath);
+                        saveCollapsed(next);
+                      }
+                      setCreatingInFolder({ path: activeMenu.idOrPath, type: 'folder' });
+                      setInlineInputValue('');
+                      setActiveMenu(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <FolderPlus size={13} className="text-amber-500" />
+                    <span>{L("サブフォルダ作成", "New Subfolder", "Nouveau sous-dossier")}</span>
+                  </button>
+                  <div className="h-px bg-slate-100 my-1" />
+                  {onToggleFolderStar && (
+                    <button
+                      onClick={() => {
+                        onToggleFolderStar(activeMenu.idOrPath);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Star size={13} className={fMeta?.isStarred ? "text-amber-400 fill-amber-400" : "text-slate-400"} />
+                      <span>{fMeta?.isStarred ? L("スター解除", "Unstar", "Retirer des favoris") : L("スター", "Star", "Favori")}</span>
+                    </button>
+                  )}
+                  {onToggleFolderPin && (
+                    <button
+                      onClick={() => {
+                        onToggleFolderPin(activeMenu.idOrPath);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Pin size={13} className={fMeta?.isPinned ? "text-indigo-600 fill-indigo-600" : "text-slate-400"} />
+                      <span>{fMeta?.isPinned ? L("ピン解除", "Unpin", "Désépingler") : L("ピン留め", "Pin", "Épingler")}</span>
+                    </button>
+                  )}
+                  {onDuplicateFolder && (
+                    <button
+                      onClick={() => {
+                        onDuplicateFolder(activeMenu.idOrPath);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Copy size={13} className="text-slate-400" />
+                      <span>{L("複製", "Duplicate", "Dupliquer")}</span>
+                    </button>
+                  )}
+                  <div className="h-px bg-slate-100 my-1" />
+                  <button
+                    onClick={() => handleDeleteFolderAction(activeMenu.idOrPath)}
+                    className="w-full px-3 py-1.5 text-left hover:bg-red-50 text-red-600 flex items-center gap-2"
+                  >
+                    <Trash2 size={13} />
+                    <span>{L("フォルダ削除", "Delete Folder", "Supprimer le dossier")}</span>
+                  </button>
+                </>
+              );
+            })()
           ) : (
             // Task options
             (() => {
@@ -2030,7 +2074,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
                   >
                     <Edit2 size={13} className="text-slate-400" />
-                    <span>{isJa ? "名前を変更" : "Rename"}</span>
+                    <span>{L("名前を変更", "Rename", "Renommer")}</span>
                   </button>
                   <button
                     onClick={() => {
@@ -2040,7 +2084,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
                   >
                     <Zap size={13} className={isUrgent ? "text-slate-400" : "text-red-500"} />
-                    <span>{isUrgent ? (isJa ? "Focus解除" : "Remove Focus") : (isJa ? "Focusへ移動" : "Move to Focus")}</span>
+                    <span>{isUrgent ? L("Focus解除", "Remove Focus", "Retirer du Focus") : L("Focusへ移動", "Move to Focus", "Déplacer vers Focus")}</span>
                   </button>
                   <button
                     onClick={() => {
@@ -2050,7 +2094,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
                   >
                     <Star size={13} className={task.isStarred ? "text-amber-500" : "text-slate-400"} />
-                    <span>{task.isStarred ? (isJa ? "重要解除" : "Unstar") : (isJa ? "重要フラグ" : "Star")}</span>
+                    <span>{task.isStarred ? L("重要解除", "Unstar", "Retirer des favoris") : L("重要フラグ", "Star", "Favori")}</span>
                   </button>
                   {onTogglePin && (
                     <button
@@ -2061,7 +2105,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                       className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
                     >
                       <Pin size={13} className={task.isPinned ? "text-indigo-600" : "text-slate-400"} />
-                      <span>{task.isPinned ? (isJa ? "ピン解除" : "Unpin") : (isJa ? "ピン留め" : "Pin")}</span>
+                      <span>{task.isPinned ? L("ピン解除", "Unpin", "Désépingler") : L("ピン留め", "Pin", "Épingler")}</span>
                     </button>
                   )}
                   {onDuplicateTask && (
@@ -2073,7 +2117,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                       className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2 text-slate-700"
                     >
                       <Copy size={13} className="text-slate-400" />
-                      <span>{isJa ? "複製" : "Duplicate"}</span>
+                      <span>{L("複製", "Duplicate", "Dupliquer")}</span>
                     </button>
                   )}
                   <div className="h-px bg-slate-100 my-1" />
@@ -2082,7 +2126,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     className="w-full px-3 py-1.5 text-left hover:bg-red-50 text-red-600 flex items-center gap-2"
                   >
                     <Trash2 size={13} />
-                    <span>{isJa ? "ゴミ箱へ移動" : "Delete"}</span>
+                    <span>{L("ゴミ箱へ移動", "Delete", "Supprimer")}</span>
                   </button>
                 </>
               );
@@ -2096,7 +2140,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         onMouseDown={handleMouseDown}
         onDoubleClick={handleDoubleClickResizer}
         className="hidden lg:block absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 transition-colors z-20 group"
-        title={isJa ? "ドラッグして幅を変更 (ダブルクリックでリセット)" : "Drag to resize (Double click to reset)"}
+        title={L("ドラッグして幅を変更 (ダブルクリックでリセット)", "Drag to resize (Double click to reset)", "Glisser pour redimensionner (Double-clic pour réinitialiser)")}
       >
         <div className="w-full h-full group-hover:bg-indigo-500" />
       </div>

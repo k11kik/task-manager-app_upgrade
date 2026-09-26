@@ -5,6 +5,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export function tr(lang: string | undefined, jaText: string, enText: string, frText: string): string {
+  if (lang === 'ja') return jaText;
+  if (lang === 'fr') return frText;
+  return enText;
+}
+
 export function formatDate(timestamp: number) {
   const date = new Date(timestamp);
   const year = date.getFullYear();

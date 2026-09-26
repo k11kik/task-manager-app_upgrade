@@ -27,6 +27,8 @@ interface AuthModalProps {
   onClose: () => void;
   initialError?: any;
   onSuccess?: () => void;
+  language?: AuthModalLang;
+  onChangeLanguage?: (lang: AuthModalLang) => void;
 }
 
 const translations = {
@@ -102,11 +104,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   onClose,
   initialError,
+  language: externalLang,
+  onChangeLanguage,
 }) => {
   // Default language is English (en), with French and Japanese support
-  const [lang, setLang] = useState<AuthModalLang>(() => {
+  const [localLang, setLocalLang] = useState<AuthModalLang>(() => {
     try {
-      const saved = localStorage.getItem('navfor_lang') as AuthModalLang;
+      const saved = (localStorage.getItem('navfor_lang') || localStorage.getItem('navfor_language')) as AuthModalLang;
       if (saved === 'en' || saved === 'fr' || saved === 'ja') return saved;
       return 'en';
     } catch {
@@ -114,13 +118,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   });
 
+  const lang = externalLang || localLang;
   const t = translations[lang] || translations.en;
 
   const handleSetLang = (newLang: AuthModalLang) => {
-    setLang(newLang);
+    setLocalLang(newLang);
     try {
       localStorage.setItem('navfor_lang', newLang);
+      localStorage.setItem('navfor_language', newLang);
     } catch {}
+    onChangeLanguage?.(newLang);
   };
 
   const [errorInfo, setErrorInfo] = useState<AuthErrorInfo | null>(null);
@@ -134,10 +141,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   useEffect(() => {
     if (initialError) {
-      const parsed = parseAuthError(initialError);
+      const parsed = parseAuthError(initialError, lang);
       setErrorInfo(parsed);
     }
-  }, [initialError]);
+  }, [initialError, lang]);
 
   if (!isOpen) return null;
 
@@ -152,7 +159,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleTestConnection = async () => {
     setTestingConnection(true);
     try {
-      const res = await testFirestoreConnection();
+      const res = await testFirestoreConnection(lang);
       setConnectionStatus({ checked: true, ok: res.ok, message: res.message });
     } catch (e: any) {
       setConnectionStatus({ checked: true, ok: false, message: e?.message || String(e) });

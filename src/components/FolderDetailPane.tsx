@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   Folder, 
   Star, 
@@ -19,7 +20,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { Task, RecurrenceType, TaskRecurrence, FolderMeta } from '../types';
-import { cn } from '../lib/utils';
+import { cn, tr } from '../lib/utils';
 import { format } from 'date-fns';
 import { getParentFolderDeadline } from '../lib/folderDeadlineUtils';
 
@@ -36,7 +37,7 @@ export interface FolderDetailPaneProps {
   onSelectTab: (id: string) => void;
   onPinTab: (id: string) => void;
   onCloseTab: (id: string) => void;
-  onOpenTaskInNewTab?: (taskId: string) => void;
+  onOpenTaskInNewTab?: (taskId: string, isPermanent?: boolean) => void;
   availablePaneIds?: number[];
   onMoveTabToPane?: (id: string, targetPaneId: number) => void;
   onShowMessage?: (msg: { text: string; type: 'error' | 'info' }) => void;
@@ -67,15 +68,15 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
   t
 }) => {
   const isJa = language === 'ja';
+  const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
   const folderName = folderPath.split('/').pop() || folderPath;
   const tabId = 'folder:' + folderPath;
 
-  const handleOpenContainedTask = (taskId: string) => {
-    // Pin this folder tab first so it won't be replaced if in preview
-    onPinTab(tabId);
+  const handleOpenContainedTask = (taskId: string, isPermanent = false) => {
     if (onOpenTaskInNewTab) {
-      onOpenTaskInNewTab(taskId);
+      onOpenTaskInNewTab(taskId, isPermanent);
     } else {
+      onPinTab(tabId);
       onSelectTab(taskId);
     }
   };
@@ -196,7 +197,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
     // Check parent deadline limit
     if (parentDeadlineLimit !== undefined && d.getTime() > parentDeadlineLimit) {
       onShowMessage?.({
-        text: isJa ? '親フォルダの締切以降は設定できません' : "Cannot set deadline after parent folder's deadline",
+        text: L('親フォルダの締切以降は設定できません', "Cannot set deadline after parent folder's deadline", "Impossible de définir une date limite après celle du dossier parent"),
         type: 'error'
       });
       // Revert back
@@ -274,11 +275,11 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
           <Folder size={13} className="text-amber-500 shrink-0" />
           <span className="truncate font-semibold text-slate-700">{folderPath}</span>
           <span className="text-[10px] bg-amber-100/70 text-amber-800 border border-amber-200/80 px-1.5 py-0.2 rounded font-sans font-semibold">
-            {containedTasks.length} {isJa ? 'タスク' : 'tasks'}
+            {containedTasks.length} {L('タスク', 'tasks', 'tâches')}
           </span>
           {isPreview && (
             <span className="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.2 rounded font-sans not-italic">
-              {isJa ? 'プレビュー' : 'Preview'}
+              {L('プレビュー', 'Preview', 'Aperçu')}
             </span>
           )}
         </div>
@@ -287,21 +288,21 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
           {isSavedNotice && (
             <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 animate-fade-in flex items-center gap-1">
               <Check size={10} />
-              {isJa ? '保存済' : 'Saved'}
+              {L('保存済', 'Saved', 'Enregistré')}
             </span>
           )}
 
           {/* Move to another pane if split */}
           {availablePaneIds.length > 0 && onMoveTabToPane && (
             <div className="flex items-center gap-1 text-[11px] text-slate-500">
-              <span className="hidden sm:inline">{isJa ? 'ペイン移動:' : 'Move to:'}</span>
+              <span className="hidden sm:inline">{L('ペイン移動:', 'Move to:', 'Déplacer :')}</span>
               {availablePaneIds.map(targetId => (
                 <button
                   key={targetId}
                   type="button"
                   onClick={() => onMoveTabToPane(tabId, targetId)}
                   className="px-1.5 py-0.5 text-[10px] font-bold bg-slate-200/80 hover:bg-indigo-100 hover:text-indigo-700 rounded transition-colors"
-                  title={isJa ? `ペイン ${targetId + 1} へ移動` : `Move to Pane ${targetId + 1}`}
+                  title={L(`ペイン ${targetId + 1} へ移動`, `Move to Pane ${targetId + 1}`, `Déplacer vers le panneau ${targetId + 1}`)}
                 >
                   P{targetId + 1}
                 </button>
@@ -319,20 +320,33 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             <Folder size={19} />
           </div>
 
-          <div className="flex-1 min-w-0">
-            <input
-              type="text"
+          <div className="grid flex-1 min-w-0">
+            <div
+              aria-hidden="true"
+              className="invisible col-start-1 row-start-1 w-full text-sm font-bold leading-snug whitespace-pre-wrap break-all [overflow-wrap:anywhere] p-0 pb-0.5 border-0 border-b border-transparent pointer-events-none select-none"
+            >
+              {(title || L("フォルダのタイトル...", "Folder title...", "Titre du dossier...")) + '\u200b'}
+            </div>
+            <textarea
+              rows={1}
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => {
+                const nextVal = e.target.value.replace(/\r?\n/g, ' ');
+                setTitle(nextVal);
+                if (nextVal !== (folderMeta?.title || folderName)) {
+                  onPinTab(tabId);
+                }
+              }}
               onBlur={() => saveTitle(title)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
+                  e.preventDefault();
                   saveTitle(title);
-                  (e.target as HTMLInputElement).blur();
+                  (e.target as HTMLTextAreaElement).blur();
                 }
               }}
-              placeholder={isJa ? "フォルダのタイトル..." : "Folder title..."}
-              className="w-full text-sm font-bold text-slate-900 bg-transparent border-0 border-b border-transparent hover:border-slate-200 focus:border-indigo-500 focus:ring-0 outline-none pb-0.5 transition-colors"
+              placeholder={L("フォルダのタイトル...", "Folder title...", "Titre du dossier...")}
+              className="col-start-1 row-start-1 w-full h-full resize-none overflow-hidden text-sm font-bold leading-snug whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-900 bg-transparent border-0 border-b border-transparent hover:border-slate-200 focus:border-indigo-500 focus:ring-0 outline-none p-0 pb-0.5 transition-colors"
             />
           </div>
         </div>
@@ -356,14 +370,14 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                 ? "bg-amber-50 text-amber-700 border-amber-200" 
                 : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
             )}
-            title={isJa ? 'フォルダに重要フラグをつける' : 'Star folder'}
+            title={L('フォルダに重要フラグをつける', 'Star folder', 'Marquer le dossier en favori')}
           >
             <Star 
               size={12} 
               fill={folderMeta?.isStarred ? 'currentColor' : 'none'} 
               className={folderMeta?.isStarred ? "text-amber-500" : "text-slate-400"} 
             />
-            <span className="hidden sm:inline">{isJa ? '重要' : 'Star'}</span>
+            <span className="hidden sm:inline">{L('重要', 'Star', 'Favori')}</span>
           </button>
 
           {/* Pin Button */}
@@ -383,14 +397,14 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                 ? "bg-indigo-50 text-indigo-700 border-indigo-200" 
                 : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
             )}
-            title={isJa ? 'フォルダをピン留め' : 'Pin folder'}
+            title={L('フォルダをピン留め', 'Pin folder', 'Épingler le dossier')}
           >
             <Pin 
               size={12} 
               fill={folderMeta?.isPinned ? 'currentColor' : 'none'} 
               className={folderMeta?.isPinned ? "text-indigo-600" : "text-slate-400"} 
             />
-            <span className="hidden sm:inline">{isJa ? 'ピン留め' : 'Pin'}</span>
+            <span className="hidden sm:inline">{L('ピン留め', 'Pin', 'Épingler')}</span>
           </button>
 
           {/* Folder Path Badge */}
@@ -406,7 +420,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             <div className="flex items-center justify-between">
               <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
                 <Clock size={12} className="text-indigo-500" />
-                <span>{isJa ? 'いつ (開始日)' : 'When (Start Date)'}</span>
+                <span>{L('いつ (開始日)', 'When (Start Date)', 'Quand (Date de début)')}</span>
               </label>
               {startDateVal && (
                 <button
@@ -416,9 +430,9 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                     handleStartDateCommit('', startTimeVal, isAllDay);
                   }}
                   className="text-[10px] text-slate-400 hover:text-red-500 px-1 py-0.5 hover:bg-slate-100 rounded transition-colors"
-                  title={isJa ? '開始日をクリア' : 'Clear start date'}
+                  title={L('開始日をクリア', 'Clear start date', 'Effacer la date de début')}
                 >
-                  {isJa ? 'クリア' : 'Clear'}
+                  {L('クリア', 'Clear', 'Effacer')}
                 </button>
               )}
             </div>
@@ -452,7 +466,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             <div className="flex items-center justify-between">
               <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
                 <CalendarIcon size={12} className="text-amber-500" />
-                <span>{isJa ? '締切 / 期日' : 'Deadline'}</span>
+                <span>{L('締切 / 期日', 'Deadline', 'Date limite')}</span>
               </label>
               {deadlineDate && (
                 <button
@@ -462,9 +476,9 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                     handleDeadlineCommit('', deadlineTime, isAllDay);
                   }}
                   className="text-[10px] text-slate-400 hover:text-red-500 px-1 py-0.5 hover:bg-slate-100 rounded transition-colors"
-                  title={isJa ? '締切をクリア' : 'Clear deadline'}
+                  title={L('締切をクリア', 'Clear deadline', 'Effacer la date limite')}
                 >
-                  {isJa ? 'クリア' : 'Clear'}
+                  {L('クリア', 'Clear', 'Effacer')}
                 </button>
               )}
             </div>
@@ -498,9 +512,11 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
               <div className="flex items-center gap-1 text-[10px] text-amber-700 bg-amber-50 border border-amber-200/80 px-2 py-1 rounded-md">
                 <AlertCircle size={11} className="shrink-0" />
                 <span>
-                  {isJa 
-                    ? `※ 親フォルダの締切 (${format(new Date(parentDeadlineLimit), 'yyyy/MM/dd HH:mm')}) 以前に設定する必要があります`
-                    : `* Must be on or before parent folder deadline (${format(new Date(parentDeadlineLimit), 'yyyy/MM/dd HH:mm')})`}
+                  {L(
+                    `※ 親フォルダの締切 (${format(new Date(parentDeadlineLimit), 'yyyy/MM/dd HH:mm')}) 以前に設定する必要があります`,
+                    `* Must be on or before parent folder deadline (${format(new Date(parentDeadlineLimit), 'yyyy/MM/dd HH:mm')})`,
+                    `* Doit être au plus tard à la date limite du dossier parent (${format(new Date(parentDeadlineLimit), 'yyyy/MM/dd HH:mm')})`
+                  )}
                 </span>
               </div>
             )}
@@ -521,7 +537,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                 }}
                 className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 scale-90"
               />
-              <span>{isJa ? '終日設定' : 'All day'}</span>
+              <span>{L('終日設定', 'All day', 'Toute la journée')}</span>
             </label>
           </div>
 
@@ -530,11 +546,11 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             <div className="flex items-center justify-between">
               <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
                 <Repeat size={12} className="text-indigo-600" />
-                <span>{isJa ? '繰り返し' : 'Repeat'}</span>
+                <span>{L('繰り返し', 'Repeat', 'Répéter')}</span>
               </label>
               {recurrenceType !== 'none' && (
                 <span className="text-[10px] text-indigo-600 font-semibold bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-100">
-                  {isJa ? '繰り返し有効' : 'Active'}
+                  {L('繰り返し有効', 'Active', 'Actif')}
                 </span>
               )}
             </div>
@@ -549,11 +565,11 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                 }}
                 className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
               >
-                <option value="none">{isJa ? 'なし' : 'None'}</option>
-                <option value="daily">{isJa ? '毎日' : 'Every day'}</option>
-                <option value="every_x_days">{isJa ? 'X日ごと' : 'Every X days'}</option>
-                <option value="weekly">{isJa ? '毎週' : 'Every week'}</option>
-                <option value="every_x_weeks">{isJa ? 'X週ごと' : 'Every X weeks'}</option>
+                <option value="none">{L('なし', 'None', 'Aucune')}</option>
+                <option value="daily">{L('毎日', 'Every day', 'Tous les jours')}</option>
+                <option value="every_x_days">{L('X日ごと', 'Every X days', 'Tous les X jours')}</option>
+                <option value="weekly">{L('毎週', 'Every week', 'Toutes les semaines')}</option>
+                <option value="every_x_weeks">{L('X週ごと', 'Every X weeks', 'Toutes les X semaines')}</option>
               </select>
 
               {(recurrenceType === 'every_x_days' || recurrenceType === 'every_x_weeks') && (
@@ -572,8 +588,8 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                   />
                   <span className="text-[10px] text-slate-500 font-medium">
                     {recurrenceType === 'every_x_days' 
-                      ? (isJa ? '日ごと' : 'days') 
-                      : (isJa ? '週ごと' : 'weeks')}
+                      ? L('日ごと', 'days', 'jours') 
+                      : L('週ごと', 'weeks', 'semaines')}
                   </span>
                 </div>
               )}
@@ -581,7 +597,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
 
             {recurrenceType !== 'none' && (
               <div className="flex items-center justify-between gap-1.5 pt-1 text-[11px] text-slate-500">
-                <span className="text-[10px] shrink-0 font-medium">{isJa ? '終了日 (任意):' : 'End date:'}</span>
+                <span className="text-[10px] shrink-0 font-medium">{L('終了日 (任意):', 'End date:', 'Date de fin :')}</span>
                 <input
                   type="date"
                   value={recurrenceEndDate}
@@ -600,22 +616,27 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
         <div className="space-y-1">
           <div className="flex items-center justify-between">
             <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
-              <span>{isJa ? 'ノート・メモ' : 'Notes'}</span>
+              <span>{L('ノート・メモ', 'Notes', 'Notes')}</span>
             </label>
             <button
               type="button"
               onClick={() => setIsExpandedNotesOpen(true)}
               className="p-1 hover:bg-slate-100 text-slate-400 hover:text-indigo-600 rounded transition-colors"
-              title={isJa ? '拡大表示' : 'Maximize'}
+              title={L('拡大表示', 'Maximize', 'Agrandir')}
             >
               <Maximize2 size={12} />
             </button>
           </div>
           <textarea
             value={notes}
-            onChange={(e) => setNotes(e.target.value)}
+            onChange={(e) => {
+              setNotes(e.target.value);
+              if (e.target.value !== (folderMeta?.notes || '')) {
+                onPinTab(tabId);
+              }
+            }}
             onBlur={() => saveNotes(notes)}
-            placeholder={isJa ? "このフォルダに関するノートやメモ..." : "Folder notes..."}
+            placeholder={L("このフォルダに関するノートやメモ...", "Folder notes...", "Notes du dossier...")}
             rows={4}
             className="w-full bg-slate-50/70 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 leading-relaxed outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-all font-sans resize-y custom-scrollbar"
           />
@@ -625,14 +646,19 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
         <div className="space-y-1.5">
           <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
             <ExternalLink size={12} className="text-indigo-500" />
-            <span>{isJa ? '参考URL / ドキュメント' : 'Reference URLs'}</span>
+            <span>{L('参考URL / ドキュメント', 'Reference URLs', 'URLs de référence')}</span>
           </label>
 
           <div className="flex items-center gap-1.5">
             <input
               type="text"
               value={newUrlInput}
-              onChange={(e) => setNewUrlInput(e.target.value)}
+              onChange={(e) => {
+                setNewUrlInput(e.target.value);
+                if (e.target.value.trim()) {
+                  onPinTab(tabId);
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
@@ -647,7 +673,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
               onClick={addUrl}
               className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors"
             >
-              {isJa ? '追加' : 'Add'}
+              {L('追加', 'Add', 'Ajouter')}
             </button>
           </div>
 
@@ -668,7 +694,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                     type="button"
                     onClick={() => removeUrl(idx)}
                     className="text-slate-400 hover:text-red-500 p-0.5 rounded transition-colors shrink-0"
-                    title={isJa ? '削除' : 'Remove'}
+                    title={L('削除', 'Remove', 'Supprimer')}
                   >
                     <X size={11} />
                   </button>
@@ -683,7 +709,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
           <div className="flex items-center justify-between">
             <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
               <FileText size={12} className="text-indigo-500" />
-              <span>{isJa ? '内包タスク' : 'Contained Tasks'}</span>
+              <span>{L('内包タスク', 'Contained Tasks', 'Tâches contenues')}</span>
               <span className="text-[10px] font-mono px-1.5 py-0.2 bg-slate-100 rounded-full text-slate-600">
                 {containedTasks.length}
               </span>
@@ -694,19 +720,20 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
               {containedTasks.map(task => (
                 <div
                   key={task.id}
-                  onClick={() => handleOpenContainedTask(task.id)}
-                  title={isJa ? '別タブでタスクを開く' : 'Open task in a new tab'}
+                  onClick={() => handleOpenContainedTask(task.id, false)}
+                  onDoubleClick={() => handleOpenContainedTask(task.id, true)}
+                  title={L('クリックで別タブにプレビュー表示 / ダブルクリックで固定', 'Click to preview in a new tab / Double-click to pin', 'Cliquer pour prévisualiser dans un onglet / Double-cliquer pour épingler')}
                   className="flex items-center justify-between px-2.5 py-1.5 hover:bg-indigo-50/70 cursor-pointer text-xs transition-colors group"
                 >
-                  <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="flex items-start gap-1.5 min-w-0 flex-1 pr-2">
                     {task.isDone ? (
-                      <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                      <CheckCircle2 size={13} className="text-emerald-500 shrink-0 mt-0.5" />
                     ) : task.category === 'Urgent' ? (
-                      <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
+                      <span className="w-2 h-2 rounded-full bg-red-500 shrink-0 mt-1" />
                     ) : (
-                      <FileText size={13} className="text-slate-400 shrink-0" />
+                      <FileText size={13} className="text-slate-400 shrink-0 mt-0.5" />
                     )}
-                    <span className={cn("truncate font-medium", task.isDone && "line-through text-slate-400")}>
+                    <span className={cn("break-all [overflow-wrap:anywhere] whitespace-normal leading-snug font-medium", task.isDone && "line-through text-slate-400")}>
                       {task.title}
                     </span>
                   </div>
@@ -716,7 +743,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             </div>
           ) : (
             <p className="text-[11px] text-slate-400 italic px-1">
-              {isJa ? 'このフォルダにアクティブなタスクはありません' : 'No active tasks in this folder'}
+              {L('このフォルダにアクティブなタスクはありません', 'No active tasks in this folder', 'Aucune tâche active dans ce dossier')}
             </p>
           )}
         </div>
@@ -730,10 +757,10 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
               onArchiveFolder?.(folderPath);
             }}
             className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
-            title={isJa ? 'このフォルダと中身のタスク全体をアーカイブします' : 'Archive folder and all contents'}
+            title={L('このフォルダと中身のタスク全体をアーカイブします', 'Archive folder and all contents', 'Archiver le dossier et tout son contenu')}
           >
             <Archive size={11} />
-            <span>{isJa ? 'フォルダをアーカイブ' : 'Archive Folder'}</span>
+            <span>{L('フォルダをアーカイブ', 'Archive Folder', 'Archiver le dossier')}</span>
           </button>
 
           <button
@@ -743,55 +770,81 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
               onCloseTab(tabId);
             }}
             className="px-2 py-1 text-red-600 hover:bg-red-50 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
-            title={isJa ? 'このフォルダと中身のタスク全体をゴミ箱へ移動します' : 'Move folder and all contents to trash'}
+            title={L('このフォルダと中身のタスク全体をゴミ箱へ移動します', 'Move folder and all contents to trash', 'Mettre le dossier et tout son contenu à la corbeille')}
           >
             <Trash2 size={11} />
-            <span>{isJa ? 'フォルダをゴミ箱へ' : 'Trash Folder'}</span>
+            <span>{L('フォルダをゴミ箱へ', 'Trash Folder', 'Mettre le dossier à la corbeille')}</span>
           </button>
         </div>
       </div>
 
       {/* Expanded Notes Modal */}
-      {isExpandedNotesOpen && (
-        <div className="fixed inset-0 z-[200] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl h-[80vh] flex flex-col overflow-hidden animate-scale-up">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 bg-slate-50/80">
-              <div className="flex items-center gap-2">
-                <Folder size={16} className="text-amber-500" />
+      {isExpandedNotesOpen && createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => {
+            saveNotes(notes);
+            setIsExpandedNotesOpen(false);
+          }}
+          className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center px-4 sm:px-8 py-16 sm:py-20"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl h-full max-h-[640px] flex flex-col overflow-hidden animate-scale-up my-auto"
+          >
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 bg-slate-50/80 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <Folder size={16} className="text-amber-500 shrink-0" />
                 <span className="font-bold text-sm text-slate-800 truncate">{folderPath} - {title}</span>
               </div>
               <button
+                type="button"
                 onClick={() => {
                   saveNotes(notes);
                   setIsExpandedNotesOpen(false);
                 }}
-                className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+                className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors shrink-0"
               >
                 <X size={18} />
               </button>
             </div>
-            <div className="flex-1 p-5 overflow-hidden flex flex-col">
+            <div className="flex-1 p-5 overflow-hidden flex flex-col min-h-0">
               <textarea
                 value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder={isJa ? "フォルダのノート、メモ、コンテキストを記入..." : "Folder notes..."}
-                className="w-full flex-1 resize-none bg-slate-50/50 border border-slate-200 rounded-xl p-4 text-sm text-slate-800 leading-relaxed outline-none focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-sans"
+                onChange={(e) => {
+                  setNotes(e.target.value);
+                  if (e.target.value !== (folderMeta?.notes || '')) {
+                    onPinTab(tabId);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.stopPropagation();
+                    saveNotes(notes);
+                    setIsExpandedNotesOpen(false);
+                  }
+                }}
+                placeholder={L("フォルダのノート、メモ、コンテキストを記入...", "Folder notes...", "Notes du dossier...")}
+                className="w-full flex-1 resize-none bg-slate-50/50 border border-slate-200 rounded-xl p-4 text-sm text-slate-800 leading-relaxed outline-none focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-sans overflow-y-auto custom-scrollbar"
                 autoFocus
               />
             </div>
-            <div className="flex items-center justify-end px-5 py-3 border-t border-slate-200 bg-slate-50/50">
+            <div className="flex items-center justify-end px-5 py-3 border-t border-slate-200 bg-slate-50/50 shrink-0">
               <button
+                type="button"
                 onClick={() => {
                   saveNotes(notes);
                   setIsExpandedNotesOpen(false);
                 }}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors"
               >
-                {isJa ? '閉じて保存' : 'Save & Close'}
+                {L('閉じて保存', 'Save & Close', 'Enregistrer et fermer')}
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

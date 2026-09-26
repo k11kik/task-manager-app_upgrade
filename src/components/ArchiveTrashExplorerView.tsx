@@ -20,7 +20,7 @@ import {
   Zap
 } from 'lucide-react';
 import { Task, Category } from '../types';
-import { cn } from '../lib/utils';
+import { cn, tr } from '../lib/utils';
 import { differenceInDays, format } from 'date-fns';
 
 interface FolderNode {
@@ -62,10 +62,10 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
   activeTaskId,
   onEmptyTrash,
   onCleanupArchive,
-  language = 'ja',
+  language = 'en',
   t
 }) => {
-  const isJa = language === 'ja';
+  const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
   const isTrash = mode === 'trash';
 
   const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(new Set());
@@ -244,7 +244,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
 
           {/* Notes indicator icon */}
           {task.notes && task.notes.trim() && (
-            <span className="text-slate-300 group-hover:text-slate-500 shrink-0" title={isJa ? "メモあり" : "Has notes"}>
+            <span className="text-slate-300 group-hover:text-slate-500 shrink-0" title={L("メモあり", "Has notes", "Contient des notes")}>
               <FileText size={11} />
             </span>
           )}
@@ -264,18 +264,18 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
             trashInfo.isNearing ? (
               <span 
                 className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black bg-red-500 text-white shadow-xs animate-pulse tracking-tight"
-                title={isJa ? `間もなく自動クリーンアップにより完全消去されます (残り ${trashInfo.daysLeft} 日)` : `Scheduled for permanent delete soon (${trashInfo.daysLeft}d left)`}
+                title={L(`間もなく自動クリーンアップにより完全消去されます (残り ${trashInfo.daysLeft} 日)`, `Scheduled for permanent delete soon (${trashInfo.daysLeft}d left)`, `Suppression définitive imminente (${trashInfo.daysLeft}j restants)`)}
               >
                 <AlertTriangle size={10} strokeWidth={2.5} />
                 <span>
                   {trashInfo.daysLeft === 0
-                    ? (isJa ? '⚠️ 間もなく完全削除' : '⚠️ Purging today')
-                    : (isJa ? `⚠️ あと${trashInfo.daysLeft}日で完全削除` : `⚠️ Deleting in ${trashInfo.daysLeft}d`)}
+                    ? L('⚠️ 間もなく完全削除', '⚠️ Purging today', '⚠️ Suppression auj.')
+                    : L(`⚠️ あと${trashInfo.daysLeft}日で完全削除`, `⚠️ Deleting in ${trashInfo.daysLeft}d`, `⚠️ Suppression dans ${trashInfo.daysLeft}j`)}
                 </span>
               </span>
             ) : trashInfo.daysLeft !== null ? (
               <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full font-mono">
-                {isJa ? `残り${trashInfo.daysLeft}日` : `${trashInfo.daysLeft}d left`}
+                {L(`残り${trashInfo.daysLeft}日`, `${trashInfo.daysLeft}d left`, `${trashInfo.daysLeft}j restants`)}
               </span>
             ) : null
           )}
@@ -293,9 +293,9 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
           {/* Restore Button */}
           <button
             type="button"
-            onClick={() => onRestore(task.id, isTrash ? 'Backlog' : 'Focus')}
+            onClick={() => onRestore(task.id, isTrash ? 'Backlog' as any : 'Focus')}
             className="p-1 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded transition-colors"
-            title={isTrash ? (isJa ? "ToDoリストへ復元" : "Restore to ToDo List") : (isJa ? "アクティブタスクへ復元" : "Restore to Active Tasks")}
+            title={isTrash ? L("ToDoリストへ復元", "Restore to ToDo List", "Restaurer vers la liste ToDo") : L("アクティブタスクへ復元", "Restore to Active Tasks", "Restaurer vers les tâches actives")}
           >
             <RotateCcw size={13} />
           </button>
@@ -306,7 +306,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
               type="button"
               onClick={() => onPermanentDelete(task.id)}
               className="p-1 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded transition-colors"
-              title={isJa ? "完全に消去 (復元不可)" : "Delete permanently"}
+              title={L("完全に消去 (復元不可)", "Delete permanently", "Supprimer définitivement")}
             >
               <Trash2 size={13} />
             </button>
@@ -316,7 +316,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
                 type="button"
                 onClick={() => onMoveToTrash(task.id)}
                 className="p-1 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded transition-colors"
-                title={isJa ? "ゴミ箱へ移動" : "Move to Trash"}
+                title={L("ゴミ箱へ移動", "Move to Trash", "Mettre à la corbeille")}
               >
                 <Trash2 size={13} />
               </button>
@@ -329,7 +329,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
               type="button"
               onClick={() => onToggleStar(task.id)}
               className="p-1 hover:bg-amber-50 text-slate-300 hover:text-amber-500 rounded transition-colors"
-              title={task.isStarred ? (isJa ? "スター解除" : "Unstar") : (isJa ? "スター" : "Star")}
+              title={task.isStarred ? L("スター解除", "Unstar", "Retirer des favoris") : L("スター", "Star", "Favori")}
             >
               <Star size={13} className={task.isStarred ? "text-amber-500 fill-amber-500" : ""} />
             </button>
@@ -341,7 +341,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
               type="button"
               onClick={() => onTogglePin(task.id)}
               className="p-1 hover:bg-indigo-50 text-slate-300 hover:text-indigo-600 rounded transition-colors"
-              title={task.isPinned ? (isJa ? "ピン留め解除" : "Unpin") : (isJa ? "ピン留め" : "Pin")}
+              title={task.isPinned ? L("ピン留め解除", "Unpin", "Désépingler") : L("ピン留め", "Pin", "Épingler")}
             >
               <Pin size={13} className={task.isPinned ? "text-indigo-600 fill-indigo-600 rotate-45" : ""} />
             </button>
@@ -385,14 +385,14 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
             {isTrash && nearing > 0 && (
               <span className="ml-1 px-1.5 py-0.2 text-[9px] font-black bg-red-100 text-red-700 border border-red-200 rounded-full flex items-center gap-0.5">
                 <AlertTriangle size={9} />
-                <span>{isJa ? `廃棄間近 ${nearing}` : `${nearing} near purge`}</span>
+                <span>{L(`廃棄間近 ${nearing}`, `${nearing} near purge`, `${nearing} bientôt supprimé(s)`)}</span>
               </span>
             )}
           </div>
 
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
-              {isCollapsed ? (isJa ? "クリックで展開" : "Click to expand") : (isJa ? "クリックで折畳" : "Click to collapse")}
+              {isCollapsed ? L("クリックで展開", "Click to expand", "Cliquer pour développer") : L("クリックで折畳", "Click to collapse", "Cliquer pour réduire")}
             </span>
           </div>
         </div>
@@ -432,23 +432,23 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
                 {isTrash ? t('Trash') : t('Archive')}
               </h3>
               <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
-                {filteredTasks.length} {isJa ? '件' : 'items'}
+                {filteredTasks.length} {L('件', 'items', 'éléments')}
               </span>
               {isTrash && nearingPurgeCount > 0 && (
                 <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200 flex items-center gap-1 animate-pulse">
                   <AlertTriangle size={11} />
-                  <span>{isJa ? `廃棄間近: ${nearingPurgeCount}件` : `${nearingPurgeCount} purging soon`}</span>
+                  <span>{L(`廃棄間近: ${nearingPurgeCount}件`, `${nearingPurgeCount} purging soon`, `${nearingPurgeCount} bientôt supprimé(s)`)}</span>
                 </span>
               )}
             </div>
             <p className="text-[11px] text-slate-400">
               {isTrash 
                 ? (trashCleanupThresholdDays === 99999 
-                    ? (isJa ? 'ゴミ箱内のタスクは無期限に保持されます' : 'Trash is permanently kept') 
-                    : (isJa ? `${trashCleanupThresholdDays}日後に自動で完全に消去されます` : `Permanently deleted after ${trashCleanupThresholdDays} days`))
+                    ? L('ゴミ箱内のタスクは無期限に保持されます', 'Trash is permanently kept', 'Les éléments de la corbeille sont conservés indéfiniment') 
+                    : L(`${trashCleanupThresholdDays}日後に自動で完全に消去されます`, `Permanently deleted after ${trashCleanupThresholdDays} days`, `Supprimé définitivement après ${trashCleanupThresholdDays} jours`))
                 : (archiveThresholdDays === 99999
-                    ? (isJa ? 'アーカイブされたタスク一覧' : 'Archived tasks list')
-                    : (isJa ? `${archiveThresholdDays}日非アクティブでゴミ箱へ移動します` : `Moved to trash after ${archiveThresholdDays} days`))
+                    ? L('アーカイブされたタスク一覧', 'Archived tasks list', 'Liste des tâches archivées')
+                    : L(`${archiveThresholdDays}日非アクティブでゴミ箱へ移動します`, `Moved to trash after ${archiveThresholdDays} days`, `Déplacé dans la corbeille après ${archiveThresholdDays} jours`))
               }
             </p>
           </div>
@@ -463,7 +463,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={isJa ? "タスクやプロジェクトを検索..." : "Search tasks..."}
+              placeholder={L("タスクやプロジェクトを検索...", "Search tasks...", "Rechercher des tâches...")}
               className="pl-8 pr-3 py-1 bg-white border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-400 w-36 sm:w-48 text-slate-700 shadow-2xs"
             />
             {searchQuery && (
@@ -482,19 +482,19 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
               onClick={() => setTimeFilter('all')}
               className={cn("px-2 py-0.5 rounded font-medium transition-colors", timeFilter === 'all' ? "bg-slate-100 text-slate-800 font-bold" : "text-slate-500 hover:text-slate-800")}
             >
-              {isJa ? 'すべて' : 'All'}
+              {L('すべて', 'All', 'Tout')}
             </button>
             <button
               onClick={() => setTimeFilter('1w')}
               className={cn("px-2 py-0.5 rounded font-medium transition-colors", timeFilter === '1w' ? "bg-slate-100 text-slate-800 font-bold" : "text-slate-500 hover:text-slate-800")}
             >
-              {isJa ? '1週以上' : '>1w'}
+              {L('1週以上', '>1w', '>1s')}
             </button>
             <button
               onClick={() => setTimeFilter('1m')}
               className={cn("px-2 py-0.5 rounded font-medium transition-colors", timeFilter === '1m' ? "bg-slate-100 text-slate-800 font-bold" : "text-slate-500 hover:text-slate-800")}
             >
-              {isJa ? '1ヶ月以上' : '>1m'}
+              {L('1ヶ月以上', '>1m', '>1m')}
             </button>
           </div>
 
@@ -503,14 +503,14 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
             <button
               onClick={expandAll}
               className="p-1 hover:bg-slate-100 rounded text-slate-500 hover:text-slate-800 transition-colors"
-              title={isJa ? "すべてのフォルダを展開" : "Expand all"}
+              title={L("すべてのフォルダを展開", "Expand all", "Tout développer")}
             >
               <ChevronsUpDown size={13} />
             </button>
             <button
               onClick={collapseAll}
               className="p-1 hover:bg-slate-100 rounded text-slate-500 hover:text-slate-800 transition-colors"
-              title={isJa ? "すべてのフォルダを折りたたむ" : "Collapse all"}
+              title={L("すべてのフォルダを折りたたむ", "Collapse all", "Tout réduire")}
             >
               <ChevronsDownUp size={13} />
             </button>
@@ -521,7 +521,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
             <button
               onClick={onEmptyTrash}
               className="px-3 py-1 bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 rounded-lg text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5"
-              title={isJa ? "ゴミ箱を完全に空にする" : "Empty Trash"}
+              title={L("ゴミ箱を完全に空にする", "Empty Trash", "Vider la corbeille")}
             >
               <Zap size={12} />
               <span>{t('EmptyTrash')}</span>
@@ -532,10 +532,10 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
             <button
               onClick={onCleanupArchive}
               className="px-3 py-1 bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-600 border border-slate-200 hover:border-red-200 rounded-lg text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5"
-              title={isJa ? "古いアーカイブをゴミ箱へ移動" : "Move old archived to trash"}
+              title={L("古いアーカイブをゴミ箱へ移動", "Move old archived to trash", "Déplacer les anciennes archives dans la corbeille")}
             >
               <Trash2 size={12} />
-              <span>{isJa ? "一括クリーンアップ" : "Cleanup"}</span>
+              <span>{L("一括クリーンアップ", "Cleanup", "Nettoyage")}</span>
             </button>
           )}
         </div>
@@ -548,7 +548,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
             {isTrash ? <Trash2 size={48} strokeWidth={1} /> : <FileText size={48} strokeWidth={1} />}
             <span className="text-xs font-bold mt-3 uppercase tracking-wider text-slate-400">
               {searchQuery 
-                ? (isJa ? '一致するタスクがありません' : 'No matching tasks found')
+                ? L('一致するタスクがありません', 'No matching tasks found', 'Aucune tâche correspondante')
                 : (isTrash ? t('TrashEmpty') : t('ArchiveEmpty'))
               }
             </span>

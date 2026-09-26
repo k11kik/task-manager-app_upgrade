@@ -31,10 +31,13 @@ import {
   RotateCcw,
   Repeat,
   LayoutGrid,
-  ArrowLeftRight
+  ArrowLeftRight,
+  MoreHorizontal,
+  Copy,
+  FilePlus
 } from 'lucide-react';
 import { Task, Category, FolderMeta } from '../types';
-import { cn } from '../lib/utils';
+import { cn, tr } from '../lib/utils';
 import { format, addDays, subDays, startOfDay, isSameDay, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
 import { isTaskOccurringOnDate } from '../lib/taskDateUtils';
 
@@ -72,7 +75,7 @@ export const getTaskCurrentColumnId = (task: Task, cols: CustomTimelineColumn[])
 };
 
 // Helper for approaching or overdue deadline alerts
-export const getTaskDeadlineAlert = (deadline?: number, isDone?: boolean, isJa: boolean = true) => {
+export const getTaskDeadlineAlert = (deadline?: number, isDone?: boolean, language: string = 'ja') => {
   if (!deadline || isDone) return null;
   const now = Date.now();
   const targetDate = new Date(deadline);
@@ -84,29 +87,29 @@ export const getTaskDeadlineAlert = (deadline?: number, isDone?: boolean, isJa: 
   if (isOverdue) {
     return {
       isOverdue: true,
-      label: isJa ? '期限切' : 'Overdue',
-      tooltip: isJa ? `期限切れ: ${format(targetDate, 'yyyy/MM/dd HH:mm')}` : `Overdue: ${format(targetDate, 'yyyy/MM/dd HH:mm')}`
+      label: tr(language, '期限切', 'Overdue', 'Retard'),
+      tooltip: tr(language, `期限切れ: ${format(targetDate, 'yyyy/MM/dd HH:mm')}`, `Overdue: ${format(targetDate, 'yyyy/MM/dd HH:mm')}`, `En retard : ${format(targetDate, 'yyyy/MM/dd HH:mm')}`)
     };
   }
   if (isTargetToday) {
     return {
       isOverdue: false,
-      label: isJa ? '本日' : 'Today',
-      tooltip: isJa ? `本日締切: ${format(targetDate, 'HH:mm')}` : `Due today: ${format(targetDate, 'HH:mm')}`
+      label: tr(language, '本日', 'Today', 'Auj.'),
+      tooltip: tr(language, `本日締切: ${format(targetDate, 'HH:mm')}`, `Due today: ${format(targetDate, 'HH:mm')}`, `Échéance aujourd'hui : ${format(targetDate, 'HH:mm')}`)
     };
   }
   if (isTargetTomorrow) {
     return {
       isOverdue: false,
-      label: isJa ? '明日' : 'Tomorrow',
-      tooltip: isJa ? `明日締切: ${format(targetDate, 'MM/dd')}` : `Due tomorrow: ${format(targetDate, 'MM/dd')}`
+      label: tr(language, '明日', 'Tomorrow', 'Demain'),
+      tooltip: tr(language, `明日締切: ${format(targetDate, 'MM/dd')}`, `Due tomorrow: ${format(targetDate, 'MM/dd')}`, `Échéance demain : ${format(targetDate, 'MM/dd')}`)
     };
   }
   if (daysDiff <= 3 && daysDiff > 0) {
     return {
       isOverdue: false,
-      label: isJa ? `あと${daysDiff}日` : `In ${daysDiff}d`,
-      tooltip: isJa ? `締切間近: ${format(targetDate, 'MM/dd')}` : `Due soon: ${format(targetDate, 'MM/dd')}`
+      label: tr(language, `あと${daysDiff}日`, `In ${daysDiff}d`, `Dans ${daysDiff}j`),
+      tooltip: tr(language, `締切間近: ${format(targetDate, 'MM/dd')}`, `Due soon: ${format(targetDate, 'MM/dd')}`, `Échéance proche : ${format(targetDate, 'MM/dd')}`)
     };
   }
   return null;
@@ -121,7 +124,11 @@ interface ProjectTimelineViewProps {
   onMoveTaskFolder?: (taskId: string, newProject: string) => void;
   onMoveFolder?: (sourceFolderPath: string, targetFolderPath: string) => void;
   onRenameFolder?: (oldFolderPath: string, newFolderPath: string) => void;
+  onDeleteFolder?: (folderPath: string) => void;
+  onDuplicateFolder?: (folderPath: string) => void;
   onRenameTask?: (taskId: string, newTitle: string) => void;
+  onDeleteTask?: (taskId: string) => void;
+  onDuplicateTask?: (task: Task, targetProject?: string) => void;
   onToggleDone: (taskId: string) => void;
   onToggleStar: (taskId: string) => void;
   onTogglePin?: (taskId: string) => void;
@@ -132,6 +139,7 @@ interface ProjectTimelineViewProps {
     deadline?: number; 
     isAllDay?: boolean;
     timelineColumn?: string;
+    timelineStep?: number;
     timelinePresetColumns?: Record<string, string>;
     order?: number;
   }) => Promise<void>;
@@ -152,7 +160,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   onMoveTaskFolder,
   onMoveFolder,
   onRenameFolder,
+  onDeleteFolder,
+  onDuplicateFolder,
   onRenameTask,
+  onDeleteTask,
+  onDuplicateTask,
   onToggleDone,
   onToggleStar,
   onTogglePin,
@@ -165,7 +177,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   onToggleFolderPin,
   t
 }) => {
-  const isJa = language === 'ja';
+  const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
 
   // Mode: 'calendar' (specific dates) vs 'custom' (abstract columns: 1 day, 1 week, custom stages)
   const [timelineMode, setTimelineMode] = useState<'calendar' | 'custom'>(() => {
@@ -342,9 +354,54 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   } | null>(null);
   const [renameInputValue, setRenameInputValue] = useState('');
 
+  // 3-dots dropdown context menu state for folders and task files
+  const [activeMenu, setActiveMenu] = useState<{
+    type: 'folder' | 'task';
+    idOrPath: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = () => setActiveMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveMenu(null);
+    };
+    if (activeMenu) {
+      window.addEventListener('click', handleOutsideClick);
+      window.addEventListener('keydown', handleKeyDown);
+      return () => {
+        window.removeEventListener('click', handleOutsideClick);
+        window.removeEventListener('keydown', handleKeyDown);
+      };
+    }
+  }, [activeMenu]);
+
   const startRenaming = (type: 'folder' | 'task', idOrPath: string, initialValue: string) => {
     setRenamingItem({ type, idOrPath, initialValue });
     setRenameInputValue(initialValue);
+    setActiveMenu(null);
+  };
+
+  const handleDeleteFolderAction = (folderPath: string) => {
+    if (!window.confirm(L(`フォルダ「${folderPath}」および中の項目を削除しますか？`, `Delete folder "${folderPath}" and its items?`, `Supprimer le dossier « ${folderPath} » et son contenu ?`))) {
+      return;
+    }
+    if (onDeleteFolder) {
+      onDeleteFolder(folderPath);
+    }
+    const next = customFolders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
+    saveCustomFolders(next);
+    setActiveMenu(null);
+  };
+
+  const handleDeleteTaskAction = (taskId: string) => {
+    if (onDeleteTask) {
+      onDeleteTask(taskId);
+    } else if (onMoveTask) {
+      onMoveTask(taskId, 'Trash');
+    }
+    setActiveMenu(null);
   };
 
   const handleRenameSubmit = (e?: React.FormEvent) => {
@@ -365,6 +422,14 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           parts[parts.length - 1] = val;
           const newPath = parts.join('/');
           onRenameFolder(oldPath, newPath);
+
+          // Also update customFolders
+          const updatedCustom = customFolders.map(f => {
+            if (f === oldPath) return newPath;
+            if (f.startsWith(oldPath + '/')) return f.replace(oldPath, newPath);
+            return f;
+          });
+          saveCustomFolders(updatedCustom);
 
           // Update collapsedProjectPaths state
           setCollapsedProjectPaths(prev => {
@@ -867,6 +932,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (aIdx !== -1 && bIdx === -1) return -1;
           if (aIdx === -1 && bIdx !== -1) return 1;
           if (aIdx !== bIdx) return aIdx - bIdx;
+          const aStep = a.timelineStep ?? 0;
+          const bStep = b.timelineStep ?? 0;
+          if (aStep !== bStep) return aStep - bStep;
           return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
         }
       });
@@ -1151,6 +1219,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             const colA: number = colOrderMap.get(getTaskCurrentColumnId(a, customColumns) || '') ?? 999;
             const colB: number = colOrderMap.get(getTaskCurrentColumnId(b, customColumns) || '') ?? 999;
             if (colA !== colB) return colA - colB;
+            const stepA = a.timelineStep ?? 0;
+            const stepB = b.timelineStep ?? 0;
+            if (stepA !== stepB) return stepA - stepB;
             return (a.order ?? 0) - (b.order ?? 0) || (Number(a.createdAt) - Number(b.createdAt));
           });
       }
@@ -1164,7 +1235,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             xApprox = (t.deadline - timelineStartMs) / slotDurationMs;
           } else {
             const colIdx = customColumns.findIndex(c => c.id === getTaskCurrentColumnId(t, customColumns));
-            xApprox = colIdx >= 0 ? colIdx * 100 + (t.order ?? 0) : 0;
+            const stepIdx = t.timelineStep ?? 0;
+            xApprox = colIdx >= 0 ? colIdx * 1000 + stepIdx * 100 + (t.order ?? 0) : 0;
           }
           return { task: t, xApprox };
         })
@@ -1882,7 +1954,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
             <CalendarDays size={16} className="text-indigo-600 shrink-0" />
-            <span>{isJa ? 'プロジェクト タイムライン' : 'Project Timeline'}</span>
+            <span>{L('プロジェクト タイムライン', 'Project Timeline', 'Chronologie des projets')}</span>
           </div>
 
           <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block" />
@@ -1897,10 +1969,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   ? "bg-indigo-600 text-white shadow-2xs"
                   : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
               )}
-              title={isJa ? "日付基準（カレンダー日付）" : "Calendar Dates"}
+              title={L("日付基準（カレンダー日付）", "Calendar Dates", "Dates du calendrier")}
             >
               <CalendarIcon size={12} />
-              <span>{isJa ? "日付基準" : "Dates"}</span>
+              <span>{L("日付基準", "Dates", "Dates")}</span>
             </button>
             <button
               onClick={() => handleSetTimelineMode('custom')}
@@ -1910,10 +1982,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   ? "bg-indigo-600 text-white shadow-2xs"
                   : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
               )}
-              title={isJa ? "抽象的期間・ステージ（1 day, 1 week, カスタム列）" : "Abstract Periods & Stages"}
+              title={L("抽象的期間・ステージ（1 day, 1 week, カスタム列）", "Abstract Periods & Stages", "Périodes et étapes personnalisées")}
             >
               <SlidersHorizontal size={12} />
-              <span>{isJa ? "カスタム期間" : "Custom / Stages"}</span>
+              <span>{L("カスタム期間", "Custom / Stages", "Étapes")}</span>
             </button>
           </div>
 
@@ -1923,7 +1995,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 onClick={() => handleNavigate('prev')}
                 className="p-1 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded transition-colors"
-                title={isJa ? '1週間前へ' : 'Previous week'}
+                title={L('1週間前へ', 'Previous week', 'Semaine précédente')}
               >
                 <ChevronLeft size={14} />
               </button>
@@ -1931,12 +2003,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 onClick={() => handleNavigate('today')}
                 className="px-2 py-0.5 text-[11px] font-bold text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
               >
-                {isJa ? '今日' : 'Today'}
+                {L('今日', 'Today', "Aujourd'hui")}
               </button>
               <button
                 onClick={() => handleNavigate('next')}
                 className="p-1 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded transition-colors"
-                title={isJa ? '1週間後へ' : 'Next week'}
+                title={L('1週間後へ', 'Next week', 'Semaine suivante')}
               >
                 <ChevronRight size={14} />
               </button>
@@ -1948,20 +2020,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 onClick={handleAddColumn}
                 className="px-2 py-1 text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
-                title={isJa ? "Phase列を追加" : "Add Phase Column"}
+                title={L("Phase列を追加", "Add Phase Column", "Ajouter une colonne de phase")}
               >
                 <Plus size={13} />
-                <span>{isJa ? "列を追加" : "Add Column"}</span>
+                <span>{L("列を追加", "Add Column", "Ajouter colonne")}</span>
               </button>
 
               {/* Reset Custom Phases (Names & Count) Button */}
               <button
                 onClick={handleResetCustomColumns}
                 className="px-2 py-1 text-[11px] font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
-                title={isJa ? "列名・列数を初期値（Phase 1〜5）にリセット" : "Reset phases configuration (names and count) to default (Phase 1-5)"}
+                title={L("列名・列数を初期値（Phase 1〜5）にリセット", "Reset phases configuration (names and count) to default (Phase 1-5)", "Réinitialiser la configuration des phases (Phase 1 à 5)")}
               >
                 <RefreshCw size={12} className="text-slate-500" />
-                <span>{isJa ? "列構成リセット" : "Reset Phases"}</span>
+                <span>{L("列構成リセット", "Reset Phases", "Réinitialiser phases")}</span>
               </button>
             </div>
           )}
@@ -1983,10 +2055,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               setIsCreateFolderOpen(true);
             }}
             className="px-2.5 py-1 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
-            title={isJa ? "プロジェクトフォルダを追加" : "Add Project Folder"}
+            title={L("プロジェクトフォルダを追加", "Add Project Folder", "Ajouter un dossier de projet")}
           >
             <FolderPlus size={13} className="text-indigo-600 shrink-0" />
-            <span>{isJa ? "フォルダ追加" : "Add Folder"}</span>
+            <span>{L("フォルダ追加", "Add Folder", "Ajouter dossier")}</span>
           </button>
 
           {/* Collapse / Expand All Project Folders Button */}
@@ -1999,8 +2071,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
             )}
             title={isAllProjectsCollapsed 
-              ? (isJa ? "すべてのプロジェクトフォルダを展開" : "Expand all project folders") 
-              : (isJa ? "すべてのプロジェクトフォルダを折りたたむ" : "Collapse all project folders")
+              ? L("すべてのプロジェクトフォルダを展開", "Expand all project folders", "Développer tous les dossiers") 
+              : L("すべてのプロジェクトフォルダを折りたたむ", "Collapse all project folders", "Réduire tous les dossiers")
             }
           >
             {isAllProjectsCollapsed ? (
@@ -2010,8 +2082,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             )}
             <span>
               {isAllProjectsCollapsed 
-                ? (isJa ? "全フォルダ展開" : "Expand All") 
-                : (isJa ? "全フォルダ折畳" : "Collapse All")
+                ? L("全フォルダ展開", "Expand All", "Tout développer") 
+                : L("全フォルダ折畳", "Collapse All", "Tout réduire")
               }
             </span>
           </button>
@@ -2020,10 +2092,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           <button
             onClick={handleResetColumnWidths}
             className="px-2.5 py-1 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
-            title={isJa ? "プロジェクト、ToDo、フェーズの全列幅を初期値にリセット" : "Reset all column widths to default"}
+            title={L("プロジェクト、ToDo、フェーズの全列幅を初期値にリセット", "Reset all column widths to default", "Réinitialiser la largeur de toutes les colonnes")}
           >
             <ArrowLeftRight size={12} className="text-slate-500 shrink-0" />
-            <span>{isJa ? "列幅リセット" : "Reset Widths"}</span>
+            <span>{L("列幅リセット", "Reset Widths", "Réinitialiser largeurs")}</span>
           </button>
 
           {/* ToDo List (Unscheduled) Column Toggle */}
@@ -2035,10 +2107,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 ? "bg-amber-50 text-amber-800 border-amber-300 font-bold" 
                 : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
             )}
-            title={isJa ? 'ToDo リスト枠（日程未割当）の表示切り替え' : 'Toggle ToDo List (Unscheduled) column'}
+            title={L('ToDo リスト枠（日程未割当）の表示切り替え', 'Toggle ToDo List (Unscheduled) column', 'Afficher/masquer la colonne Liste de tâches')}
           >
             <ListTodo size={13} className={showUnscheduledColumn ? "text-amber-600" : "text-slate-400"} />
-            <span className="hidden md:inline">{isJa ? 'ToDo リスト' : 'ToDo List'}</span>
+            <span className="hidden md:inline">{L('ToDo リスト', 'ToDo List', 'Liste de tâches')}</span>
           </button>
 
           {/* Days Range Selector (Only in Calendar Mode) */}
@@ -2053,7 +2125,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     daysCount === days ? "bg-indigo-600 text-white shadow-2xs font-bold" : "hover:text-slate-900"
                   )}
                 >
-                  {days}{isJa ? '日' : 'd'}
+                  {days}{L('日', 'd', 'j')}
                 </button>
               ))}
             </div>
@@ -2068,10 +2140,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 ? "bg-indigo-50 text-indigo-700 border-indigo-200 font-bold"
                 : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
             )}
-            title={isJa ? (isGridEnabled ? 'グリッドをOFFにする' : 'グリッドをONにする') : (isGridEnabled ? 'Turn Grid OFF' : 'Turn Grid ON')}
+            title={isGridEnabled ? L('グリッドをOFFにする', 'Turn Grid OFF', 'Désactiver la grille') : L('グリッドをONにする', 'Turn Grid ON', 'Activer la grille')}
           >
             <LayoutGrid size={13} className={isGridEnabled ? "text-indigo-600" : "text-slate-400"} />
-            <span className="hidden sm:inline">{isJa ? 'グリッド' : 'Grid'}</span>
+            <span className="hidden sm:inline">{L('グリッド', 'Grid', 'Grille')}</span>
             <span className={cn(
               "text-[9px] px-1 py-0.5 rounded font-mono font-bold uppercase",
               isGridEnabled ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
@@ -2091,7 +2163,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     "px-1.5 py-0.5 rounded transition-all text-[10px]",
                     gridStepHours === hours ? "bg-indigo-600 text-white shadow-2xs font-bold" : "hover:text-slate-900"
                   )}
-                  title={isJa ? `${hours}時間グリッド刻み` : `${hours}h grid granularity`}
+                  title={L(`${hours}時間グリッド刻み`, `${hours}h grid granularity`, `Grille de ${hours}h`)}
                 >
                   {hours}h
                 </button>
@@ -2101,7 +2173,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
           {isGridEnabled && timelineMode === 'custom' && (
             <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-[11px] font-semibold text-slate-600">
-              <span className="px-1 text-[10px] text-slate-400 font-bold">{isJa ? '分割' : 'Steps'}:</span>
+              <span className="px-1 text-[10px] text-slate-400 font-bold">{L('分割', 'Steps', 'Étapes')}:</span>
               {[2, 3, 4, 5].map(subs => (
                 <button
                   key={subs}
@@ -2110,7 +2182,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     "px-1.5 py-0.5 rounded transition-all text-[10px]",
                     stageSubdivisions === subs ? "bg-indigo-600 text-white shadow-2xs font-bold" : "hover:text-slate-900"
                   )}
-                  title={isJa ? `各ステージを${subs}分割` : `${subs} subdivisions per stage`}
+                  title={L(`各ステージを${subs}分割`, `${subs} subdivisions per stage`, `${subs} subdivisions par étape`)}
                 >
                   {subs}
                 </button>
@@ -2159,13 +2231,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             }}
             style={{ width: `${projectColWidth}px` }}
             className={cn(
-              "shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sticky left-0 z-40 transition-colors group/projcol",
+              "shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sticky left-0 z-50 transition-colors group/projcol",
               isDragOverRootHeader && "bg-indigo-100 ring-2 ring-indigo-500 ring-inset"
             )}
-            title={isJa ? "サブプロジェクトをここにドロップすると最上位プロジェクト化できます" : "Drop subproject here to make it a top-level project"}
+            title={L("サブプロジェクトをここにドロップすると最上位プロジェクト化できます", "Drop subproject here to make it a top-level project", "Déposez un sous-projet ici pour en faire un projet racine")}
           >
             <div className="flex items-center gap-1.5 min-w-0 flex-1">
-              <span className="truncate">{isJa ? 'プロジェクトレーン' : 'Project Lanes'}</span>
+              <span className="truncate">{L('プロジェクトレーン', 'Project Lanes', 'Couloirs de projets')}</span>
             </div>
 
             {/* Quick Add Project Folder Button */}
@@ -2178,7 +2250,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 setIsCreateFolderOpen(true);
               }}
               className="p-1 mr-2 text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80 rounded transition-colors"
-              title={isJa ? "プロジェクトフォルダを作成" : "Add Project Folder"}
+              title={L("プロジェクトフォルダを作成", "Add Project Folder", "Ajouter un dossier de projet")}
             >
               <FolderPlus size={13} />
             </button>
@@ -2194,8 +2266,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 e.stopPropagation();
                 handleStartProjectResize(e.touches[0].clientX);
               }}
-              className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-40 flex items-center justify-center group-hover/projcol:bg-slate-300/60"
-              title={isJa ? "ドラッグしてプロジェクト列幅を調整" : "Drag to resize project column width"}
+              className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-50 flex items-center justify-center group-hover/projcol:bg-slate-300/60"
+              title={L("ドラッグしてプロジェクト列幅を調整", "Drag to resize project column width", "Glisser pour ajuster la largeur de la colonne")}
             >
               <div className="w-0.5 h-3.5 bg-slate-400 rounded-full" />
             </div>
@@ -2205,11 +2277,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           {showUnscheduledColumn && (
             <div 
               style={{ width: `${todoColWidth}px` }}
-              className="shrink-0 px-2.5 py-2 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between relative group/todocol"
+              className="shrink-0 px-2.5 py-2 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between relative z-10 group/todocol"
             >
               <span className="flex items-center gap-1.5 font-bold truncate">
                 <ListTodo size={13} className="text-amber-600 shrink-0" />
-                <span className="truncate">{isJa ? 'ToDo リスト' : 'ToDo List'}</span>
+                <span className="truncate">{L('ToDo リスト', 'ToDo List', 'Liste de tâches')}</span>
               </span>
 
               {/* Draggable resize handle on right edge */}
@@ -2223,8 +2295,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   e.stopPropagation();
                   handleStartTodoResize(e.touches[0].clientX);
                 }}
-                className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-amber-500/50 active:bg-amber-600 transition-colors z-40 flex items-center justify-center group-hover/todocol:bg-amber-300/60"
-                title={isJa ? "ドラッグしてToDoリスト列幅を調整" : "Drag to resize ToDo list column width"}
+                className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-amber-500/50 active:bg-amber-600 transition-colors z-20 flex items-center justify-center group-hover/todocol:bg-amber-300/60"
+                title={L("ドラッグしてToDoリスト列幅を調整", "Drag to resize ToDo list column width", "Glisser pour ajuster la largeur de la liste")}
               >
                 <div className="w-0.5 h-3.5 bg-amber-400 rounded-full" />
               </div>
@@ -2321,7 +2393,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                               setEditingColumnLabel(col.label);
                             }}
                             className="text-xs font-bold truncate flex-1 cursor-pointer hover:text-indigo-600"
-                            title={isJa ? "ダブルクリックで名前変更" : "Double-click to rename"}
+                            title={L("ダブルクリックで名前変更", "Double-click to rename", "Double-cliquez pour renommer")}
                           >
                             {col.label}
                           </span>
@@ -2332,7 +2404,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 setEditingColumnLabel(col.label);
                               }}
                               className="p-1 hover:text-indigo-600 hover:bg-slate-200 rounded text-slate-400"
-                              title={isJa ? "列名を変更" : "Rename column"}
+                              title={L("列名を変更", "Rename column", "Renommer la colonne")}
                             >
                               <Edit2 size={11} />
                             </button>
@@ -2340,7 +2412,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                               <button
                                 onClick={() => handleDeleteColumn(col.id)}
                                 className="p-1 hover:text-red-600 hover:bg-red-50 rounded text-slate-400"
-                                title={isJa ? "列を削除" : "Delete column"}
+                                title={L("列を削除", "Delete column", "Supprimer la colonne")}
                               >
                                 <Trash2 size={11} />
                               </button>
@@ -2378,7 +2450,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         handleStartCustomColResize(col.id, e.touches[0].clientX);
                       }}
                       className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-30 flex items-center justify-center group-hover:bg-slate-300/60"
-                      title={isJa ? `ドラッグして「${col.label}」の列幅を調整` : `Drag to resize ${col.label} column width`}
+                      title={L(`ドラッグして「${col.label}」の列幅を調整`, `Drag to resize ${col.label} column width`, `Glisser pour ajuster la largeur de ${col.label}`)}
                     >
                       <div className="w-0.5 h-3.5 bg-slate-400 rounded-full" />
                     </div>
@@ -2390,7 +2462,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 onClick={handleAddColumn}
                 className="w-12 shrink-0 border-r border-slate-200 flex items-center justify-center text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
-                title={isJa ? "新しいPhase列を追加" : "Add new Phase column"}
+                title={L("新しいPhase列を追加", "Add new Phase column", "Ajouter une colonne de phase")}
               >
                 <Plus size={14} />
               </button>
@@ -2469,7 +2541,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     dragOverProjectHeader === project.fullPath && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset",
                     (selectedFolderPath === project.fullPath || selectedKey === `folder:${project.fullPath}` || activeTaskId === `folder:${project.fullPath}`) && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset"
                   )}
-                  title={isJa ? "クリックでフォルダ詳細を開く / ドラッグで移動" : "Click to open folder detail / drag to move"}
+                  title={L("クリックでフォルダ詳細を開く / ドラッグで移動", "Click to open folder detail / drag to move", "Cliquer pour ouvrir les détails / glisser pour déplacer")}
                 >
                   <div 
                     onClick={() => {
@@ -2526,7 +2598,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           startRenaming('folder', project.fullPath, project.name);
                         }}
                         className="text-xs truncate font-mono tracking-tight flex-1 min-w-0" 
-                        title={isJa ? `${project.fullPath} (選択してEnterまたはダブルクリックで名前変更)` : `${project.fullPath} (Select & Enter or double-click to rename)`}
+                        title={L(`${project.fullPath} (選択してEnterまたはダブルクリックで名前変更)`, `${project.fullPath} (Select & Enter or double-click to rename)`, `${project.fullPath} (Entrée ou double-clic pour renommer)`)}
                       >
                         {project.name}
                       </span>
@@ -2535,7 +2607,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     {/* Folder Star, Pin, Deadline icons */}
                     {(() => {
                       const fMeta = folderMetas?.[project.fullPath];
-                      const fDeadlineAlert = fMeta?.deadline ? getTaskDeadlineAlert(fMeta.deadline, false, isJa) : null;
+                      const fDeadlineAlert = fMeta?.deadline ? getTaskDeadlineAlert(fMeta.deadline, false, language) : null;
                       return (
                         <div className="flex items-center gap-1 shrink-0 ml-1" onClick={(e) => e.stopPropagation()}>
                           {/* Star */}
@@ -2547,7 +2619,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 onToggleFolderStar?.(project.fullPath);
                               }}
                               className="text-amber-400 hover:text-amber-500 shrink-0"
-                              title={isJa ? "スター解除" : "Unstar folder"}
+                              title={L("スター解除", "Unstar folder", "Retirer des favoris")}
                             >
                               <Star size={11} fill="currentColor" />
                             </button>
@@ -2559,7 +2631,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 onToggleFolderStar?.(project.fullPath);
                               }}
                               className="text-slate-300 hover:text-amber-400 shrink-0 opacity-0 group-hover/lane:opacity-100 transition-opacity"
-                              title={isJa ? "スターを付ける" : "Star folder"}
+                              title={L("スターを付ける", "Star folder", "Ajouter aux favoris")}
                             >
                               <Star size={11} />
                             </button>
@@ -2574,7 +2646,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 onToggleFolderPin?.(project.fullPath);
                               }}
                               className="text-indigo-500 hover:text-indigo-600 shrink-0"
-                              title={isJa ? "ピン留め解除" : "Unpin folder"}
+                              title={L("ピン留め解除", "Unpin folder", "Désépingler le dossier")}
                             >
                               <Pin size={11} fill="currentColor" />
                             </button>
@@ -2607,19 +2679,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     })()}
                   </div>
 
-                  {/* Subfolder add, rename, and quick task add buttons */}
-                  <div className="flex items-center gap-1 shrink-0 ml-1">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        startRenaming('folder', project.fullPath, project.name);
-                      }}
-                      className="hidden group-hover/lane:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
-                      title={isJa ? 'フォルダ名を変更' : 'Rename folder'}
-                    >
-                      <Edit2 size={11} />
-                    </button>
+                  {/* Subfolder add, quick task add, and 3-dots menu buttons */}
+                  <div className="flex items-center gap-0.5 shrink-0 ml-1">
                     <button
                       type="button"
                       onClick={(e) => {
@@ -2629,7 +2690,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         setIsCreateFolderOpen(true);
                       }}
                       className="hidden group-hover/lane:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
-                      title={isJa ? 'サブフォルダを追加' : 'Add subfolder'}
+                      title={L('サブフォルダを追加', 'Add subfolder', 'Ajouter un sous-dossier')}
                     >
                       <FolderPlus size={12} />
                     </button>
@@ -2637,6 +2698,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (collapsedProjectPaths.has(project.fullPath)) {
+                          toggleProjectCollapse(project.fullPath);
+                        }
+                        if (!showUnscheduledColumn) {
+                          setShowUnscheduledColumn(true);
+                        }
                         setQuickAddCell({ 
                           project: project.fullPath, 
                           slotKey: 'backlog', 
@@ -2645,9 +2712,31 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         setQuickAddTitle('');
                       }}
                       className="hidden sm:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
-                      title={isJa ? 'このプロジェクトにタスク追加' : 'Add task in project'}
+                      title={L('このプロジェクトにタスク追加', 'Add task in project', 'Ajouter une tâche dans ce projet')}
                     >
                       <Plus size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setActiveMenu({
+                          type: 'folder',
+                          idOrPath: project.fullPath,
+                          x: rect.right,
+                          y: rect.bottom
+                        });
+                      }}
+                      className={cn(
+                        "p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-opacity shrink-0",
+                        activeMenu?.type === 'folder' && activeMenu.idOrPath === project.fullPath
+                          ? "opacity-100 bg-slate-200/70 text-slate-800"
+                          : "opacity-70 group-hover/lane:opacity-100"
+                      )}
+                      title={L("フォルダオプション", "Folder options", "Options du dossier")}
+                    >
+                      <MoreHorizontal size={13} />
                     </button>
                   </div>
                 </div>
@@ -2683,7 +2772,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                             <input
                               autoFocus
                               type="text"
-                              placeholder={isJa ? "タスク名..." : "Task name..."}
+                              placeholder={L("タスク名...", "Task name...", "Nom de la tâche...")}
                               value={quickAddTitle}
                               onChange={(e) => setQuickAddTitle(e.target.value)}
                               onKeyDown={(e) => {
@@ -2695,7 +2784,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                               }}
                               onBlur={() => {
                                 if (isSubmittingQuickAddRef.current) return;
-                                if (!quickAddTitle.trim()) setQuickAddCell(null);
+                                if (quickAddTitle.trim()) {
+                                  handleQuickAddSubmit();
+                                } else {
+                                  setQuickAddCell(null);
+                                }
                               }}
                               className="w-full bg-white border border-indigo-300 rounded px-1.5 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
                             />
@@ -2762,7 +2855,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                         isDragOver && "bg-indigo-100 border-2 border-dashed border-indigo-500",
                                         "hover:bg-indigo-50/30"
                                       )}
-                                      title={isJa ? `${format(new Date(slotStartMs), 'M/d HH:mm')} - ダブルクリックでタスク追加` : `${format(new Date(slotStartMs), 'M/d HH:mm')} - Double-click to add task`}
+                                      title={L(`${format(new Date(slotStartMs), 'M/d HH:mm')} - ダブルクリックでタスク追加`, `${format(new Date(slotStartMs), 'M/d HH:mm')} - Double-click to add task`, `${format(new Date(slotStartMs), 'M/d HH:mm')} - Double-cliquez pour ajouter une tâche`)}
                                     />
                                   );
                                 })}
@@ -2806,7 +2899,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                               <input
                                 autoFocus
                                 type="text"
-                                placeholder={isJa ? "タスク名を入力..." : "Task name..."}
+                                placeholder={L("タスク名を入力...", "Task name...", "Nom de la tâche...")}
                                 value={quickAddTitle}
                                 onChange={(e) => setQuickAddTitle(e.target.value)}
                                 onKeyDown={(e) => {
@@ -2818,7 +2911,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 }}
                                 onBlur={() => {
                                   if (isSubmittingQuickAddRef.current) return;
-                                  if (!quickAddTitle.trim()) setQuickAddCell(null);
+                                  if (quickAddTitle.trim()) {
+                                    handleQuickAddSubmit();
+                                  } else {
+                                    setQuickAddCell(null);
+                                  }
                                 }}
                                 className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
                               />
@@ -2879,9 +2976,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                         isDragOver && "bg-indigo-100 border-2 border-dashed border-indigo-500",
                                         "hover:bg-indigo-50/30"
                                       )}
-                                      title={isJa 
-                                        ? `${col.label} (Step ${sIdx + 1}) - ダブルクリックでタスク追加 / ドラッグして配置` 
-                                        : `${col.label} (Step ${sIdx + 1}) - Double-click to add task / Drag to place`}
+                                      title={L(
+                                        `${col.label} (Step ${sIdx + 1}) - ダブルクリックでタスク追加 / ドラッグして配置`, 
+                                        `${col.label} (Step ${sIdx + 1}) - Double-click to add task / Drag to place`,
+                                        `${col.label} (Step ${sIdx + 1}) - Double-clic pour ajouter / Glisser pour placer`
+                                      )}
                                     />
                                   );
                                 })}
@@ -2893,7 +2992,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           <div 
                             onClick={handleAddColumn}
                             className="w-12 shrink-0 border-r border-slate-200/60 bg-slate-50/20 hover:bg-indigo-50/40 cursor-pointer flex items-center justify-center text-slate-300 hover:text-indigo-600 transition-colors h-full"
-                            title={isJa ? "新しいPhase列を追加" : "Add new Phase column"}
+                            title={L("新しいPhase列を追加", "Add new Phase column", "Ajouter une colonne de phase")}
                           >
                             <Plus size={13} />
                           </div>
@@ -2946,7 +3045,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                 <input
                                   autoFocus
                                   type="text"
-                                  placeholder={isJa ? "タスク名を入力..." : "Task name..."}
+                                  placeholder={L("タスク名を入力...", "Task name...", "Nom de la tâche...")}
                                   value={quickAddTitle}
                                   onChange={(e) => setQuickAddTitle(e.target.value)}
                                   onKeyDown={(e) => {
@@ -2958,7 +3057,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                                   }}
                                   onBlur={() => {
                                     if (isSubmittingQuickAddRef.current) return;
-                                    if (!quickAddTitle.trim()) setQuickAddCell(null);
+                                    if (quickAddTitle.trim()) {
+                                      handleQuickAddSubmit();
+                                    } else {
+                                      setQuickAddCell(null);
+                                    }
                                   }}
                                   className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
                                 />
@@ -2973,13 +3076,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   /* Collapsed Placeholder Lane */
                   <div className="flex-1 px-4 py-2 text-xs text-slate-400 italic bg-slate-50/50 flex items-center gap-2">
                     <span>
-                      {totalDescendantTasks} {isJa ? '件のタスクが折りたたまれています' : 'tasks collapsed'}
+                      {totalDescendantTasks} {L('件のタスクが折りたたまれています', 'tasks collapsed', 'tâches réduites')}
                     </span>
                     <button
                       onClick={() => toggleProjectCollapse(project.fullPath)}
                       className="text-[11px] font-sans font-medium text-indigo-600 hover:underline not-italic cursor-pointer"
                     >
-                      {isJa ? '展開する' : 'Expand'}
+                      {L('展開する', 'Expand', 'Développer')}
                     </button>
                   </div>
                 )}
@@ -3010,8 +3113,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <div>
                 <h3 className="text-sm font-bold">
                   {targetParentFolder 
-                    ? (isJa ? 'サブフォルダを作成' : 'New Subfolder') 
-                    : (isJa ? '新規プロジェクトフォルダ' : 'New Project Folder')}
+                    ? L('サブフォルダを作成', 'New Subfolder', 'Nouveau sous-dossier') 
+                    : L('新規プロジェクトフォルダ', 'New Project Folder', 'Nouveau dossier de projet')}
                 </h3>
                 {targetParentFolder && (
                   <p className="text-[11px] text-slate-500 font-mono truncate max-w-[220px]">
@@ -3055,7 +3158,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 type="text"
                 value={newFolderName}
                 onChange={(e) => setNewFolderName(e.target.value)}
-                placeholder={isJa ? "フォルダ名 (例: ProjectA, UI...)" : "Folder name (e.g. ProjectA, UI...)"}
+                placeholder={L("フォルダ名 (例: ProjectA, UI...)", "Folder name (e.g. ProjectA, UI...)", "Nom du dossier (ex: ProjetA, UI...)")}
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
                 onKeyDown={(e) => {
                   e.stopPropagation();
@@ -3077,18 +3180,212 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   }}
                   className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium"
                 >
-                  {isJa ? 'キャンセル' : 'Cancel'}
+                  {L('キャンセル', 'Cancel', 'Annuler')}
                 </button>
                 <button
                   type="submit"
                   disabled={!newFolderName.trim()}
                   className="px-3.5 py-1.5 text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 rounded-lg shadow-xs transition-colors"
                 >
-                  {isJa ? '作成' : 'Create'}
+                  {L('作成', 'Create', 'Créer')}
                 </button>
               </div>
             </form>
           </div>
+        </div>
+      )}
+
+      {/* 3-dots Context Menu Popover for Folder & Task File in Timeline */}
+      {activeMenu && (
+        <div
+          style={{
+            top: `${Math.max(8, Math.min(activeMenu.y + 4, window.innerHeight - 250))}px`,
+            left: `${Math.max(8, Math.min(activeMenu.x - 140, window.innerWidth - 185))}px`
+          }}
+          className="fixed z-50 bg-white border border-slate-200 rounded-lg shadow-xl py-1 min-w-[165px] text-xs font-medium text-slate-700 animate-in fade-in zoom-in-95 duration-100"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {activeMenu.type === 'folder' ? (
+            (() => {
+              const folderPath = activeMenu.idOrPath;
+              const fMeta = folderMetas?.[folderPath];
+              const parts = folderPath.split('/');
+              const folderName = parts[parts.length - 1];
+              return (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => startRenaming('folder', folderPath, folderName)}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <Edit2 size={13} className="text-slate-400 shrink-0" />
+                    <span>{L("名前を変更", "Rename", "Renommer")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (collapsedProjectPaths.has(folderPath)) {
+                        toggleProjectCollapse(folderPath);
+                      }
+                      if (!showUnscheduledColumn) {
+                        setShowUnscheduledColumn(true);
+                      }
+                      setQuickAddCell({
+                        project: folderPath,
+                        slotKey: 'backlog',
+                        type: 'backlog'
+                      });
+                      setQuickAddTitle('');
+                      setActiveMenu(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <FilePlus size={13} className="text-indigo-600 shrink-0" />
+                    <span>{L("新規タスク作成", "New Task", "Nouvelle tâche")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTargetParentFolder(folderPath);
+                      setNewFolderName('');
+                      setIsCreateFolderOpen(true);
+                      setActiveMenu(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <FolderPlus size={13} className="text-amber-500 shrink-0" />
+                    <span>{L("サブフォルダ作成", "New Subfolder", "Nouveau sous-dossier")}</span>
+                  </button>
+                  <div className="h-px bg-slate-100 my-1" />
+                  {onToggleFolderStar && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onToggleFolderStar(folderPath);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Star size={13} className={cn("shrink-0", fMeta?.isStarred ? "text-amber-400 fill-amber-400" : "text-slate-400")} />
+                      <span>{fMeta?.isStarred ? L("スター解除", "Unstar", "Retirer des favoris") : L("スター", "Star", "Favori")}</span>
+                    </button>
+                  )}
+                  {onToggleFolderPin && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onToggleFolderPin(folderPath);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Pin size={13} className={cn("shrink-0", fMeta?.isPinned ? "text-indigo-600 fill-indigo-600" : "text-slate-400")} />
+                      <span>{fMeta?.isPinned ? L("ピン解除", "Unpin", "Désépingler") : L("ピン留め", "Pin", "Épingler")}</span>
+                    </button>
+                  )}
+                  {onDuplicateFolder && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onDuplicateFolder(folderPath);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Copy size={13} className="text-slate-400 shrink-0" />
+                      <span>{L("複製", "Duplicate", "Dupliquer")}</span>
+                    </button>
+                  )}
+                  <div className="h-px bg-slate-100 my-1" />
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteFolderAction(folderPath)}
+                    className="w-full px-3 py-1.5 text-left hover:bg-red-50 text-red-600 flex items-center gap-2"
+                  >
+                    <Trash2 size={13} className="shrink-0" />
+                    <span>{L("削除", "Delete", "Supprimer")}</span>
+                  </button>
+                </>
+              );
+            })()
+          ) : (
+            (() => {
+              const task = tasks.find(t => t.id === activeMenu.idOrPath);
+              if (!task) return null;
+              const isUrgent = task.category === 'Urgent';
+              return (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => startRenaming('task', task.id, task.title)}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <Edit2 size={13} className="text-slate-400 shrink-0" />
+                    <span>{L("名前を変更", "Rename", "Renommer")}</span>
+                  </button>
+                  {onMoveTask && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onMoveTask(task.id, isUrgent ? 'Focus' : 'Urgent');
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Zap size={13} className={cn("shrink-0", isUrgent ? "text-slate-400" : "text-red-500 fill-red-500")} />
+                      <span>{isUrgent ? L("Focus解除", "Remove Focus", "Retirer du Focus") : L("Focusへ移動", "Move to Focus", "Déplacer vers Focus")}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onToggleStar(task.id);
+                      setActiveMenu(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                  >
+                    <Star size={13} className={cn("shrink-0", task.isStarred ? "text-amber-400 fill-amber-400" : "text-slate-400")} />
+                    <span>{task.isStarred ? L("スター解除", "Unstar", "Retirer des favoris") : L("スター", "Star", "Favori")}</span>
+                  </button>
+                  {onTogglePin && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onTogglePin(task.id);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Pin size={13} className={cn("shrink-0", task.isPinned ? "text-indigo-600 fill-indigo-600" : "text-slate-400")} />
+                      <span>{task.isPinned ? L("ピン解除", "Unpin", "Désépingler") : L("ピン留め", "Pin", "Épingler")}</span>
+                    </button>
+                  )}
+                  {onDuplicateTask && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onDuplicateTask(task);
+                        setActiveMenu(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left hover:bg-slate-100 flex items-center gap-2"
+                    >
+                      <Copy size={13} className="text-slate-400 shrink-0" />
+                      <span>{L("複製", "Duplicate", "Dupliquer")}</span>
+                    </button>
+                  )}
+                  <div className="h-px bg-slate-100 my-1" />
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteTaskAction(task.id)}
+                    className="w-full px-3 py-1.5 text-left hover:bg-red-50 text-red-600 flex items-center gap-2"
+                  >
+                    <Trash2 size={13} className="shrink-0" />
+                    <span>{L("削除 (ゴミ箱へ)", "Delete", "Supprimer")}</span>
+                  </button>
+                </>
+              );
+            })()
+          )}
         </div>
       )}
     </div>
@@ -3099,7 +3396,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     const isSelected = activeTaskId === task.id;
     const isUrgent = task.category === 'Urgent';
     const isDragTarget = dragOverTask?.taskId === task.id;
-    const deadlineAlert = getTaskDeadlineAlert(task.deadline, task.isDone, isJa);
+    const deadlineAlert = getTaskDeadlineAlert(task.deadline, task.isDone, language);
 
     return (
       <div
@@ -3166,7 +3463,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             "shrink-0 transition-transform active:scale-95",
             isSelected ? (task.isDone ? "text-emerald-500" : "text-white/80 hover:text-white") : "text-slate-400 hover:text-indigo-600"
           )}
-          title={task.isDone ? (isJa ? "未完了に戻す" : "Mark undone") : (isJa ? "完了にする" : "Mark done")}
+          title={task.isDone ? L("未完了に戻す", "Mark undone", "Marquer non terminé") : L("完了にする", "Mark done", "Marquer terminé")}
         >
           {task.isDone ? (
             <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
@@ -3210,7 +3507,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               "truncate flex-1 text-[11px] leading-tight cursor-text",
               task.isDone && "line-through opacity-75"
             )}
-            title={isJa ? `${task.title} (選択してEnterまたはダブルクリックで名前変更)` : `${task.title} (Select & Enter or double-click to rename)`}
+            title={L(`${task.title} (選択してEnterまたはダブルクリックで名前変更)`, `${task.title} (Select & Enter or double-click to rename)`, `${task.title} (Entrée ou double-clic pour renommer)`)}
           >
             {task.title}
           </span>
@@ -3238,7 +3535,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         {task.recurrence && task.recurrence.type !== 'none' && (
           <span
             className="shrink-0 inline-flex items-center justify-center ml-0.5"
-            title={isJa ? `繰り返し (${task.recurrence.type === 'daily' ? '毎日' : task.recurrence.type === 'every_x_days' ? `${task.recurrence.interval || 1}日ごと` : task.recurrence.type === 'weekly' ? '毎週' : `${task.recurrence.interval || 1}週ごと`})` : `Repeats: ${task.recurrence.type}`}
+            title={L(
+              `繰り返し (${task.recurrence.type === 'daily' ? '毎日' : task.recurrence.type === 'every_x_days' ? `${task.recurrence.interval || 1}日ごと` : task.recurrence.type === 'weekly' ? '毎週' : `${task.recurrence.interval || 1}週ごと`})`,
+              `Repeats: ${task.recurrence.type}`,
+              `Répétition : ${task.recurrence.type === 'daily' ? 'Quotidien' : task.recurrence.type === 'every_x_days' ? `Tous les ${task.recurrence.interval || 1} j` : task.recurrence.type === 'weekly' ? 'Hebdo' : `Toutes les ${task.recurrence.interval || 1} sem`}`
+            )}
           >
             <Repeat
               size={11}
@@ -3252,11 +3553,42 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
         {/* Star */}
         {task.isStarred && (
-          <Star size={10} fill="currentColor" className={isSelected && !task.isDone ? "text-amber-300" : "text-amber-400 shrink-0"} />
+          <Star size={10} fill="currentColor" className={isSelected && !task.isDone ? "text-amber-300 shrink-0" : "text-amber-400 shrink-0"} />
         )}
 
-        {/* Subtle Drag Handle on hover */}
-        <GripVertical size={11} className={cn("shrink-0 opacity-0 group-hover/chip:opacity-60 transition-opacity", isSelected && !task.isDone ? "text-white" : "text-slate-400")} />
+        {/* Pin */}
+        {task.isPinned && (
+          <Pin size={10} fill="currentColor" className={isSelected && !task.isDone ? "text-indigo-200 shrink-0" : "text-indigo-500 shrink-0"} />
+        )}
+
+        {/* 3-dots Menu Button right of task file name */}
+        {!(renamingItem?.type === 'task' && renamingItem.idOrPath === task.id) && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              const rect = e.currentTarget.getBoundingClientRect();
+              setActiveMenu({
+                type: 'task',
+                idOrPath: task.id,
+                x: rect.right,
+                y: rect.bottom
+              });
+            }}
+            className={cn(
+              "p-0.5 rounded transition-opacity shrink-0 ml-auto",
+              isSelected && !task.isDone
+                ? "text-white/85 hover:text-white hover:bg-white/20"
+                : "text-slate-400 hover:text-slate-700 hover:bg-slate-200/70",
+              (activeMenu?.type === 'task' && activeMenu.idOrPath === task.id) || isSelected
+                ? "opacity-100"
+                : "opacity-70 group-hover/chip:opacity-100"
+            )}
+            title={L("タスクオプション", "Task options", "Options de la tâche")}
+          >
+            <MoreHorizontal size={12} />
+          </button>
+        )}
       </div>
     );
   }
