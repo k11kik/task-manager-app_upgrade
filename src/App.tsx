@@ -937,11 +937,21 @@ export default function App() {
         setIsIdbLoaded(true);
         return null;
       }
-      setDirHandle(handle);
-      dirHandleRef.current = handle;
+      let activeHandle = dirHandleRef.current;
+      let isSame = false;
+      if (activeHandle && typeof (activeHandle as any).isSameEntry === 'function') {
+        try {
+          isSame = await (activeHandle as any).isSameEntry(handle);
+        } catch {}
+      }
+      if (!isSame) {
+        setDirHandle(handle);
+        dirHandleRef.current = handle;
+        activeHandle = handle;
+      }
       try {
-        if (typeof (handle as any).queryPermission === 'function') {
-          const perm = await (handle as any).queryPermission({ mode: 'readwrite' });
+        if (typeof (activeHandle as any).queryPermission === 'function') {
+          const perm = await (activeHandle as any).queryPermission({ mode: 'readwrite' });
           setDirPermission(perm);
           dirPermissionRef.current = perm;
         } else {
@@ -953,7 +963,7 @@ export default function App() {
         dirPermissionRef.current = 'prompt';
       }
       setIsIdbLoaded(true);
-      return handle;
+      return activeHandle;
     } catch {
       setIsIdbLoaded(true);
       return null;
@@ -965,7 +975,11 @@ export default function App() {
 
     const handleFocusOrVisibility = () => {
       if (document.visibilityState === 'visible') {
-        refreshDirHandleFromIDB();
+        refreshDirHandleFromIDB().then((h) => {
+          if (h && dirPermissionRef.current === 'granted' && !isWritingLocalRef.current && userRef.current) {
+            verifyDiskBackupSlots(h);
+          }
+        });
         const todaySlot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now());
         nextBackupSlotRef.current = todaySlot;
         setNextBackupSlot(todaySlot);
@@ -1771,6 +1785,53 @@ export default function App() {
           language: data.language || 'en',
           sections: loadedSections
         });
+
+        if (data.localBackupSlots && typeof data.localBackupSlots === 'object') {
+          const remoteSlots = data.localBackupSlots;
+          const mergedSlots: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = {
+            ...backupSlotsRef.current,
+          };
+          let slotsChanged = false;
+          let newestTs = 0;
+          for (const s of [1, 2, 3] as const) {
+            const rSlot = remoteSlots[s] || remoteSlots[String(s)];
+            const lSlot = mergedSlots[s];
+            if (rSlot && rSlot.writtenToDisk && typeof rSlot.timestamp === 'number' && rSlot.timestamp > 0) {
+              if (!lSlot || rSlot.timestamp > lSlot.timestamp || lSlot.taskCount !== rSlot.taskCount) {
+                mergedSlots[s] = {
+                  slot: s,
+                  fileName: rSlot.fileName || `NavFOR_Log_${user.email?.split('@')[0] || 'local'}_${s}.csv`,
+                  timestamp: rSlot.timestamp,
+                  taskCount: typeof rSlot.taskCount === 'number' ? rSlot.taskCount : 0,
+                  signature: rSlot.signature || lSlot?.signature,
+                  writtenToDisk: true,
+                };
+                slotsChanged = true;
+              }
+            }
+            if (mergedSlots[s] && mergedSlots[s]!.timestamp > newestTs) {
+              newestTs = mergedSlots[s]!.timestamp;
+            }
+          }
+          if (slotsChanged) {
+            backupSlotsRef.current = mergedSlots;
+            setBackupSlots(mergedSlots);
+            const resolved = resolveDailyBackupSlot(mergedSlots, Date.now());
+            nextBackupSlotRef.current = resolved;
+            setNextBackupSlot(resolved);
+            try {
+              localStorage.setItem('navfor_local_backup_slots', JSON.stringify(mergedSlots));
+            } catch {}
+          }
+          if (newestTs > 0) {
+            setLastSyncTime(prev => (!prev || newestTs > prev ? newestTs : prev));
+            setLastBackupTime(prev => (!prev || newestTs > prev ? newestTs : prev));
+          }
+        }
+        if (typeof data.lastLocalSyncTime === 'number' && data.lastLocalSyncTime > 0) {
+          setLastSyncTime(prev => (!prev || data.lastLocalSyncTime > prev ? data.lastLocalSyncTime : prev));
+          setLastBackupTime(prev => (!prev || data.lastLocalSyncTime > prev ? data.lastLocalSyncTime : prev));
+        }
         
         // Ensure activeSection is valid
         setActiveSection(prev => {
@@ -3281,7 +3342,53 @@ export default function App() {
         return `${k}:${m?.updatedAt || 0}:${m?.title || ''}:${m?.notes || ''}:${m?.deadline || ''}:${m?.startDate || ''}:${m?.isStarred ? 1 : 0}:${m?.isPinned ? 1 : 0}:${(m?.urls || []).join(',')}`;
       })
       .join('|');
-    return `${taskPart}__${folderPart}`;
+    const raw = `${taskPart}__${folderPart}`;
+    let h1 = 0xdeadbeef ^ raw.length;
+    let h2 = 0x41c6ce57 ^ raw.length;
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return `sig_${(h2 >>> 0).toString(16)}_${(h1 >>> 0).toString(16)}_${raw.length}_${currentTasks.length}`;
+  };
+
+  const syncBackupSlotsToCloud = (
+    slotsMap: Record<1 | 2 | 3, LocalBackupSlotInfo | null>,
+    syncTimestamp: number
+  ) => {
+    const currentUser = userRef.current;
+    if (!currentUser) return;
+    try {
+      const cleanSlots: Record<string, any> = {};
+      for (const s of [1, 2, 3] as const) {
+        const info = slotsMap[s];
+        if (info && info.writtenToDisk) {
+          cleanSlots[String(s)] = {
+            slot: info.slot,
+            fileName: info.fileName,
+            timestamp: info.timestamp,
+            taskCount: info.taskCount,
+            signature: info.signature || '',
+            writtenToDisk: true,
+          };
+        } else {
+          cleanSlots[String(s)] = null;
+        }
+      }
+      setDoc(
+        doc(db, 'settings', currentUser.uid),
+        {
+          userId: currentUser.uid,
+          ...settingsRef.current,
+          localBackupSlots: cleanSlots,
+          lastLocalSyncTime: syncTimestamp,
+        },
+        { merge: true }
+      ).catch(() => {});
+    } catch {}
   };
 
   const recordBackupSlot = (
@@ -3320,14 +3427,23 @@ export default function App() {
       localStorage.setItem('navfor_local_backup_active_date', todayStr);
       localStorage.setItem('navfor_local_backup_active_slot', String(activeSlotForToday));
       localStorage.setItem('navfor_local_backup_next_slot', String(activeSlotForToday));
-      localStorage.setItem(`navfor_local_backup_csv_${slot}`, csvContent);
       localStorage.setItem('trifocus_last_backup', String(now));
     } catch (e) {
-      console.warn('Failed to store backup CSV in localStorage', e);
+      console.warn('Failed to store backup slot metadata in localStorage', e);
     }
+
+    try {
+      localStorage.setItem(`navfor_local_backup_csv_${slot}`, csvContent);
+    } catch {}
 
     setBackupSlots(updated);
     setNextBackupSlot(activeSlotForToday);
+    setLastBackupTime(now);
+    setLastSyncTime(now);
+
+    if (writtenToDisk) {
+      syncBackupSlotsToCloud(updated, now);
+    }
 
     if (backupChannelRef.current) {
       try {
@@ -3341,9 +3457,6 @@ export default function App() {
         });
       } catch {}
     }
-
-    setLastBackupTime(now);
-    setLastSyncTime(now);
   };
 
   const writeCsvToDirHandle = async (
@@ -3369,18 +3482,38 @@ export default function App() {
       return { written: false };
     }
 
-    // Write and overwrite the numbered file (e.g., NavFOR_Log_<user>_1.csv, _2.csv, _3.csv)
-    const fileHandle = await handle.getFileHandle(fileName, { create: true });
-    const writable = await (fileHandle as any).createWritable({ keepExistingData: false });
     const bomCsv = csvContent.startsWith('\uFEFF') ? csvContent : `\uFEFF${csvContent}`;
-    await writable.write(bomCsv);
-    await writable.close();
+    let fileHandle: FileSystemFileHandle | null = null;
+    let lastWriteErr: any = null;
+
+    // Retry up to 3 times in case another tab or OS indexer briefly locked the file
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        fileHandle = await handle.getFileHandle(fileName, { create: true });
+        const writable = await (fileHandle as any).createWritable({ keepExistingData: false });
+        await writable.write(bomCsv);
+        await writable.close();
+        lastWriteErr = null;
+        break;
+      } catch (err) {
+        lastWriteErr = err;
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+        }
+      }
+    }
+
+    if (lastWriteErr) {
+      throw lastWriteErr;
+    }
 
     let diskLastModified = Date.now();
     try {
-      const diskFile = await fileHandle.getFile();
-      if (diskFile && diskFile.lastModified) {
-        diskLastModified = diskFile.lastModified;
+      if (fileHandle) {
+        const diskFile = await fileHandle.getFile();
+        if (diskFile && diskFile.lastModified) {
+          diskLastModified = diskFile.lastModified;
+        }
       }
     } catch {}
 
@@ -3396,40 +3529,96 @@ export default function App() {
 
   // Audit the actual files on disk inside dirHandle so UI timestamps always reflect real OS files
   const verifyDiskBackupSlots = async (handle: FileSystemDirectoryHandle) => {
+    if (isWritingLocalRef.current) return;
     try {
       if (typeof (handle as any).queryPermission === 'function') {
         const perm = await (handle as any).queryPermission({ mode: 'readwrite' });
         if (perm !== 'granted') return;
       }
+      const hasAuthenticatedUser = Boolean(userRef.current?.email);
       const userPart = userRef.current?.email?.split('@')[0] || 'local';
+      const prev = backupSlotsRef.current;
       const diskTimestamps: Record<1 | 2 | 3, { fileName: string; lastModified: number } | null> = {
         1: null,
         2: null,
         3: null,
       };
+      const notFoundSlots: Record<1 | 2 | 3, boolean> = {
+        1: false,
+        2: false,
+        3: false,
+      };
+
       for (const slotNum of [1, 2, 3] as const) {
-        const fName = `NavFOR_Log_${userPart}_${slotNum}.csv`;
-        try {
-          const fh = await handle.getFileHandle(fName, { create: false });
-          const file = await fh.getFile();
-          diskTimestamps[slotNum] = { fileName: fName, lastModified: file.lastModified };
-        } catch {
-          diskTimestamps[slotNum] = null;
+        const candidateNames = Array.from(
+          new Set(
+            [
+              `NavFOR_Log_${userPart}_${slotNum}.csv`,
+              prev[slotNum]?.fileName,
+            ].filter((x): x is string => Boolean(x))
+          )
+        );
+        let found = false;
+        let allNotFound = true;
+        for (const fName of candidateNames) {
+          try {
+            const fh = await handle.getFileHandle(fName, { create: false });
+            const file = await fh.getFile();
+            diskTimestamps[slotNum] = { fileName: fName, lastModified: file.lastModified || Date.now() };
+            found = true;
+            allNotFound = false;
+            break;
+          } catch (err: any) {
+            if (err?.name !== 'NotFoundError') {
+              allNotFound = false;
+            }
+          }
+        }
+        if (!found && allNotFound) {
+          notFoundSlots[slotNum] = true;
         }
       }
 
-      const prev = backupSlotsRef.current;
+      // Fallback directory scan if any slot wasn't matched directly (e.g. before auth finishes or custom email prefix)
+      if ((!diskTimestamps[1] || !diskTimestamps[2] || !diskTimestamps[3]) && typeof (handle as any).values === 'function') {
+        try {
+          for await (const entry of (handle as any).values()) {
+            if (entry && entry.kind === 'file' && typeof entry.name === 'string') {
+              const m = entry.name.match(/^NavFOR_Log_(.+)_([123])\.csv$/i);
+              if (m) {
+                const entryUser = m[1];
+                const slotNum = Number(m[2]) as 1 | 2 | 3;
+                if (!diskTimestamps[slotNum] && (!hasAuthenticatedUser || entryUser === userPart)) {
+                  try {
+                    const file = await entry.getFile();
+                    diskTimestamps[slotNum] = {
+                      fileName: entry.name,
+                      lastModified: file.lastModified || Date.now(),
+                    };
+                    notFoundSlots[slotNum] = false;
+                  } catch {}
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (isWritingLocalRef.current) return;
+
+      const currentPrev = backupSlotsRef.current;
       const next: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
       let latestDiskSlot: LocalBackupSlotInfo | null = null;
+      const now = Date.now();
 
       for (const slotNum of [1, 2, 3] as const) {
         const diskInfo = diskTimestamps[slotNum];
+        const existing = currentPrev[slotNum];
         if (diskInfo) {
-          const existing = prev[slotNum];
           const slotObj: LocalBackupSlotInfo = {
             slot: slotNum,
             fileName: diskInfo.fileName,
-            timestamp: diskInfo.lastModified,
+            timestamp: Math.max(diskInfo.lastModified, existing?.fileName === diskInfo.fileName ? existing.timestamp : 0),
             taskCount: existing?.taskCount ?? tasksRef.current.length,
             signature: existing?.signature,
             writtenToDisk: true,
@@ -3437,6 +3626,16 @@ export default function App() {
           next[slotNum] = slotObj;
           if (!latestDiskSlot || slotObj.timestamp > latestDiskSlot.timestamp) {
             latestDiskSlot = slotObj;
+          }
+        } else if (
+          existing &&
+          existing.writtenToDisk &&
+          (!hasAuthenticatedUser || !notFoundSlots[slotNum] || now - existing.timestamp < 5000)
+        ) {
+          // Preserve existing slot if user auth wasn't ready yet, or if a transient file read lock occurred
+          next[slotNum] = existing;
+          if (!latestDiskSlot || existing.timestamp > latestDiskSlot.timestamp) {
+            latestDiskSlot = existing;
           }
         } else {
           next[slotNum] = null;
@@ -3447,19 +3646,27 @@ export default function App() {
       try {
         localStorage.setItem('navfor_local_backup_slots', JSON.stringify(next));
         if (!latestDiskSlot) {
-          localStorage.removeItem('navfor_local_backup_active_date');
-          localStorage.removeItem('navfor_local_backup_active_slot');
+          if (hasAuthenticatedUser) {
+            localStorage.removeItem('navfor_local_backup_active_date');
+            localStorage.removeItem('navfor_local_backup_active_slot');
+          }
         } else {
           const latestDateStr = format(new Date(latestDiskSlot.timestamp), 'yyyy-MM-dd');
           localStorage.setItem('navfor_local_backup_active_date', latestDateStr);
           localStorage.setItem('navfor_local_backup_active_slot', String(latestDiskSlot.slot));
+          localStorage.setItem('trifocus_last_backup', String(latestDiskSlot.timestamp));
         }
       } catch {}
 
-      if (latestDiskSlot?.signature) {
-        lastWrittenSignatureRef.current = latestDiskSlot.signature;
+      if (latestDiskSlot) {
+        if (latestDiskSlot.signature) {
+          lastWrittenSignatureRef.current = latestDiskSlot.signature;
+        }
         lastWrittenDateRef.current = format(new Date(latestDiskSlot.timestamp), 'yyyy-MM-dd');
-      } else if (!latestDiskSlot) {
+        setLastSyncTime(prevTs => (!prevTs || latestDiskSlot!.timestamp > prevTs ? latestDiskSlot!.timestamp : prevTs));
+        setLastBackupTime(prevTs => (!prevTs || latestDiskSlot!.timestamp > prevTs ? latestDiskSlot!.timestamp : prevTs));
+        syncBackupSlotsToCloud(next, latestDiskSlot.timestamp);
+      } else if (hasAuthenticatedUser) {
         lastWrittenSignatureRef.current = '';
         lastWrittenDateRef.current = '';
       }
@@ -3702,9 +3909,10 @@ export default function App() {
       return;
     }
 
+    const slot: 1 | 2 | 3 = getCurrentNextSlot();
     const signature = getTasksSignature();
     if (!manual && !customName) {
-      if (lastWrittenSignatureRef.current === signature) {
+      if (lastWrittenSignatureRef.current === signature && backupSlotsRef.current[slot] !== null) {
         return;
       }
     }
@@ -3714,7 +3922,6 @@ export default function App() {
     try {
       const csvContent = getCSVData();
       const userPart = userRef.current?.email?.split('@')[0] || 'local';
-      const slot: 1 | 2 | 3 = getCurrentNextSlot();
       const fileName = customName || `NavFOR_Log_${userPart}_${slot}.csv`;
       const now = Date.now();
 
@@ -3734,7 +3941,7 @@ export default function App() {
           }
           return;
         }
-        recordBackupSlot(slot, fileName, csvContent, currentTasks.length, signature, res.lastModified || now, true);
+        recordBackupSlot(slot, fileName, csvContent, currentTasks.length, signature, Math.max(res.lastModified || 0, now), true);
       } else {
         // Fallback only for browsers without showDirectoryPicker support (e.g. mobile/Safari)
         recordBackupSlot(slot, fileName, csvContent, currentTasks.length, signature, now, false);
@@ -3754,6 +3961,12 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Local backup failed", err);
+      // If another tab was writing to the file at the same instant, audit the disk after a short delay to pick up the updated timestamp
+      if (activeHandle) {
+        setTimeout(() => {
+          verifyDiskBackupSlots(activeHandle!);
+        }, 300);
+      }
       if (manual) {
         setMessage({ 
           text: `Local Backup Error: ${err.message}.`,
@@ -3768,30 +3981,47 @@ export default function App() {
         setTimeout(() => {
           syncToLocalSystem(false);
         }, 50);
+      } else if (activeHandle) {
+        // Audit any other existing slot files on disk so all 3 slots stay in sync with OS disk
+        verifyDiskBackupSlots(activeHandle);
       }
     }
   };
 
-  // When dirHandle is ready and permission is granted, audit real files on disk and immediately sync if needed
+  // When dirHandle is ready and permission is granted (and auth has finished loading), audit real files on disk and immediately sync if needed
   useEffect(() => {
-    if (dirHandle && dirPermission === 'granted') {
+    if (!authLoading && dirHandle && dirPermission === 'granted') {
       verifyDiskBackupSlots(dirHandle).then(() => {
         if (isLocalLogConfigured && (tasksLoadedRef.current || tasksRef.current.length > 0)) {
           syncToLocalSystem(false);
         }
       });
     }
-  }, [dirHandle, dirPermission, isLocalLogConfigured]);
+  }, [authLoading, user?.email, dirHandle, dirPermission, isLocalLogConfigured]);
 
-  // Auto-sync effect: immediately saves & overwrites the next numbered file (1 -> 2 -> 3 -> 1) on every task/folder change
+  // Also refresh disk slot timestamps whenever Sync Active popup or Settings view is opened
   useEffect(() => {
-    if (isLocalLogConfigured && (tasksLoadedRef.current || tasks.length > 0)) {
+    if ((showSyncDetails || viewMode === 'settings' || mobileView === 'settings') && !authLoading && dirHandle && dirPermission === 'granted') {
+      verifyDiskBackupSlots(dirHandle).then(() => {
+        const currentSlot = getCurrentNextSlot();
+        if (isLocalLogConfigured && !backupSlotsRef.current[currentSlot] && (tasksLoadedRef.current || tasksRef.current.length > 0)) {
+          syncToLocalSystem(false);
+        }
+      });
+    }
+  }, [showSyncDetails, viewMode, mobileView, authLoading, dirHandle, dirPermission, isLocalLogConfigured]);
+
+  // Auto-sync effect: immediately saves & overwrites today's numbered file on every task/folder change
+  useEffect(() => {
+    if (!authLoading && isLocalLogConfigured && (tasksLoadedRef.current || tasks.length > 0)) {
+      const isForeground = document.visibilityState === 'visible' && (typeof document.hasFocus !== 'function' || document.hasFocus());
+      const delayMs = isForeground ? 150 : 800;
       const timer = setTimeout(() => {
         syncToLocalSystem(false);
-      }, 150); // Fast 150ms debounce so every change is immediately written & overwritten to local disk
+      }, delayMs);
       return () => clearTimeout(timer);
     }
-  }, [tasks, folderMetas, isLocalLogConfigured, dirHandle, dirPermission, isIdbLoaded]);
+  }, [tasks, folderMetas, authLoading, isLocalLogConfigured, dirHandle, dirPermission, isIdbLoaded]);
 
   // Safari/PWA Persistence Request
   useEffect(() => {
