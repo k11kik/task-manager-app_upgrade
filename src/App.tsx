@@ -144,6 +144,57 @@ interface LocalBackupSlotInfo {
   writtenToDisk?: boolean;
 }
 
+function resolveDailyBackupSlot(
+  slotsMap: Record<1 | 2 | 3, LocalBackupSlotInfo | null>,
+  now: number = Date.now()
+): 1 | 2 | 3 {
+  const todayStr = format(new Date(now), 'yyyy-MM-dd');
+  try {
+    const savedActiveDate = localStorage.getItem('navfor_local_backup_active_date');
+    const savedActiveSlot = Number(localStorage.getItem('navfor_local_backup_active_slot'));
+    if (
+      savedActiveDate === todayStr &&
+      (savedActiveSlot === 1 || savedActiveSlot === 2 || savedActiveSlot === 3)
+    ) {
+      const slotOnDisk = slotsMap[savedActiveSlot as 1 | 2 | 3];
+      const anyOnDisk = Boolean(slotsMap[1] || slotsMap[2] || slotsMap[3]);
+      if (slotOnDisk || !anyOnDisk) {
+        return savedActiveSlot as 1 | 2 | 3;
+      }
+    }
+  } catch {}
+
+  let latestSlotInfo: LocalBackupSlotInfo | null = null;
+  for (const s of [1, 2, 3] as const) {
+    const info = slotsMap[s];
+    if (info && info.timestamp > (latestSlotInfo?.timestamp || 0)) {
+      latestSlotInfo = info;
+    }
+  }
+
+  if (latestSlotInfo) {
+    const latestDateStr = format(new Date(latestSlotInfo.timestamp), 'yyyy-MM-dd');
+    if (latestDateStr === todayStr) {
+      return latestSlotInfo.slot;
+    }
+    return ((latestSlotInfo.slot % 3) + 1) as 1 | 2 | 3;
+  }
+
+  try {
+    const savedActiveDate = localStorage.getItem('navfor_local_backup_active_date');
+    const savedActiveSlot = Number(localStorage.getItem('navfor_local_backup_active_slot'));
+    if (
+      savedActiveDate &&
+      savedActiveDate !== todayStr &&
+      (savedActiveSlot === 1 || savedActiveSlot === 2 || savedActiveSlot === 3)
+    ) {
+      return ((savedActiveSlot % 3) + 1) as 1 | 2 | 3;
+    }
+  } catch {}
+
+  return 1;
+}
+
 const IDB_NAME = 'navfor_local_sync_db';
 const IDB_STORE = 'handles';
 const IDB_KEY = 'backup_dir';
@@ -830,15 +881,32 @@ export default function App() {
     } catch {}
     return { 1: null, 2: null, 3: null };
   });
+  const backupSlotsRef = useRef<Record<1 | 2 | 3, LocalBackupSlotInfo | null>>(backupSlots);
+  backupSlotsRef.current = backupSlots;
   const [nextBackupSlot, setNextBackupSlot] = useState<1 | 2 | 3>(() => {
-    try {
-      const saved = Number(localStorage.getItem('navfor_local_backup_next_slot'));
-      if (saved === 1 || saved === 2 || saved === 3) return saved;
-    } catch {}
-    return 1;
+    return resolveDailyBackupSlot(backupSlots, Date.now());
   });
   const nextBackupSlotRef = useRef<1 | 2 | 3>(nextBackupSlot);
-  const lastWrittenSignatureRef = useRef<string>('');
+  const lastWrittenSignatureRef = useRef<string>((() => {
+    let latest: LocalBackupSlotInfo | null = null;
+    for (const s of [1, 2, 3] as const) {
+      const info = backupSlots[s];
+      if (info && info.timestamp > (latest?.timestamp || 0)) {
+        latest = info;
+      }
+    }
+    return latest?.signature || '';
+  })());
+  const lastWrittenDateRef = useRef<string>((() => {
+    let latest: LocalBackupSlotInfo | null = null;
+    for (const s of [1, 2, 3] as const) {
+      const info = backupSlots[s];
+      if (info && info.timestamp > (latest?.timestamp || 0)) {
+        latest = info;
+      }
+    }
+    return latest ? format(new Date(latest.timestamp), 'yyyy-MM-dd') : '';
+  })());
   const isWritingLocalRef = useRef<boolean>(false);
   const pendingSyncAfterWriteRef = useRef<boolean>(false);
   const tasksLoadedRef = useRef<boolean>(false);
@@ -898,24 +966,30 @@ export default function App() {
     const handleFocusOrVisibility = () => {
       if (document.visibilityState === 'visible') {
         refreshDirHandleFromIDB();
+        const todaySlot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now());
+        nextBackupSlotRef.current = todaySlot;
+        setNextBackupSlot(todaySlot);
       }
     };
     const handleStorage = (e: StorageEvent) => {
       if (e.key === 'navfor_local_backup_slots' && e.newValue) {
         try {
           const parsed = JSON.parse(e.newValue);
-          setBackupSlots({
+          const nextSlots: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = {
             1: parsed[1]?.writtenToDisk ? parsed[1] : null,
             2: parsed[2]?.writtenToDisk ? parsed[2] : null,
             3: parsed[3]?.writtenToDisk ? parsed[3] : null,
-          });
+          };
+          backupSlotsRef.current = nextSlots;
+          setBackupSlots(nextSlots);
+          const todaySlot = resolveDailyBackupSlot(nextSlots, Date.now());
+          nextBackupSlotRef.current = todaySlot;
+          setNextBackupSlot(todaySlot);
         } catch {}
-      } else if (e.key === 'navfor_local_backup_next_slot' && e.newValue) {
-        const num = Number(e.newValue);
-        if (num === 1 || num === 2 || num === 3) {
-          nextBackupSlotRef.current = num;
-          setNextBackupSlot(num);
-        }
+      } else if ((e.key === 'navfor_local_backup_next_slot' || e.key === 'navfor_local_backup_active_slot') && e.newValue) {
+        const todaySlot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now());
+        nextBackupSlotRef.current = todaySlot;
+        setNextBackupSlot(todaySlot);
       } else if (e.key === 'trifocus_last_backup' && e.newValue) {
         const ts = Number(e.newValue);
         if (ts > 0) setLastSyncTime(ts);
@@ -949,13 +1023,17 @@ export default function App() {
               dirPermissionRef.current = 'granted';
             }
           } else if (msg.type === 'BACKUP_SLOTS_UPDATED') {
-            if (msg.slots) setBackupSlots(msg.slots);
+            if (msg.slots) {
+              backupSlotsRef.current = msg.slots;
+              setBackupSlots(msg.slots);
+            }
             if (msg.nextSlot) {
               nextBackupSlotRef.current = msg.nextSlot;
               setNextBackupSlot(msg.nextSlot);
             }
             if (msg.lastSyncTime) setLastSyncTime(msg.lastSyncTime);
             if (msg.signature) lastWrittenSignatureRef.current = msg.signature;
+            if (msg.activeDate) lastWrittenDateRef.current = msg.activeDate;
           }
         };
       } catch {}
@@ -3184,14 +3262,9 @@ export default function App() {
   };
 
   const getCurrentNextSlot = (): 1 | 2 | 3 => {
-    try {
-      const saved = Number(localStorage.getItem('navfor_local_backup_next_slot'));
-      if (saved === 1 || saved === 2 || saved === 3) {
-        nextBackupSlotRef.current = saved;
-        return saved;
-      }
-    } catch {}
-    return nextBackupSlotRef.current || 1;
+    const slot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now());
+    nextBackupSlotRef.current = slot;
+    return slot;
   };
 
   const getTasksSignature = () => {
@@ -3220,9 +3293,12 @@ export default function App() {
     now: number,
     writtenToDisk = true
   ) => {
-    const nextSlot = ((slot % 3) + 1) as 1 | 2 | 3;
-    nextBackupSlotRef.current = nextSlot;
+    const todayStr = format(new Date(now), 'yyyy-MM-dd');
+    // Keep saving to the same slot throughout the same calendar day; rotate to the next slot on the next day
+    const activeSlotForToday: 1 | 2 | 3 = slot;
+    nextBackupSlotRef.current = activeSlotForToday;
     lastWrittenSignatureRef.current = signature;
+    lastWrittenDateRef.current = todayStr;
 
     const slotInfo: LocalBackupSlotInfo = {
       slot,
@@ -3233,34 +3309,37 @@ export default function App() {
       writtenToDisk,
     };
 
-    setBackupSlots(prev => {
-      const updated = { ...prev, [slot]: slotInfo };
-      try {
-        localStorage.setItem('navfor_local_backup_slots', JSON.stringify(updated));
-      } catch (e) {
-        console.warn('Failed to save backup slot metadata', e);
-      }
-      if (backupChannelRef.current) {
-        try {
-          backupChannelRef.current.postMessage({
-            type: 'BACKUP_SLOTS_UPDATED',
-            slots: updated,
-            nextSlot,
-            lastSyncTime: now,
-            signature,
-          });
-        } catch {}
-      }
-      return updated;
-    });
+    const updated: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = {
+      ...backupSlotsRef.current,
+      [slot]: slotInfo,
+    };
+    backupSlotsRef.current = updated;
 
-    setNextBackupSlot(nextSlot);
     try {
-      localStorage.setItem('navfor_local_backup_next_slot', String(nextSlot));
+      localStorage.setItem('navfor_local_backup_slots', JSON.stringify(updated));
+      localStorage.setItem('navfor_local_backup_active_date', todayStr);
+      localStorage.setItem('navfor_local_backup_active_slot', String(activeSlotForToday));
+      localStorage.setItem('navfor_local_backup_next_slot', String(activeSlotForToday));
       localStorage.setItem(`navfor_local_backup_csv_${slot}`, csvContent);
       localStorage.setItem('trifocus_last_backup', String(now));
     } catch (e) {
       console.warn('Failed to store backup CSV in localStorage', e);
+    }
+
+    setBackupSlots(updated);
+    setNextBackupSlot(activeSlotForToday);
+
+    if (backupChannelRef.current) {
+      try {
+        backupChannelRef.current.postMessage({
+          type: 'BACKUP_SLOTS_UPDATED',
+          slots: updated,
+          nextSlot: activeSlotForToday,
+          activeDate: todayStr,
+          lastSyncTime: now,
+          signature,
+        });
+      } catch {}
     }
 
     setLastBackupTime(now);
@@ -3339,29 +3418,56 @@ export default function App() {
         }
       }
 
-      setBackupSlots(prev => {
-        const next: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
-        for (const slotNum of [1, 2, 3] as const) {
-          const diskInfo = diskTimestamps[slotNum];
-          if (diskInfo) {
-            const existing = prev[slotNum];
-            next[slotNum] = {
-              slot: slotNum,
-              fileName: diskInfo.fileName,
-              timestamp: diskInfo.lastModified,
-              taskCount: existing?.taskCount ?? tasksRef.current.length,
-              signature: existing?.signature,
-              writtenToDisk: true,
-            };
-          } else {
-            next[slotNum] = null;
+      const prev = backupSlotsRef.current;
+      const next: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
+      let latestDiskSlot: LocalBackupSlotInfo | null = null;
+
+      for (const slotNum of [1, 2, 3] as const) {
+        const diskInfo = diskTimestamps[slotNum];
+        if (diskInfo) {
+          const existing = prev[slotNum];
+          const slotObj: LocalBackupSlotInfo = {
+            slot: slotNum,
+            fileName: diskInfo.fileName,
+            timestamp: diskInfo.lastModified,
+            taskCount: existing?.taskCount ?? tasksRef.current.length,
+            signature: existing?.signature,
+            writtenToDisk: true,
+          };
+          next[slotNum] = slotObj;
+          if (!latestDiskSlot || slotObj.timestamp > latestDiskSlot.timestamp) {
+            latestDiskSlot = slotObj;
           }
+        } else {
+          next[slotNum] = null;
         }
-        try {
-          localStorage.setItem('navfor_local_backup_slots', JSON.stringify(next));
-        } catch {}
-        return next;
-      });
+      }
+
+      backupSlotsRef.current = next;
+      try {
+        localStorage.setItem('navfor_local_backup_slots', JSON.stringify(next));
+        if (!latestDiskSlot) {
+          localStorage.removeItem('navfor_local_backup_active_date');
+          localStorage.removeItem('navfor_local_backup_active_slot');
+        } else {
+          const latestDateStr = format(new Date(latestDiskSlot.timestamp), 'yyyy-MM-dd');
+          localStorage.setItem('navfor_local_backup_active_date', latestDateStr);
+          localStorage.setItem('navfor_local_backup_active_slot', String(latestDiskSlot.slot));
+        }
+      } catch {}
+
+      if (latestDiskSlot?.signature) {
+        lastWrittenSignatureRef.current = latestDiskSlot.signature;
+        lastWrittenDateRef.current = format(new Date(latestDiskSlot.timestamp), 'yyyy-MM-dd');
+      } else if (!latestDiskSlot) {
+        lastWrittenSignatureRef.current = '';
+        lastWrittenDateRef.current = '';
+      }
+
+      const resolvedSlot = resolveDailyBackupSlot(next, Date.now());
+      nextBackupSlotRef.current = resolvedSlot;
+      setBackupSlots(next);
+      setNextBackupSlot(resolvedSlot);
     } catch {}
   };
 
@@ -4112,39 +4218,39 @@ export default function App() {
 
       {/* Header Navigation */}
       <header className={cn(
-        "bg-white border-b border-slate-200 px-4 md:px-6 py-4 flex justify-between items-center shrink-0 relative z-[100]",
+        "bg-white border-b border-slate-200 px-2.5 sm:px-4 xl:px-6 py-2.5 md:py-3.5 flex justify-between items-center gap-2 shrink-0 relative z-[100] max-w-full",
         isEffectiveTimelineFullscreen && "hidden"
       )}>
         {/* Left Side: Logo & Workspace Menu */}
-        <div className="flex items-center gap-4 md:gap-8">
-          <div className="relative">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0 shrink overflow-hidden">
+          <div className="relative min-w-0 max-w-full">
             {user ? (
               <button 
                 onClick={() => setShowSectionMenu(!showSectionMenu)}
-                className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer group"
+                className="flex items-center gap-1.5 sm:gap-2 hover:opacity-80 transition-opacity cursor-pointer group min-w-0 max-w-full"
               >
-                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center transition-transform shadow-lg shadow-indigo-100 group-active:scale-95 overflow-hidden border border-slate-100">
+                <div className="w-7 h-7 sm:w-8 sm:h-8 bg-white rounded-lg flex items-center justify-center transition-transform shadow-lg shadow-indigo-100 group-active:scale-95 overflow-hidden border border-slate-100 shrink-0">
                   <img src={`${(import.meta as any).env?.BASE_URL || '/'}icon-192.png`} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                 </div>
-                <div className="flex flex-col items-start leading-none">
-                  <h1 className="text-sm font-black tracking-tighter text-slate-800 uppercase">
+                <div className="flex flex-col items-start leading-none min-w-0 overflow-hidden">
+                  <h1 className="text-xs sm:text-sm font-black tracking-tighter text-slate-800 uppercase whitespace-nowrap truncate max-w-full">
                     NavFOR <span className="text-indigo-600">v{APP_VERSION}</span>
                   </h1>
-                  <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-0.5">
-                    <span className="truncate max-w-[80px]">{activeSection}</span> <ChevronDown size={10} className={cn("transition-transform", showSectionMenu && "rotate-180")} />
+                  <p className="text-[9px] sm:text-[10px] font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-0.5 min-w-0 max-w-full">
+                    <span className="truncate max-w-[80px] sm:max-w-[110px]">{activeSection}</span> <ChevronDown size={10} className={cn("transition-transform shrink-0", showSectionMenu && "rotate-180")} />
                   </p>
                 </div>
               </button>
             ) : (
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center shadow-lg shadow-indigo-100 overflow-hidden border border-slate-100">
+              <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 max-w-full">
+                <div className="w-7 h-7 sm:w-8 sm:h-8 bg-white rounded-lg flex items-center justify-center shadow-lg shadow-indigo-100 overflow-hidden border border-slate-100 shrink-0">
                   <img src={`${(import.meta as any).env?.BASE_URL || '/'}icon-192.png`} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                 </div>
-                <div className="flex flex-col items-start leading-none">
-                  <h1 className="text-sm font-black tracking-tighter text-slate-800 uppercase">
+                <div className="flex flex-col items-start leading-none min-w-0 overflow-hidden">
+                  <h1 className="text-xs sm:text-sm font-black tracking-tighter text-slate-800 uppercase whitespace-nowrap truncate max-w-full">
                     NavFOR <span className="text-indigo-600">v{APP_VERSION}</span>
                   </h1>
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase tracking-widest truncate">
                     Cloud Workspace
                   </p>
                 </div>
@@ -4240,15 +4346,15 @@ export default function App() {
         </div>
 
         {/* Right Side: Desktop Nav & Tools & User */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-1.5 xl:gap-2 shrink-0">
           {user && (
             <>
-              {/* Desktop Dashboard/Archive/Trash/Settings Buttons */}
-              <nav className="hidden lg:flex items-center gap-1 bg-slate-50 p-1 rounded-xl border border-slate-100 mr-2">
+              {/* Desktop/Tablet Dashboard/Archive/Trash/Settings Buttons */}
+              <nav className="hidden lg:flex items-center gap-0.5 xl:gap-1 bg-slate-50 p-1 rounded-xl border border-slate-100 mr-1 xl:mr-2 shrink-0">
                 <button 
                   onClick={() => setViewMode('dashboard')}
                   className={cn(
-                    "px-4 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-tighter transition-all",
+                    "px-2.5 xl:px-4 py-1.5 rounded-lg text-[10px] xl:text-[11px] font-black uppercase tracking-tighter transition-all whitespace-nowrap",
                     viewMode === 'dashboard' ? "bg-white text-indigo-600 shadow-sm border border-indigo-50" : "text-slate-400 hover:text-slate-600"
                   )}
                 >
@@ -4257,7 +4363,7 @@ export default function App() {
                 <button 
                   onClick={() => setViewMode('calendar')}
                   className={cn(
-                    "px-4 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-tighter transition-all",
+                    "px-2.5 xl:px-4 py-1.5 rounded-lg text-[10px] xl:text-[11px] font-black uppercase tracking-tighter transition-all whitespace-nowrap",
                     viewMode === 'calendar' ? "bg-white text-indigo-600 shadow-sm border border-indigo-50" : "text-slate-400 hover:text-slate-600"
                   )}
                 >
@@ -4266,7 +4372,7 @@ export default function App() {
                 <button 
                   onClick={() => setViewMode('archive')}
                   className={cn(
-                    "px-4 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-tighter transition-all",
+                    "px-2.5 xl:px-4 py-1.5 rounded-lg text-[10px] xl:text-[11px] font-black uppercase tracking-tighter transition-all whitespace-nowrap",
                     viewMode === 'archive' ? "bg-white text-indigo-600 shadow-sm border border-indigo-50" : "text-slate-400 hover:text-slate-600"
                   )}
                 >
@@ -4275,7 +4381,7 @@ export default function App() {
                 <button 
                   onClick={() => setViewMode('trash')}
                   className={cn(
-                    "px-4 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-tighter transition-all",
+                    "px-2.5 xl:px-4 py-1.5 rounded-lg text-[10px] xl:text-[11px] font-black uppercase tracking-tighter transition-all whitespace-nowrap",
                     viewMode === 'trash' ? "bg-white text-red-500 shadow-sm border border-red-50" : "text-slate-400 hover:text-slate-600"
                   )}
                 >
@@ -4284,7 +4390,7 @@ export default function App() {
                 <button 
                   onClick={() => setViewMode('settings')}
                   className={cn(
-                    "px-4 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-tighter transition-all",
+                    "px-2.5 xl:px-4 py-1.5 rounded-lg text-[10px] xl:text-[11px] font-black uppercase tracking-tighter transition-all whitespace-nowrap",
                     viewMode === 'settings' ? "bg-white text-indigo-600 shadow-sm border border-indigo-50" : "text-slate-400 hover:text-slate-600"
                   )}
                 >
@@ -4293,7 +4399,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setIsUserGuideOpen(true)}
-                  className="px-3 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-tighter transition-all text-indigo-600 hover:bg-indigo-50 flex items-center gap-1 cursor-pointer"
+                  className="px-2 xl:px-3 py-1.5 rounded-lg text-[10px] xl:text-[11px] font-black uppercase tracking-tighter transition-all text-indigo-600 hover:bg-indigo-50 flex items-center gap-1 cursor-pointer whitespace-nowrap"
                   title={L('使い方ガイド (README.md) を表示', 'Open User Guide (README.md)', "Ouvrir le guide d'utilisation (README.md)")}
                 >
                   <BookOpen size={13} className="shrink-0" />
@@ -4301,93 +4407,72 @@ export default function App() {
                 </button>
               </nav>
 
-              <div className="flex items-center gap-2 mr-0 md:mr-2">
-                {/* Undo/Redo - Visible on Mobile */}
-                <div className="flex bg-slate-50 border border-slate-100 rounded-xl p-0.5 mr-1 max-sm:scale-90">
+              <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+                {/* Undo/Redo */}
+                <div className="flex bg-slate-50 border border-slate-100 rounded-lg sm:rounded-xl p-0.5 shrink-0">
                   <button 
                     onClick={undo}
                     disabled={history.length === 0 || isUndoing}
                     className={cn(
-                      "p-1.5 rounded-lg transition-all",
+                      "p-1 sm:p-1.5 rounded-md sm:rounded-lg transition-all",
                       history.length > 0 ? "text-indigo-600 hover:bg-white hover:shadow-sm" : "text-slate-300 cursor-not-allowed"
                     )}
                     title="Undo"
                   >
-                    <Undo2 size={14} className={cn(isUndoing && "animate-spin")} />
+                    <Undo2 size={13} className={cn(isUndoing && "animate-spin")} />
                   </button>
                   <button 
                     onClick={redo}
                     disabled={redoStack.length === 0 || isUndoing}
                     className={cn(
-                      "p-1.5 rounded-lg transition-all",
+                      "p-1 sm:p-1.5 rounded-md sm:rounded-lg transition-all",
                       redoStack.length > 0 ? "text-indigo-600 hover:bg-white hover:shadow-sm" : "text-slate-300 cursor-not-allowed"
                     )}
                     title="Redo"
                   >
-                    <Redo2 size={14} />
+                    <Redo2 size={13} />
                   </button>
                 </div>
 
-                {/* Other Desktop-only tools */}
-                <div className="hidden md:flex items-center gap-1">
-                  {/* Project Filter */}
-                <div className="relative">
-                  <button 
-                    onClick={() => setShowProjectFilter(!showProjectFilter)}
-                    className={cn(
-                      "flex items-center gap-1.5 px-3 py-1.5 rounded-xl border transition-all",
-                      selectedProject !== 'All' ? "bg-indigo-100 border-indigo-200 text-indigo-700 shadow-sm" : "bg-slate-50/50 border-slate-100 hover:bg-white text-slate-500"
-                    )}
-                  >
-                    <Filter size={12} />
-                    <span className="text-[10px] font-bold uppercase tracking-tighter">
-                      {selectedProject === 'All' ? t('ProjectFilter') : selectedProject}
-                    </span>
-                  </button>
-                  {showProjectFilter && (
-                    <>
-                      <div className="fixed inset-0 z-[65]" onClick={() => setShowProjectFilter(false)} />
-                      <div className="absolute top-full right-0 mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[70] py-2 overflow-hidden">
-                        <div className="px-4 py-1.5 border-b border-slate-50 mb-1">
-                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest leading-relaxed">{t('FilterByProject')}</p>
-                        </div>
-                        <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
-                          {projects.map(p => (
-                            <button
-                              key={p}
-                              onClick={() => {
-                                setSelectedProject(p);
-                                setShowProjectFilter(false);
-                              }}
-                              className={cn(
-                                "w-full text-left px-4 py-2.5 text-[10px] font-bold transition-all flex items-center justify-between",
-                                selectedProject === p ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50"
-                              )}
-                            >
-                              <span className="truncate">{p}</span>
-                              {selectedProject === p && <CheckCircle2 size={12} />}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
+                {/* Display Mode Toggle (Mobile only) */}
+                <button 
+                  onClick={() => {
+                    const next: 'compact' | 'standard' | 'large' = 
+                      settings.displayMode === 'standard' ? 'large' : 
+                      settings.displayMode === 'large' ? 'compact' : 'standard';
+                    saveSettings({ displayMode: next });
+                  }}
+                  className="md:hidden w-7 h-7 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl flex items-center justify-center bg-white border border-slate-200 text-slate-400 shadow-sm shrink-0"
+                  title={L('表示モード切替', 'Toggle View Mode', 'Changer le mode d\'affichage')}
+                >
+                  {settings.displayMode === 'compact' ? <LayoutList size={14} /> : 
+                   settings.displayMode === 'large' ? <Grid2X2 size={14} /> : <LayoutGrid size={14} />}
+                </button>
 
-                {/* Sync Status / Local Setting Button */}
-                <div className="relative ml-1">
+                {/* User Guide Button (Icon-only on Mobile & Tablet < lg) */}
+                <button
+                  type="button"
+                  onClick={() => setIsUserGuideOpen(true)}
+                  className="lg:hidden w-7 h-7 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl flex items-center justify-center bg-indigo-50 border border-indigo-200 text-indigo-700 shadow-sm cursor-pointer shrink-0"
+                  title={L('使い方ガイド (README.md)', 'User Guide (README.md)', "Guide d'utilisation")}
+                >
+                  <BookOpen size={13} className="text-indigo-600 shrink-0" />
+                </button>
+
+                {/* Sync Status / Local Setting Button (Icon-only on Mobile & Tablet, Icon+Text on xl Desktop) */}
+                <div className="relative shrink-0">
                   {!isLocalLogConfigured ? (
                     <button
                       onClick={jumpToLocalLogSettings}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-amber-50/90 border-amber-200 hover:bg-amber-100/80 text-amber-700 transition-all shadow-sm cursor-pointer"
+                      className="w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border bg-amber-50/90 border-amber-200 hover:bg-amber-100/80 text-amber-700 transition-all shadow-sm cursor-pointer flex items-center justify-center gap-1.5"
                       title={L(
                         'ローカルログ設定が未完了です。クリックして設定画面へ移動します',
                         'Local log is not configured. Click to open Local Log Settings',
                         'Le journal local n\'est pas configuré. Cliquez pour ouvrir les paramètres'
                       )}
                     >
-                      <SettingsIcon size={12} className="text-amber-600 shrink-0" />
-                      <span className="text-[10px] font-bold uppercase tracking-tighter">
+                      <SettingsIcon size={13} className="text-amber-600 shrink-0" />
+                      <span className="hidden xl:inline text-[10px] font-bold uppercase tracking-tighter whitespace-nowrap">
                         {L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
                       </span>
                     </button>
@@ -4400,7 +4485,7 @@ export default function App() {
                           setShowSyncDetails(!showSyncDetails);
                         }
                       }}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-amber-50/90 border-amber-200 hover:bg-amber-100/80 text-amber-700 transition-all shadow-sm cursor-pointer"
+                      className="w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border bg-amber-50/90 border-amber-200 hover:bg-amber-100/80 text-amber-700 transition-all shadow-sm cursor-pointer flex items-center justify-center gap-1.5"
                       title={
                         dirHandle
                           ? L(
@@ -4415,8 +4500,8 @@ export default function App() {
                             )
                       }
                     >
-                      <RefreshCcw size={12} className={cn("text-amber-600 shrink-0", isSyncing && "animate-spin")} />
-                      <span className="text-[10px] font-bold uppercase tracking-tighter">
+                      <RefreshCcw size={13} className={cn("text-amber-600 shrink-0", isSyncing && "animate-spin")} />
+                      <span className="hidden xl:inline text-[10px] font-bold uppercase tracking-tighter whitespace-nowrap">
                         {dirHandle
                           ? L('上書き許可が必要', 'Allow Local Write', 'Autoriser écriture')
                           : L('フォルダ未接続', 'Connect Folder', 'Connecter dossier')}
@@ -4425,18 +4510,16 @@ export default function App() {
                   ) : (
                     <button 
                       onClick={() => setShowSyncDetails(!showSyncDetails)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70 transition-all cursor-pointer"
+                      className="w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70 transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
                       title={L(
-                        'ローカルログ同期が有効です（変更のたび最大3ファイルに自動上書き中）',
-                        'Local log sync is active (auto-overwriting up to 3 backup files on every change)',
-                        'La synchro locale est active (rotation sur 3 fichiers max)'
+                        'ローカルログ同期が有効です（1日ごとに3ファイルでローテーション・同日の変更は同じファイルに上書き保存）',
+                        'Local log sync is active (daily rotation across 3 files; same-day changes overwrite today\'s file)',
+                        'La synchro locale est active (rotation quotidienne sur 3 fichiers)'
                       )}
                     >
-                      <Globe size={12} className={cn(
-                        isSyncing ? "text-indigo-500 animate-spin" : "text-emerald-500"
-                      )} />
-                      <span className="text-[10px] font-bold uppercase tracking-tighter text-emerald-700">
-                        {isSyncing ? t('Syncing') : t('SyncActive')}
+                      <Globe size={13} className="text-emerald-600 shrink-0" />
+                      <span className="hidden xl:inline text-[10px] font-bold uppercase tracking-tighter text-emerald-700 whitespace-nowrap">
+                        {t('SyncActive')}
                       </span>
                     </button>
                   )}
@@ -4444,7 +4527,7 @@ export default function App() {
                   {showSyncDetails && isLocalLogConfigured && (
                     <>
                       <div className="fixed inset-0 z-[55]" onClick={() => setShowSyncDetails(false)} />
-                      <div className="absolute top-full right-0 mt-2 w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] p-4">
+                      <div className="absolute top-full right-0 mt-2 w-80 max-w-[calc(100vw-1.5rem)] bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] p-4">
                         <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
                           <div className="flex items-center gap-2 text-slate-800">
                             <Activity size={13} className={isLocalDiskReady ? "text-emerald-500" : "text-amber-500"} />
@@ -4497,14 +4580,14 @@ export default function App() {
                             )}
                           </div>
 
-                          {/* 3-File Rotating Backup List (1, 2, 3) */}
+                          {/* 3-File Daily Rotating Backup List (1, 2, 3) */}
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between">
                               <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">
-                                {L('ローテーションバックアップ (最大3ファイル)', 'Rotating Backups (Max 3 Files)', 'Sauvegardes rotatives (Max 3)')}
+                                {L('日次ローテーション (最大3ファイル)', 'Daily Rotation (Max 3 Files)', 'Rotation quotidienne (Max 3)')}
                               </span>
                               <span className="text-[8px] font-mono text-indigo-600 font-bold">
-                                {L(`次回: #${nextBackupSlot}`, `Next: #${nextBackupSlot}`, `Suiv: #${nextBackupSlot}`)}
+                                {L(`本日: #${nextBackupSlot}`, `Today: #${nextBackupSlot}`, `Aujourd'hui : #${nextBackupSlot}`)}
                               </span>
                             </div>
                             <div className="space-y-1">
@@ -4573,104 +4656,14 @@ export default function App() {
                   )}
                 </div>
               </div>
-            </div>
-
-            {/* Mobile Tools (Simplified) */}
-              <div className="md:hidden flex items-center gap-2">
-                {/* Project Filter (Mobile) */}
-                <div className="relative">
-                  <button 
-                    onClick={() => setShowProjectFilter(!showProjectFilter)}
-                    className={cn(
-                      "w-9 h-9 rounded-xl flex items-center justify-center border transition-all shadow-sm",
-                      selectedProject !== 'All' ? "bg-indigo-600 border-indigo-700 text-white" : "bg-white border-slate-200 text-slate-400"
-                    )}
-                  >
-                    <Filter size={16} />
-                  </button>
-                  {showProjectFilter && (
-                    <>
-                      <div className="fixed inset-0 z-[65]" onClick={() => setShowProjectFilter(false)} />
-                      <div className="absolute top-full right-0 mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[70] py-2 overflow-hidden">
-                        <div className="px-4 py-1.5 border-b border-slate-50 mb-1">
-                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest leading-relaxed">{t('FilterByProject')}</p>
-                        </div>
-                        <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
-                          {projects.map(p => (
-                            <button
-                              key={p}
-                              onClick={() => {
-                                setSelectedProject(p);
-                                setShowProjectFilter(false);
-                              }}
-                              className={cn(
-                                "w-full text-left px-4 py-2.5 text-[10px] font-bold transition-all flex items-center justify-between",
-                                selectedProject === p ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50"
-                              )}
-                            >
-                              <span className="truncate">{p}</span>
-                              {selectedProject === p && <CheckCircle2 size={12} />}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-
-                <button 
-                  onClick={() => {
-                    const next: 'compact' | 'standard' | 'large' = 
-                      settings.displayMode === 'standard' ? 'large' : 
-                      settings.displayMode === 'large' ? 'compact' : 'standard';
-                    saveSettings({ displayMode: next });
-                  }}
-                  className="w-9 h-9 rounded-xl flex items-center justify-center bg-white border border-slate-200 text-slate-400 shadow-sm"
-                >
-                  {settings.displayMode === 'compact' ? <LayoutList size={16} /> : 
-                   settings.displayMode === 'large' ? <Grid2X2 size={16} /> : <LayoutGrid size={16} />}
-                </button>
-
-                {/* Mobile User Guide Button */}
-                <button
-                  type="button"
-                  onClick={() => setIsUserGuideOpen(true)}
-                  className="h-9 px-2.5 rounded-xl flex items-center gap-1 bg-indigo-50 border border-indigo-200 text-indigo-700 text-[9px] font-bold shadow-sm cursor-pointer"
-                  title={L('使い方ガイド (README.md)', 'User Guide (README.md)', "Guide d'utilisation")}
-                >
-                  <BookOpen size={13} className="text-indigo-600 shrink-0" />
-                  <span>{L('使い方', 'Guide', 'Guide')}</span>
-                </button>
-
-                {/* Mobile Sync Status / Local Setting Button */}
-                {!isLocalLogConfigured ? (
-                  <button
-                    onClick={jumpToLocalLogSettings}
-                    className="h-9 px-2.5 rounded-xl flex items-center gap-1 bg-amber-50 border border-amber-200 text-amber-700 text-[9px] font-bold shadow-sm"
-                    title={L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
-                  >
-                    <SettingsIcon size={13} className="text-amber-600 shrink-0" />
-                    <span className="truncate max-w-[72px]">{L('要ローカル設定', 'Local Setup', 'Config.')}</span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={jumpToLocalLogSettings}
-                    className="h-9 px-2.5 rounded-xl flex items-center gap-1 bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-bold shadow-sm"
-                    title={t('SyncActive')}
-                  >
-                    <Globe size={13} className="text-emerald-600 shrink-0" />
-                    <span className="truncate max-w-[72px]">{t('SyncActive')}</span>
-                  </button>
-                )}
-              </div>
             </>
           )}
 
-          {/* User Profile / LogOut */}
-          <div className="flex items-center gap-2 border-l border-slate-100 pl-4 ml-2">
+          {/* User Profile / LogOut (Icon-only on Mobile & Tablet, text shown only on xl Desktop) */}
+          <div className="flex items-center gap-1 sm:gap-1.5 xl:gap-2 border-l border-slate-100 pl-1.5 sm:pl-2.5 xl:pl-4 ml-0.5 sm:ml-1 shrink-0">
             {user ? (
               <>
-                <div className="text-right flex flex-col items-end leading-none hidden sm:flex">
+                <div className="text-right flex-col items-end leading-none hidden xl:flex">
                   <span className="text-[9px] font-black uppercase tracking-[0.2em] text-indigo-500/50 mb-0.5">
                     {user.isAnonymous ? L('ゲスト (匿名)', 'Guest (Anonymous)', 'Invité (Anonyme)') : t('Authenticated')}
                   </span>
@@ -4678,38 +4671,41 @@ export default function App() {
                     {user.displayName || user.email?.split('@')[0] || L('ゲスト', 'Guest', 'Invité')}
                   </span>
                 </div>
-                <div className="w-9 h-9 rounded-xl overflow-hidden border-2 border-white shadow-xl shadow-indigo-100/50 bg-indigo-50 flex items-center justify-center text-indigo-400 shrink-0">
+                <div
+                  className="w-7 h-7 sm:w-8 sm:h-8 xl:w-9 xl:h-9 rounded-lg sm:rounded-xl overflow-hidden border-2 border-white shadow-xl shadow-indigo-100/50 bg-indigo-50 flex items-center justify-center text-indigo-400 shrink-0"
+                  title={user.displayName || user.email || L('ゲスト', 'Guest', 'Invité')}
+                >
                   {user.photoURL ? (
                     <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                   ) : (
-                    <UserIcon size={18} />
+                    <UserIcon size={15} />
                   )}
                 </div>
                 <button 
                   onClick={logOut}
-                  className="w-9 h-9 md:w-10 md:h-10 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 hover:text-red-500 hover:border-red-100 hover:bg-red-50 transition-all group shrink-0"
+                  className="w-7 h-7 sm:w-8 sm:h-8 xl:w-9 xl:h-9 rounded-lg sm:rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 hover:text-red-500 hover:border-red-100 hover:bg-red-50 transition-all group shrink-0"
                   title={t('LogOut')}
                 >
-                  <LogOut size={16} />
+                  <LogOut size={14} />
                 </button>
               </>
             ) : (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 sm:gap-2">
                 <button
                   type="button"
                   onClick={() => setIsUserGuideOpen(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                  className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-[11px] sm:text-xs font-bold transition-all cursor-pointer"
                   title={L("使い方ガイド (README.md)", "User Guide (README.md)", "Guide d'utilisation")}
                 >
-                  <BookOpen size={14} className="text-indigo-600" />
+                  <BookOpen size={14} className="text-indigo-600 shrink-0" />
                   <span>{L("使い方", "Guide", "Guide")}</span>
                 </button>
                 <button 
                   onClick={() => setIsAuthModalOpen(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                  className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] sm:text-xs font-bold transition-all cursor-pointer"
                   title={L("設定診断 & トラブルシューティング", "Diagnostics & Troubleshooting", "Diagnostic & Dépannage")}
                 >
-                  <ShieldAlert size={14} className="text-indigo-600" />
+                  <ShieldAlert size={14} className="text-indigo-600 shrink-0" />
                   <span className="hidden sm:inline">{L("設定診断", "Diagnostics", "Diagnostic")}</span>
                 </button>
               </div>
@@ -5367,9 +5363,9 @@ export default function App() {
                             </div>
                             <p className="text-xs text-slate-500 mt-0.5">
                               {L(
-                                'タスクやフォルダに変更があるたび、PCの指定フォルダ内のCSVファイル（通し番号 1, 2, 3 の最大3ファイル）を即座に自動保存・上書きします。',
-                                'Automatically saves & overwrites numbered CSV files (1, 2, 3, max 3 files) inside your selected PC folder whenever any change occurs.',
-                                'Enregistre et écrase automatiquement les fichiers CSV numérotés (1, 2, 3, max 3) dans votre dossier PC à chaque modification.'
+                                '1日ごとにファイルを分け、その日の変更は同じCSVファイルに上書き保存、次の日は次の通し番号（1 → 2 → 3 → 1 の3ファイル）へローテーションして保存します。',
+                                'Splits backup logs by day across 3 rotating CSV files (1 → 2 → 3 → 1): all changes on the same day overwrite today\'s file, and the next day saves to the next number.',
+                                'Sépare les journaux de sauvegarde par jour en rotation sur 3 fichiers CSV (1 → 2 → 3 → 1) : les modifications du même jour écrasent le même fichier, et le lendemain passe au numéro suivant.'
                               )}
                             </p>
                           </div>
@@ -5504,10 +5500,10 @@ export default function App() {
                           <div className="pt-3 border-t border-slate-100">
                             <div className="flex items-center justify-between mb-2">
                               <span className="text-[10px] font-black text-slate-500 uppercase tracking-wider">
-                                {L('ローカルフォルダ内のバックアップファイル (最大3ファイル: 1, 2, 3)', 'Local Folder Backup Files (Max 3 Files: 1, 2, 3)', 'Fichiers de sauvegarde locaux (Max 3 : 1, 2, 3)')}
+                                {L('日次ローテーションバックアップ (1日ごと・最大3ファイル: 1, 2, 3)', 'Daily Rotating Backup Files (Per-Day, Max 3 Files: 1, 2, 3)', 'Fichiers de sauvegarde quotidiens (Par jour, Max 3 : 1, 2, 3)')}
                               </span>
                               <span className="text-[10px] font-mono font-bold text-indigo-600">
-                                {L(`次回保存先: #${nextBackupSlot}`, `Next Slot: #${nextBackupSlot}`, `Prochain slot : #${nextBackupSlot}`)}
+                                {L(`本日の保存先: #${nextBackupSlot} (翌日: #${(nextBackupSlot % 3) + 1})`, `Today's File: #${nextBackupSlot} (Next Day: #${(nextBackupSlot % 3) + 1})`, `Fichier du jour : #${nextBackupSlot} (Jour suiv. : #${(nextBackupSlot % 3) + 1})`)}
                               </span>
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">

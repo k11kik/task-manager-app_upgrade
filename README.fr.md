@@ -151,16 +151,16 @@ Cliquer sur une tâche ou un dossier ouvre le volet **Detail** à droite (dispon
 
 ---
 
-## 8. Synchronisation locale (Sauvegarde rotative sur 3 fichiers CSV)
+## 8. Synchronisation locale (Rotation quotidienne sur 3 fichiers CSV)
 
-En complément de la sauvegarde cloud en temps réel (Firebase Firestore), NavFOR propose une **sauvegarde automatique par écrasement rotatif dans un dossier local de votre ordinateur**.
+En complément de la sauvegarde cloud en temps réel (Firebase Firestore), NavFOR propose une **sauvegarde automatique séparée par jour en rotation sur 3 fichiers dans un dossier local de votre ordinateur**.
 
 ### Fonctionnement et configuration
 1. **Sélection du dossier local** :
    - Cliquez sur le bouton `Config. locale requise (Local Setting Needed)` dans l'en-tête (ou via `Settings` > `Local folder log`) et choisissez un dossier sur votre ordinateur.
-2. **Rotation automatique sur 3 fichiers (`#1` → `#2` → `#3`)** :
-   - Une fois activé, le badge vert **`Sync Active`** s'affiche dans l'en-tête.
-   - À chaque ajout, modification, déplacement ou suppression de tâche ou de dossier, NavFOR enregistre automatiquement l'état complet à tour de rôle (`1 → 2 → 3 → 1...`) sur **un maximum de 3 fichiers CSV** :
+2. **Rotation quotidienne sur 3 fichiers (`#1` → `#2` → `#3`)** :
+   - Une fois activé, le badge vert **`Sync Active`** reste affiché de manière fixe dans l'en-tête.
+   - Les sauvegardes sont séparées jour par jour sur **3 fichiers CSV rotatifs** : toutes les modifications effectuées **le même jour** écrasent le fichier du jour, et **le lendemain** NavFOR passe automatiquement au numéro suivant (`1 → 2 → 3 → 1...`) :
      - `NavFOR_Log_<Utilisateur>_1.csv`
      - `NavFOR_Log_<Utilisateur>_2.csv`
      - `NavFOR_Log_<Utilisateur>_3.csv`

@@ -151,16 +151,16 @@ Clicking any task or folder opens the **Detail Pane** on the right side of the s
 
 ---
 
-## 8. Local Log Sync (Rolling 3-File Auto-Overwrite Backup)
+## 8. Local Log Sync (Daily 3-File Rotating Auto-Overwrite Backup)
 
-In addition to real-time cloud persistence (Firebase Firestore), NavFOR supports **automatic local folder CSV backup** using the browser's File System Access API to protect against accidental data loss.
+In addition to real-time cloud persistence (Firebase Firestore), NavFOR supports **automatic daily-rotated local folder CSV backups** using the browser's File System Access API to protect against accidental data loss.
 
 ### How It Works & Setup
 1. **Initial Folder Selection**:
    - Click the `Local Setting Needed` button in the top header (or go to `Settings` > `Local folder log`) and select a local backup directory on your computer.
-2. **3-Generation Rolling Auto-Overwrite (`#1` → `#2` → `#3`)**:
-   - Once linked, the header displays a green **`Sync Active`** badge.
-   - Every time you add, edit, move, or delete a task or folder, NavFOR automatically writes the latest snapshot in a rotating cycle (`1 → 2 → 3 → 1...`) across **up to 3 CSV files** in your selected folder:
+2. **Daily 3-File Rotation (`#1` → `#2` → `#3`)**:
+   - Once linked, the header steadily displays a green **`Sync Active`** badge.
+   - Backups are separated by day across **3 rotating CSV files**: all changes made on the **same day** overwrite that day's numbered file, and on the **next day** NavFOR automatically advances to the next sequential file (`1 → 2 → 3 → 1...`):
      - `NavFOR_Log_<Username>_1.csv`
      - `NavFOR_Log_<Username>_2.csv`
      - `NavFOR_Log_<Username>_3.csv`

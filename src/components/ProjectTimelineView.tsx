@@ -1996,8 +1996,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     >
       {/* Timeline Top Control Toolbar (Hidden in Fullscreen Mode) */}
       {!isFullscreen && (
-      <div className="relative z-40 flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50/90 shrink-0 select-none flex-wrap gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
+      <div className="relative z-40 flex items-center justify-between px-2 sm:px-3 py-1.5 sm:py-2 border-b border-slate-200 bg-slate-50/90 shrink-0 select-none flex-wrap gap-1.5 sm:gap-2 max-w-full">
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap min-w-0 max-w-full">
           <button
             type="button"
             onClick={() => onToggleFullscreen?.()}
@@ -2008,19 +2008,6 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             <span>{L('プロジェクト タイムライン', 'Project Timeline', 'Chronologie des projets')}</span>
           </button>
 
-          {/* Quick Fullscreen Toggle Button next to title */}
-          {onToggleFullscreen && (
-            <button
-              type="button"
-              onClick={onToggleFullscreen}
-              className="px-2 py-1 text-[11px] font-bold rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-all flex items-center gap-1 shadow-2xs cursor-pointer"
-              title={L('タイムラインを全画面で表示 (周辺バーを非表示)', 'Fullscreen Timeline (hide surrounding bars)', 'Chronologie plein écran')}
-            >
-              <Maximize2 size={12} className="text-indigo-600 shrink-0" />
-              <span>{L('全画面', 'Fullscreen', 'Plein écran')}</span>
-            </button>
-          )}
-
           <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block" />
 
           {/* Mode Switcher: Calendar Dates vs Custom Columns */}
@@ -2028,7 +2015,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             <button
               onClick={() => handleSetTimelineMode('calendar')}
               className={cn(
-                "px-2.5 py-1 text-[11px] font-bold rounded-md transition-all flex items-center gap-1",
+                "px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-md transition-all flex items-center gap-1",
                 timelineMode === 'calendar'
                   ? "bg-indigo-600 text-white shadow-2xs"
                   : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -2041,7 +2028,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             <button
               onClick={() => handleSetTimelineMode('custom')}
               className={cn(
-                "px-2.5 py-1 text-[11px] font-bold rounded-md transition-all flex items-center gap-1",
+                "px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-md transition-all flex items-center gap-1",
                 timelineMode === 'custom'
                   ? "bg-indigo-600 text-white shadow-2xs"
                   : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -2065,7 +2052,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               </button>
               <button
                 onClick={() => handleNavigate('today')}
-                className="px-2 py-0.5 text-[11px] font-bold text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                className="px-2 py-0.5 text-[10px] sm:text-[11px] font-bold text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
               >
                 {L('今日', 'Today', "Aujourd'hui")}
               </button>
@@ -2079,11 +2066,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </div>
           ) : (
             /* Custom Columns Controls (Add Column & Reset) */
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               {/* Add Column Button */}
               <button
                 onClick={handleAddColumn}
-                className="px-2 py-1 text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
+                className="px-2 py-1 text-[10px] sm:text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
                 title={L("Phase列を追加", "Add Phase Column", "Ajouter une colonne de phase")}
               >
                 <Plus size={13} />
@@ -2093,7 +2080,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               {/* Reset Custom Phases (Names & Count) Button */}
               <button
                 onClick={handleResetCustomColumns}
-                className="px-2 py-1 text-[11px] font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
+                className="px-2 py-1 text-[10px] sm:text-[11px] font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
                 title={L("列名・列数を初期値（Phase 1〜5）にリセット", "Reset phases configuration (names and count) to default (Phase 1-5)", "Réinitialiser la configuration des phases (Phase 1 à 5)")}
               >
                 <RefreshCw size={12} className="text-slate-500" />
@@ -2110,7 +2097,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         </div>
 
         {/* View Options Right */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap min-w-0 max-w-full">
           {/* Add Project Folder Button */}
           <button
             onClick={() => {
@@ -2118,7 +2105,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               setNewFolderName('');
               setIsCreateFolderOpen(true);
             }}
-            className="px-2.5 py-1 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
+            className="px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs"
             title={L("プロジェクトフォルダを追加", "Add Project Folder", "Ajouter un dossier de projet")}
           >
             <FolderPlus size={13} className="text-indigo-600 shrink-0" />
@@ -2129,7 +2116,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           <button
             onClick={handleToggleCollapseAllProjects}
             className={cn(
-              "px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-all flex items-center gap-1.5 shadow-2xs",
+              "px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-lg border transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs",
               isAllProjectsCollapsed
                 ? "bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100"
                 : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
@@ -2155,7 +2142,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           {/* Reset All Column Widths Button */}
           <button
             onClick={handleResetColumnWidths}
-            className="px-2.5 py-1 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
+            className="px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs"
             title={L("プロジェクト、ToDo、フェーズの全列幅を初期値にリセット", "Reset all column widths to default", "Réinitialiser la largeur de toutes les colonnes")}
           >
             <ArrowLeftRight size={12} className="text-slate-500 shrink-0" />
@@ -2166,7 +2153,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           <button
             onClick={() => setShowUnscheduledColumn(!showUnscheduledColumn)}
             className={cn(
-              "px-2 py-1 text-[11px] font-semibold rounded-lg border transition-colors flex items-center gap-1.5",
+              "px-2 py-1 text-[10px] sm:text-[11px] font-semibold rounded-lg border transition-colors flex items-center gap-1 sm:gap-1.5",
               showUnscheduledColumn 
                 ? "bg-amber-50 text-amber-800 border-amber-300 font-bold" 
                 : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
@@ -2179,13 +2166,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
           {/* Days Range Selector (Only in Calendar Mode) */}
           {timelineMode === 'calendar' && (
-            <div className="flex bg-white border border-slate-200 rounded-lg p-0.5 text-[11px] font-semibold text-slate-600">
+            <div className="flex bg-white border border-slate-200 rounded-lg p-0.5 text-[10px] sm:text-[11px] font-semibold text-slate-600">
               {[7, 14, 21].map(days => (
                 <button
                   key={days}
                   onClick={() => setDaysCount(days)}
                   className={cn(
-                    "px-2 py-0.5 rounded transition-all",
+                    "px-1.5 sm:px-2 py-0.5 rounded transition-all",
                     daysCount === days ? "bg-indigo-600 text-white shadow-2xs font-bold" : "hover:text-slate-900"
                   )}
                 >
@@ -2199,7 +2186,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           <button
             onClick={() => handleToggleGrid(!isGridEnabled)}
             className={cn(
-              "px-2 py-1 text-[11px] font-semibold rounded-lg border transition-all flex items-center gap-1.5 shadow-2xs",
+              "px-2 py-1 text-[10px] sm:text-[11px] font-semibold rounded-lg border transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs",
               isGridEnabled
                 ? "bg-indigo-50 text-indigo-700 border-indigo-200 font-bold"
                 : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
@@ -2207,7 +2194,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             title={isGridEnabled ? L('グリッドをOFFにする', 'Turn Grid OFF', 'Désactiver la grille') : L('グリッドをONにする', 'Turn Grid ON', 'Activer la grille')}
           >
             <LayoutGrid size={13} className={isGridEnabled ? "text-indigo-600" : "text-slate-400"} />
-            <span className="hidden sm:inline">{L('グリッド', 'Grid', 'Grille')}</span>
+            <span>{L('グリッド', 'Grid', 'Grille')}</span>
             <span className={cn(
               "text-[9px] px-1 py-0.5 rounded font-mono font-bold uppercase",
               isGridEnabled ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
@@ -2218,7 +2205,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
           {/* Fine Grid Step Granularity Selector (Dates: 1-24h, Custom: 2-5 steps) */}
           {isGridEnabled && timelineMode === 'calendar' && (
-            <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-[11px] font-semibold text-slate-600">
+            <div className="flex items-center flex-wrap bg-white border border-slate-200 rounded-lg p-0.5 text-[10px] sm:text-[11px] font-semibold text-slate-600 max-w-full">
               {[1, 2, 4, 6, 12, 24].map(hours => (
                 <button
                   key={hours}
@@ -2236,7 +2223,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           )}
 
           {isGridEnabled && timelineMode === 'custom' && (
-            <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-[11px] font-semibold text-slate-600">
+            <div className="flex items-center flex-wrap bg-white border border-slate-200 rounded-lg p-0.5 text-[10px] sm:text-[11px] font-semibold text-slate-600 max-w-full">
               <span className="px-1 text-[10px] text-slate-400 font-bold">{L('分割', 'Steps', 'Étapes')}:</span>
               {[2, 3, 4, 5].map(subs => (
                 <button
