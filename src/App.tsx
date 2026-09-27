@@ -53,7 +53,8 @@ import {
   CalendarDays,
   Lock,
   ShieldAlert,
-  Repeat
+  Repeat,
+  BookOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DragDropContext, Droppable, Draggable as DraggableDnd } from '@hello-pangea/dnd';
@@ -95,6 +96,7 @@ import { TaskDetailPane } from './components/TaskDetailPane';
 import { TaskTabsDetail } from './components/TaskTabsDetail';
 import { FocusHeaderSection } from './components/FocusHeaderSection';
 import { ArchiveTrashExplorerView } from './components/ArchiveTrashExplorerView';
+import { UserGuideModal, useStandaloneReadmeHtmlUrl, downloadReadmeMarkdown, getReadmeFilenameByLang } from './components/UserGuideModal';
 import Papa from 'papaparse';
 import { 
   collection, 
@@ -139,6 +141,7 @@ interface LocalBackupSlotInfo {
   timestamp: number;
   taskCount: number;
   signature?: string;
+  writtenToDisk?: boolean;
 }
 
 const IDB_NAME = 'navfor_local_sync_db';
@@ -248,11 +251,12 @@ async function clearDirHandleFromIDB(): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.10";
+  const APP_VERSION = "3.1.11";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalError, setAuthModalError] = useState<any>(null);
+  const [isUserGuideOpen, setIsUserGuideOpen] = useState(false);
 
   // Ensure legacy local mock/storage keys are completely purged
   useEffect(() => {
@@ -354,11 +358,64 @@ export default function App() {
 
   const [isDetailPaneVisible, setIsDetailPaneVisible] = useState<boolean>(() => {
     try {
+      if (typeof window !== 'undefined' && window.innerWidth < 1024) return false;
       return localStorage.getItem('navfor_detail_visible') !== 'false';
     } catch {
       return true;
     }
   });
+
+  // Detect mobile landscape viewport (width > height on mobile screens with short height)
+  const isMobileLandscapeViewport = () =>
+    typeof window !== 'undefined' &&
+    window.innerWidth > window.innerHeight &&
+    window.innerHeight <= 540;
+
+  const [isTimelineFullscreen, setIsTimelineFullscreen] = useState<boolean>(() => isMobileLandscapeViewport());
+  const wasMobileLandscapeRef = useRef<boolean>(isMobileLandscapeViewport());
+
+  useEffect(() => {
+    if (isMobileLandscapeViewport() && viewMode === 'dashboard') {
+      setMobileView('focus');
+      setIsDetailPaneVisible(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleOrientationOrResize = () => {
+      const nowLandscape = isMobileLandscapeViewport();
+      if (nowLandscape && !wasMobileLandscapeRef.current) {
+        if (viewMode === 'dashboard') {
+          setMobileView('focus');
+          setIsTimelineFullscreen(true);
+          setIsDetailPaneVisible(false);
+        }
+      } else if (!nowLandscape && wasMobileLandscapeRef.current) {
+        setIsTimelineFullscreen(false);
+      }
+      wasMobileLandscapeRef.current = nowLandscape;
+    };
+
+    window.addEventListener('resize', handleOrientationOrResize);
+    window.addEventListener('orientationchange', handleOrientationOrResize);
+    return () => {
+      window.removeEventListener('resize', handleOrientationOrResize);
+      window.removeEventListener('orientationchange', handleOrientationOrResize);
+    };
+  }, [viewMode]);
+
+  const isEffectiveTimelineFullscreen = Boolean(user && viewMode === 'dashboard' && isTimelineFullscreen);
+
+  const handleToggleTimelineFullscreen = () => {
+    setIsTimelineFullscreen(prev => {
+      const next = !prev;
+      if (next) {
+        setMobileView('focus');
+        setIsDetailPaneVisible(false);
+      }
+      return next;
+    });
+  };
 
   const handleMinimizeDetailPane = () => {
     setIsDetailPaneVisible(false);
@@ -753,6 +810,7 @@ export default function App() {
 
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [dirPermission, setDirPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
+  const [isIdbLoaded, setIsIdbLoaded] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(() => {
     const saved = Number(localStorage.getItem('trifocus_last_backup'));
@@ -764,9 +822,9 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         return {
-          1: parsed[1] || null,
-          2: parsed[2] || null,
-          3: parsed[3] || null,
+          1: parsed[1]?.writtenToDisk ? parsed[1] : null,
+          2: parsed[2]?.writtenToDisk ? parsed[2] : null,
+          3: parsed[3]?.writtenToDisk ? parsed[3] : null,
         };
       }
     } catch {}
@@ -782,6 +840,19 @@ export default function App() {
   const nextBackupSlotRef = useRef<1 | 2 | 3>(nextBackupSlot);
   const lastWrittenSignatureRef = useRef<string>('');
   const isWritingLocalRef = useRef<boolean>(false);
+  const pendingSyncAfterWriteRef = useRef<boolean>(false);
+  const tasksLoadedRef = useRef<boolean>(false);
+  const backupChannelRef = useRef<BroadcastChannel | null>(null);
+  const dirHandleRef = useRef<FileSystemDirectoryHandle | null>(dirHandle);
+  const dirPermissionRef = useRef<'granted' | 'prompt' | 'denied'>(dirPermission);
+  const tasksRef = useRef<Task[]>(tasks);
+  const folderMetasRef = useRef<Record<string, FolderMeta>>(folderMetas);
+  const userRef = useRef<User | null>(user);
+  dirHandleRef.current = dirHandle;
+  dirPermissionRef.current = dirPermission;
+  tasksRef.current = tasks;
+  folderMetasRef.current = folderMetas;
+  userRef.current = user;
   const localLogSettingsRef = useRef<HTMLDivElement>(null);
   const [highlightLocalSettings, setHighlightLocalSettings] = useState(false);
   const [showCleanupMenu, setShowCleanupMenu] = useState(false);
@@ -790,54 +861,166 @@ export default function App() {
   const [showTrashMenu, setShowTrashMenu] = useState(false);
   const [showProjectFilter, setShowProjectFilter] = useState(false);
 
-  // Restore saved FileSystemDirectoryHandle from IndexedDB on startup
-  useEffect(() => {
-    let mounted = true;
-    loadDirHandleFromIDB().then(async (handle) => {
-      if (!mounted || !handle) return;
+  // Restore saved FileSystemDirectoryHandle from IndexedDB on startup, focus, and cross-tab events
+  const refreshDirHandleFromIDB = async () => {
+    try {
+      const handle = await loadDirHandleFromIDB();
+      if (!handle) {
+        setIsIdbLoaded(true);
+        return null;
+      }
       setDirHandle(handle);
+      dirHandleRef.current = handle;
       try {
         if (typeof (handle as any).queryPermission === 'function') {
           const perm = await (handle as any).queryPermission({ mode: 'readwrite' });
-          if (mounted) setDirPermission(perm);
+          setDirPermission(perm);
+          dirPermissionRef.current = perm;
         } else {
-          if (mounted) setDirPermission('granted');
+          setDirPermission('granted');
+          dirPermissionRef.current = 'granted';
         }
       } catch {
-        if (mounted) setDirPermission('prompt');
+        setDirPermission('prompt');
+        dirPermissionRef.current = 'prompt';
       }
-    });
+      setIsIdbLoaded(true);
+      return handle;
+    } catch {
+      setIsIdbLoaded(true);
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    refreshDirHandleFromIDB();
+
+    const handleFocusOrVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        refreshDirHandleFromIDB();
+      }
+    };
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'navfor_local_backup_slots' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          setBackupSlots({
+            1: parsed[1]?.writtenToDisk ? parsed[1] : null,
+            2: parsed[2]?.writtenToDisk ? parsed[2] : null,
+            3: parsed[3]?.writtenToDisk ? parsed[3] : null,
+          });
+        } catch {}
+      } else if (e.key === 'navfor_local_backup_next_slot' && e.newValue) {
+        const num = Number(e.newValue);
+        if (num === 1 || num === 2 || num === 3) {
+          nextBackupSlotRef.current = num;
+          setNextBackupSlot(num);
+        }
+      } else if (e.key === 'trifocus_last_backup' && e.newValue) {
+        const ts = Number(e.newValue);
+        if (ts > 0) setLastSyncTime(ts);
+      }
+    };
+
+    window.addEventListener('focus', handleFocusOrVisibility);
+    document.addEventListener('visibilitychange', handleFocusOrVisibility);
+    window.addEventListener('storage', handleStorage);
+
+    let channel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        channel = new BroadcastChannel('navfor_local_backup_channel');
+        backupChannelRef.current = channel;
+        channel.onmessage = async (ev) => {
+          const msg = ev.data;
+          if (!msg) return;
+          if (msg.type === 'DIR_HANDLE_UPDATED' && msg.handle) {
+            const receivedHandle = msg.handle as FileSystemDirectoryHandle;
+            setDirHandle(receivedHandle);
+            dirHandleRef.current = receivedHandle;
+            try {
+              const perm = typeof (receivedHandle as any).queryPermission === 'function'
+                ? await (receivedHandle as any).queryPermission({ mode: 'readwrite' })
+                : 'granted';
+              setDirPermission(perm);
+              dirPermissionRef.current = perm;
+            } catch {
+              setDirPermission('granted');
+              dirPermissionRef.current = 'granted';
+            }
+          } else if (msg.type === 'BACKUP_SLOTS_UPDATED') {
+            if (msg.slots) setBackupSlots(msg.slots);
+            if (msg.nextSlot) {
+              nextBackupSlotRef.current = msg.nextSlot;
+              setNextBackupSlot(msg.nextSlot);
+            }
+            if (msg.lastSyncTime) setLastSyncTime(msg.lastSyncTime);
+            if (msg.signature) lastWrittenSignatureRef.current = msg.signature;
+          }
+        };
+      } catch {}
+    }
+
     return () => {
-      mounted = false;
+      window.removeEventListener('focus', handleFocusOrVisibility);
+      document.removeEventListener('visibilitychange', handleFocusOrVisibility);
+      window.removeEventListener('storage', handleStorage);
+      if (channel) {
+        try { channel.close(); } catch {}
+      }
     };
   }, []);
 
-  // Automatically re-verify write permission on the first user interaction if handle was restored from IndexedDB with 'prompt'
+  // Synchronously request write permission during an active user gesture if handle is in 'prompt' state
+  const requestDirPermissionIfNeeded = () => {
+    const handle = dirHandleRef.current;
+    if (!handle || dirPermissionRef.current === 'granted') return;
+    try {
+      if (typeof (handle as any).requestPermission === 'function') {
+        (handle as any).requestPermission({ mode: 'readwrite' }).then((perm: 'granted' | 'prompt' | 'denied') => {
+          dirPermissionRef.current = perm;
+          setDirPermission(perm);
+        }).catch(() => {});
+      }
+    } catch {}
+  };
+
+  // Automatically re-verify write permission on user interaction if handle was restored from IndexedDB with 'prompt'
   useEffect(() => {
     if (!dirHandle || dirPermission === 'granted') return;
 
     let requesting = false;
-    const handleUserGesture = async () => {
-      if (requesting) return;
+    const handleUserGesture = () => {
+      if (requesting || dirPermissionRef.current === 'granted') return;
+      const currentHandle = dirHandleRef.current;
+      if (!currentHandle) return;
       requesting = true;
       try {
-        if (typeof (dirHandle as any).requestPermission === 'function') {
-          const perm = await (dirHandle as any).requestPermission({ mode: 'readwrite' });
-          setDirPermission(perm);
+        if (typeof (currentHandle as any).requestPermission === 'function') {
+          // Must be invoked synchronously inside the click/keydown handler to preserve transient user activation
+          (currentHandle as any).requestPermission({ mode: 'readwrite' })
+            .then((perm: 'granted' | 'prompt' | 'denied') => {
+              dirPermissionRef.current = perm;
+              setDirPermission(perm);
+            })
+            .catch(() => {})
+            .finally(() => {
+              requesting = false;
+            });
         } else {
+          dirPermissionRef.current = 'granted';
           setDirPermission('granted');
+          requesting = false;
         }
       } catch {
-        // Ignore if gesture was not eligible
-      } finally {
         requesting = false;
       }
     };
 
-    window.addEventListener('pointerdown', handleUserGesture, { once: true, capture: true });
-    window.addEventListener('keydown', handleUserGesture, { once: true, capture: true });
+    window.addEventListener('click', handleUserGesture, { capture: true });
+    window.addEventListener('keydown', handleUserGesture, { capture: true });
     return () => {
-      window.removeEventListener('pointerdown', handleUserGesture, { capture: true } as any);
+      window.removeEventListener('click', handleUserGesture, { capture: true } as any);
       window.removeEventListener('keydown', handleUserGesture, { capture: true } as any);
     };
   }, [dirHandle, dirPermission]);
@@ -868,6 +1051,9 @@ export default function App() {
     language: 'en' as 'en' | 'ja' | 'fr',
     sections: []
   });
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const standaloneReadmeHtmlUrl = useStandaloneReadmeHtmlUrl(settings.language);
 
   function L(jaText: string, enText: string, frText: string): string {
     return tr(settings.language, jaText, enText, frText);
@@ -1447,6 +1633,7 @@ export default function App() {
   };
 
   const isLocalLogConfigured = Boolean(settings.isLocalBackupEnabled && settings.localBackupPath);
+  const isLocalDiskReady = Boolean(isLocalLogConfigured && dirHandle && dirPermission === 'granted');
 
   const jumpToLocalLogSettings = () => {
     setShowSyncDetails(false);
@@ -1558,6 +1745,8 @@ export default function App() {
           taskList.push({ id: doc.id, ...data } as Task);
         }
       });
+      tasksLoadedRef.current = true;
+      tasksRef.current = taskList;
       setTasks(taskList);
     }, (err) => {
       console.warn("Tasks listener notice:", err.message);
@@ -1577,6 +1766,7 @@ export default function App() {
           } as FolderMeta;
         }
       });
+      folderMetasRef.current = metasMap;
       setFolderMetas(metasMap);
     }, (err) => {
       console.warn("Folders listener notice:", err.message);
@@ -2859,24 +3049,35 @@ export default function App() {
   };
 
   const getCSVData = () => {
-    const headers = ['ID', 'Category', 'Workspace', 'Project', 'Title', 'Notes', 'URLs', 'IsDone', 'IsStarred', 'Deadline', 'CreatedAt', 'UpdatedAt', 'UserID'];
-    const rows = tasks.map(t => [
+    const currentTasks = tasksRef.current;
+    const currentSettings = settingsRef.current;
+    const headers = [
+      'ID', 'Category', 'Workspace', 'Project', 'Title', 'Notes', 'URLs',
+      'IsDone', 'IsStarred', 'IsPinned', 'StartDate', 'Deadline',
+      'TimelineColumn', 'TimelineStep', 'Recurrence', 'CreatedAt', 'UpdatedAt', 'UserID'
+    ];
+    const rows = currentTasks.map(t => [
       t.id,
       t.category,
-      t.section || settings.sections[0] || 'General',
+      t.section || currentSettings.sections[0] || 'General',
       t.project,
       t.title,
       t.notes || '',
       (t.urls || []).join('; '),
       t.isDone ? 'Yes' : 'No',
       t.isStarred ? 'Yes' : 'No',
+      t.isPinned ? 'Yes' : 'No',
+      t.startDate ? new Date(t.startDate).toISOString() : '',
       t.deadline ? new Date(t.deadline).toISOString() : '',
+      t.timelineColumn || '',
+      t.timelineStep !== undefined && t.timelineStep !== null ? String(t.timelineStep) : '',
+      t.recurrence || '',
       new Date(t.createdAt).toISOString(),
       new Date(t.updatedAt).toISOString(),
       t.userId || 'N/A'
     ]);
 
-    const quote = (val: string) => `"${val.toString().replace(/"/g, '""')}"`;
+    const quote = (val: string) => `"${(val ?? '').toString().replace(/"/g, '""')}"`;
 
     return [
       headers.map(quote).join(','),
@@ -2994,15 +3195,17 @@ export default function App() {
   };
 
   const getTasksSignature = () => {
-    const taskPart = tasks
-      .map(t => `${t.id}:${t.updatedAt || 0}:${t.isDone ? 1 : 0}:${t.isStarred ? 1 : 0}:${t.isPinned ? 1 : 0}:${t.category}:${t.section || ''}:${t.project}:${t.title}:${t.notes || ''}:${(t.urls || []).join(',')}:${t.deadline || ''}:${t.startDate || ''}:${t.timelineColumn || ''}:${t.timelineStep ?? ''}`)
+    const currentTasks = tasksRef.current;
+    const currentFolderMetas = folderMetasRef.current;
+    const taskPart = currentTasks
+      .map(t => `${t.id}:${t.updatedAt || 0}:${t.isDone ? 1 : 0}:${t.isStarred ? 1 : 0}:${t.isPinned ? 1 : 0}:${t.category}:${t.section || ''}:${t.project}:${t.title}:${t.notes || ''}:${(t.urls || []).join(',')}:${t.deadline || ''}:${t.startDate || ''}:${t.timelineColumn || ''}:${t.timelineStep ?? ''}:${t.recurrence || ''}`)
       .sort()
       .join('|');
-    const folderPart = Object.keys(folderMetas)
+    const folderPart = Object.keys(currentFolderMetas)
       .sort()
       .map(k => {
-        const m = folderMetas[k];
-        return `${k}:${m?.updatedAt || 0}:${m?.notes || ''}:${m?.deadline || ''}:${m?.isStarred ? 1 : 0}:${m?.isPinned ? 1 : 0}`;
+        const m = currentFolderMetas[k];
+        return `${k}:${m?.updatedAt || 0}:${m?.title || ''}:${m?.notes || ''}:${m?.deadline || ''}:${m?.startDate || ''}:${m?.isStarred ? 1 : 0}:${m?.isPinned ? 1 : 0}:${(m?.urls || []).join(',')}`;
       })
       .join('|');
     return `${taskPart}__${folderPart}`;
@@ -3014,7 +3217,8 @@ export default function App() {
     csvContent: string,
     taskCount: number,
     signature: string,
-    now: number
+    now: number,
+    writtenToDisk = true
   ) => {
     const nextSlot = ((slot % 3) + 1) as 1 | 2 | 3;
     nextBackupSlotRef.current = nextSlot;
@@ -3026,6 +3230,7 @@ export default function App() {
       timestamp: now,
       taskCount,
       signature,
+      writtenToDisk,
     };
 
     setBackupSlots(prev => {
@@ -3034,6 +3239,17 @@ export default function App() {
         localStorage.setItem('navfor_local_backup_slots', JSON.stringify(updated));
       } catch (e) {
         console.warn('Failed to save backup slot metadata', e);
+      }
+      if (backupChannelRef.current) {
+        try {
+          backupChannelRef.current.postMessage({
+            type: 'BACKUP_SLOTS_UPDATED',
+            slots: updated,
+            nextSlot,
+            lastSyncTime: now,
+            signature,
+          });
+        } catch {}
       }
       return updated;
     });
@@ -3056,7 +3272,7 @@ export default function App() {
     fileName: string,
     csvContent: string,
     userPart: string
-  ): Promise<boolean> => {
+  ): Promise<{ written: boolean; lastModified?: number }> => {
     let perm: 'granted' | 'prompt' | 'denied' = 'granted';
     if (typeof (handle as any).queryPermission === 'function') {
       perm = await (handle as any).queryPermission({ mode: 'readwrite' });
@@ -3068,16 +3284,26 @@ export default function App() {
         }
       }
     }
+    dirPermissionRef.current = perm;
     setDirPermission(perm);
     if (perm !== 'granted') {
-      return false;
+      return { written: false };
     }
 
     // Write and overwrite the numbered file (e.g., NavFOR_Log_<user>_1.csv, _2.csv, _3.csv)
     const fileHandle = await handle.getFileHandle(fileName, { create: true });
     const writable = await (fileHandle as any).createWritable({ keepExistingData: false });
-    await writable.write(csvContent);
+    const bomCsv = csvContent.startsWith('\uFEFF') ? csvContent : `\uFEFF${csvContent}`;
+    await writable.write(bomCsv);
     await writable.close();
+
+    let diskLastModified = Date.now();
+    try {
+      const diskFile = await fileHandle.getFile();
+      if (diskFile && diskFile.lastModified) {
+        diskLastModified = diskFile.lastModified;
+      }
+    } catch {}
 
     // Remove legacy unnumbered file if present so only the max 3 numbered files remain
     try {
@@ -3086,7 +3312,57 @@ export default function App() {
       }
     } catch {}
 
-    return true;
+    return { written: true, lastModified: diskLastModified };
+  };
+
+  // Audit the actual files on disk inside dirHandle so UI timestamps always reflect real OS files
+  const verifyDiskBackupSlots = async (handle: FileSystemDirectoryHandle) => {
+    try {
+      if (typeof (handle as any).queryPermission === 'function') {
+        const perm = await (handle as any).queryPermission({ mode: 'readwrite' });
+        if (perm !== 'granted') return;
+      }
+      const userPart = userRef.current?.email?.split('@')[0] || 'local';
+      const diskTimestamps: Record<1 | 2 | 3, { fileName: string; lastModified: number } | null> = {
+        1: null,
+        2: null,
+        3: null,
+      };
+      for (const slotNum of [1, 2, 3] as const) {
+        const fName = `NavFOR_Log_${userPart}_${slotNum}.csv`;
+        try {
+          const fh = await handle.getFileHandle(fName, { create: false });
+          const file = await fh.getFile();
+          diskTimestamps[slotNum] = { fileName: fName, lastModified: file.lastModified };
+        } catch {
+          diskTimestamps[slotNum] = null;
+        }
+      }
+
+      setBackupSlots(prev => {
+        const next: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
+        for (const slotNum of [1, 2, 3] as const) {
+          const diskInfo = diskTimestamps[slotNum];
+          if (diskInfo) {
+            const existing = prev[slotNum];
+            next[slotNum] = {
+              slot: slotNum,
+              fileName: diskInfo.fileName,
+              timestamp: diskInfo.lastModified,
+              taskCount: existing?.taskCount ?? tasksRef.current.length,
+              signature: existing?.signature,
+              writtenToDisk: true,
+            };
+          } else {
+            next[slotNum] = null;
+          }
+        }
+        try {
+          localStorage.setItem('navfor_local_backup_slots', JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    } catch {}
   };
 
   const downloadBackupSlot = (slot: 1 | 2 | 3) => {
@@ -3117,10 +3393,11 @@ export default function App() {
     const signature = getTasksSignature();
 
     try {
-      if (dirHandle) {
-        const written = await writeCsvToDirHandle(dirHandle, fileName, csv, userPart);
-        if (written) {
-          recordBackupSlot(slot, fileName, csv, tasks.length, signature, now);
+      const activeHandle = dirHandleRef.current;
+      if (activeHandle) {
+        const res = await writeCsvToDirHandle(activeHandle, fileName, csv, userPart);
+        if (res.written) {
+          recordBackupSlot(slot, fileName, csv, tasksRef.current.length, signature, res.lastModified || now, true);
           setMessage({
             text: L(
               `ローカルフォルダに ${fileName} を保存・上書きしました。`,
@@ -3201,26 +3478,38 @@ export default function App() {
       const handle = await window.showDirectoryPicker({
         mode: 'readwrite'
       });
+      dirHandleRef.current = handle;
+      dirPermissionRef.current = 'granted';
       setDirHandle(handle);
       setDirPermission('granted');
       await saveDirHandleToIDB(handle);
+      if (backupChannelRef.current) {
+        try {
+          backupChannelRef.current.postMessage({ type: 'DIR_HANDLE_UPDATED', handle });
+        } catch {}
+      }
       
       await saveSettings({ 
         localBackupPath: handle.name, 
         isLocalBackupEnabled: true 
       });
 
+      // Verify existing numbered files in the folder first
+      await verifyDiskBackupSlots(handle);
+
       // Immediately write/overwrite initial numbered backup in the selected folder
       const csvContent = getCSVData();
-      const userPart = user?.email?.split('@')[0] || 'local';
+      const userPart = userRef.current?.email?.split('@')[0] || 'local';
       const slot: 1 | 2 | 3 = getCurrentNextSlot();
       const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
       const now = Date.now();
-      await writeCsvToDirHandle(handle, fileName, csvContent, userPart);
-      recordBackupSlot(slot, fileName, csvContent, tasks.length, getTasksSignature(), now);
+      const res = await writeCsvToDirHandle(handle, fileName, csvContent, userPart);
+      if (res.written) {
+        recordBackupSlot(slot, fileName, csvContent, tasksRef.current.length, getTasksSignature(), res.lastModified || now, true);
+      }
       setMessage({
         text: L(
-          `保存先フォルダ「${handle.name}」を設定し、${fileName} をローカルに保存しました。`,
+          `保存先フォルダ「${handle.name}」を設定し、${fileName} をローカルに保存・上書きしました。`,
           `Configured folder "${handle.name}" and saved ${fileName} locally.`,
           `Dossier « ${handle.name} » configuré et ${fileName} enregistré.`
         ),
@@ -3228,23 +3517,13 @@ export default function App() {
       });
     } catch (err: any) {
       if (err.name === 'SecurityError' || err.message?.includes('Cross origin sub frames')) {
-        const fallbackPath = settings.localBackupPath || 'Local_Log_Storage (Max 3)';
-        await saveSettings({
-          localBackupPath: fallbackPath,
-          isLocalBackupEnabled: true
-        });
-        const csvContent = getCSVData();
-        const userPart = user?.email?.split('@')[0] || 'local';
-        const slot: 1 | 2 | 3 = getCurrentNextSlot();
-        const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
-        recordBackupSlot(slot, fileName, csvContent, tasks.length, getTasksSignature(), Date.now());
         setMessage({ 
           text: L(
-            'プレビュー画面の制限によりブラウザ内バックアップを有効化しました。PCフォルダへ直接ファイル保存・上書きする場合は「新しいタブで開く」をご利用ください。',
-            'Enabled browser local backup. To directly write & overwrite files in your PC folder, please open in a new tab.',
-            'Sauvegarde navigateur activée. Ouvrez dans un nouvel onglet pour écrire directement dans votre dossier PC.'
+            'プレビュー枠内ではブラウザの制限によりPCフォルダ選択ダイアログを開けません。右上の「新しいタブで開く (↗)」から一度フォルダを選択すると、以降すべての変更がローカルファイルに自動上書きされます。',
+            'Browser security restricts opening the folder picker inside a preview frame. Please click "Open in New Tab (↗)" once to select your PC folder.',
+            'Veuillez ouvrir l\'application dans un nouvel onglet (↗) pour sélectionner votre dossier local.'
           ),
-          type: 'info'
+          type: 'error'
         });
       } else if (err.name !== 'AbortError') {
         setMessage({ text: `Folder selection failed: ${err.message}`, type: 'error' });
@@ -3252,51 +3531,95 @@ export default function App() {
     }
   };
 
+  const authorizeLocalFolderNow = async () => {
+    const currentHandle = dirHandleRef.current || (await refreshDirHandleFromIDB());
+    if (!currentHandle) {
+      await selectBackupFolder();
+      return;
+    }
+    try {
+      let perm: 'granted' | 'prompt' | 'denied' = 'granted';
+      if (typeof (currentHandle as any).requestPermission === 'function') {
+        perm = await (currentHandle as any).requestPermission({ mode: 'readwrite' });
+      }
+      dirPermissionRef.current = perm;
+      setDirPermission(perm);
+      if (perm === 'granted') {
+        await verifyDiskBackupSlots(currentHandle);
+        lastWrittenSignatureRef.current = '';
+        await syncToLocalSystem(true);
+      } else {
+        setMessage({
+          text: L(
+            'ローカルフォルダへの書き込み許可が拒否されました。もう一度クリックして許可してください。',
+            'Write permission was not granted. Please click again and allow access.',
+            'Autorisation d\'écriture refusée. Veuillez réessayer.'
+          ),
+          type: 'error'
+        });
+      }
+    } catch (err: any) {
+      await selectBackupFolder();
+    }
+  };
+
   const syncToLocalSystem = async (manual = false, customName?: string) => {
-    const configured = Boolean(settings.isLocalBackupEnabled && settings.localBackupPath);
-    if ((!configured && !manual) || (tasks.length === 0 && !manual)) {
+    const currentSettings = settingsRef.current;
+    const currentTasks = tasksRef.current;
+    const configured = Boolean(currentSettings.isLocalBackupEnabled && currentSettings.localBackupPath);
+    if ((!configured && !manual) || (!tasksLoadedRef.current && currentTasks.length === 0 && !manual)) {
       return;
     }
 
+    let activeHandle = dirHandleRef.current;
+    if (!activeHandle) {
+      activeHandle = await refreshDirHandleFromIDB();
+    }
+
     // If user clicked manual sync in a top-level browser window and dirHandle is not yet bound, prompt folder picker
-    if (manual && !dirHandle && window.showDirectoryPicker && window.self === window.top) {
+    if (manual && !activeHandle && window.showDirectoryPicker && window.self === window.top) {
       await selectBackupFolder();
+      return;
+    }
+
+    // If a local folder handle is required (browser supports File System Access API) and we don't have one yet,
+    // do NOT fake-update the timestamps in Settings!
+    if (!activeHandle && typeof window.showDirectoryPicker === 'function') {
+      if (manual) {
+        await selectBackupFolder();
+      }
+      return;
+    }
+
+    if (isWritingLocalRef.current) {
+      pendingSyncAfterWriteRef.current = true;
       return;
     }
 
     const signature = getTasksSignature();
     if (!manual && !customName) {
-      // Skip only if we have already written this exact task state during this session (or to the latest slot when no dirHandle is needed)
       if (lastWrittenSignatureRef.current === signature) {
         return;
       }
-      if (!dirHandle) {
-        const existingSlots = ([backupSlots[1], backupSlots[2], backupSlots[3]].filter(Boolean) as LocalBackupSlotInfo[])
-          .sort((a, b) => b.timestamp - a.timestamp);
-        if (existingSlots.length > 0 && existingSlots[0].signature === signature) {
-          return;
-        }
-      }
     }
 
-    if (isWritingLocalRef.current) return;
     isWritingLocalRef.current = true;
     setIsSyncing(true);
     try {
       const csvContent = getCSVData();
-      const userPart = user?.email?.split('@')[0] || 'local';
+      const userPart = userRef.current?.email?.split('@')[0] || 'local';
       const slot: 1 | 2 | 3 = getCurrentNextSlot();
       const fileName = customName || `NavFOR_Log_${userPart}_${slot}.csv`;
       const now = Date.now();
 
-      if (dirHandle) {
-        const written = await writeCsvToDirHandle(dirHandle, fileName, csvContent, userPart);
-        if (!written) {
-          // Permission is still 'prompt' (waiting for user gesture); do not advance slot yet
+      if (activeHandle) {
+        const res = await writeCsvToDirHandle(activeHandle, fileName, csvContent, userPart);
+        if (!res.written) {
+          // Permission is still 'prompt' (waiting for user gesture); do not advance slot or fake timestamp!
           if (manual) {
             setMessage({
               text: L(
-                'ローカルフォルダへの書き込み許可が必要です。もう一度クリックしてください。',
+                'ローカルフォルダへの書き込み許可が必要です。もう一度クリックして許可してください。',
                 'Write permission is needed for the local folder. Please click again to allow.',
                 'Autorisation d\'écriture requise pour le dossier local.'
               ),
@@ -3305,10 +3628,10 @@ export default function App() {
           }
           return;
         }
-        recordBackupSlot(slot, fileName, csvContent, tasks.length, signature, now);
+        recordBackupSlot(slot, fileName, csvContent, currentTasks.length, signature, res.lastModified || now, true);
       } else {
-        // When in iframe or Safari without FileSystemDirectoryHandle, still record into the 3-slot browser backup
-        recordBackupSlot(slot, fileName, csvContent, tasks.length, signature, now);
+        // Fallback only for browsers without showDirectoryPicker support (e.g. mobile/Safari)
+        recordBackupSlot(slot, fileName, csvContent, currentTasks.length, signature, now, false);
       }
 
       if (manual) {
@@ -3316,8 +3639,8 @@ export default function App() {
           text: customName
             ? `Emergency backup created: ${fileName}`
             : L(
-                `ローカルログ (#${slot}: ${fileName}) を保存・上書きしました。`,
-                `Local log backup (#${slot}: ${fileName}) saved & overwritten.`,
+                `ローカルログ (#${slot}: ${fileName}) をローカルフォルダに保存・上書きしました。`,
+                `Local log backup (#${slot}: ${fileName}) saved & overwritten in local folder.`,
                 `Journal local (#${slot} : ${fileName}) enregistré et écrasé.`
               ),
           type: 'info'
@@ -3334,18 +3657,35 @@ export default function App() {
     } finally {
       isWritingLocalRef.current = false;
       setIsSyncing(false);
+      if (pendingSyncAfterWriteRef.current) {
+        pendingSyncAfterWriteRef.current = false;
+        setTimeout(() => {
+          syncToLocalSystem(false);
+        }, 50);
+      }
     }
   };
 
+  // When dirHandle is ready and permission is granted, audit real files on disk and immediately sync if needed
+  useEffect(() => {
+    if (dirHandle && dirPermission === 'granted') {
+      verifyDiskBackupSlots(dirHandle).then(() => {
+        if (isLocalLogConfigured && (tasksLoadedRef.current || tasksRef.current.length > 0)) {
+          syncToLocalSystem(false);
+        }
+      });
+    }
+  }, [dirHandle, dirPermission, isLocalLogConfigured]);
+
   // Auto-sync effect: immediately saves & overwrites the next numbered file (1 -> 2 -> 3 -> 1) on every task/folder change
   useEffect(() => {
-    if (isLocalLogConfigured && tasks.length > 0) {
+    if (isLocalLogConfigured && (tasksLoadedRef.current || tasks.length > 0)) {
       const timer = setTimeout(() => {
         syncToLocalSystem(false);
-      }, 300); // Fast 300ms debounce so every change is immediately written & overwritten to local disk
+      }, 150); // Fast 150ms debounce so every change is immediately written & overwritten to local disk
       return () => clearTimeout(timer);
     }
-  }, [tasks, folderMetas, isLocalLogConfigured, dirHandle, dirPermission]);
+  }, [tasks, folderMetas, isLocalLogConfigured, dirHandle, dirPermission, isIdbLoaded]);
 
   // Safari/PWA Persistence Request
   useEffect(() => {
@@ -3771,7 +4111,10 @@ export default function App() {
       </AnimatePresence>
 
       {/* Header Navigation */}
-      <header className="bg-white border-b border-slate-200 px-4 md:px-6 py-4 flex justify-between items-center shrink-0 relative z-[100]">
+      <header className={cn(
+        "bg-white border-b border-slate-200 px-4 md:px-6 py-4 flex justify-between items-center shrink-0 relative z-[100]",
+        isEffectiveTimelineFullscreen && "hidden"
+      )}>
         {/* Left Side: Logo & Workspace Menu */}
         <div className="flex items-center gap-4 md:gap-8">
           <div className="relative">
@@ -3947,6 +4290,15 @@ export default function App() {
                 >
                   {t('Settings')}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setIsUserGuideOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-tighter transition-all text-indigo-600 hover:bg-indigo-50 flex items-center gap-1 cursor-pointer"
+                  title={L('使い方ガイド (README.md) を表示', 'Open User Guide (README.md)', "Ouvrir le guide d'utilisation (README.md)")}
+                >
+                  <BookOpen size={13} className="shrink-0" />
+                  <span>{L('使い方', 'Guide', 'Guide')}</span>
+                </button>
               </nav>
 
               <div className="flex items-center gap-2 mr-0 md:mr-2">
@@ -4039,13 +4391,44 @@ export default function App() {
                         {L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
                       </span>
                     </button>
+                  ) : !isLocalDiskReady ? (
+                    <button
+                      onClick={() => {
+                        if (dirHandle && dirPermission !== 'granted') {
+                          authorizeLocalFolderNow();
+                        } else {
+                          setShowSyncDetails(!showSyncDetails);
+                        }
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-amber-50/90 border-amber-200 hover:bg-amber-100/80 text-amber-700 transition-all shadow-sm cursor-pointer"
+                      title={
+                        dirHandle
+                          ? L(
+                              'クリックしてローカルフォルダへの上書き保存を許可します',
+                              'Click to authorize writing to your local folder',
+                              'Cliquez pour autoriser l\'écriture dans le dossier local'
+                            )
+                          : L(
+                              'PCの保存先フォルダを選択してください',
+                              'Please select your local backup folder',
+                              'Veuillez sélectionner votre dossier local'
+                            )
+                      }
+                    >
+                      <RefreshCcw size={12} className={cn("text-amber-600 shrink-0", isSyncing && "animate-spin")} />
+                      <span className="text-[10px] font-bold uppercase tracking-tighter">
+                        {dirHandle
+                          ? L('上書き許可が必要', 'Allow Local Write', 'Autoriser écriture')
+                          : L('フォルダ未接続', 'Connect Folder', 'Connecter dossier')}
+                      </span>
+                    </button>
                   ) : (
                     <button 
                       onClick={() => setShowSyncDetails(!showSyncDetails)}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70 transition-all cursor-pointer"
                       title={L(
-                        'ローカルログ同期が有効です（最大3ファイルでバックアップ中）',
-                        'Local log sync is active (rotating up to 3 backup files)',
+                        'ローカルログ同期が有効です（変更のたび最大3ファイルに自動上書き中）',
+                        'Local log sync is active (auto-overwriting up to 3 backup files on every change)',
                         'La synchro locale est active (rotation sur 3 fichiers max)'
                       )}
                     >
@@ -4064,18 +4447,18 @@ export default function App() {
                       <div className="absolute top-full right-0 mt-2 w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] p-4">
                         <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
                           <div className="flex items-center gap-2 text-slate-800">
-                            <Activity size={13} className="text-emerald-500" />
+                            <Activity size={13} className={isLocalDiskReady ? "text-emerald-500" : "text-amber-500"} />
                             <p className="text-[10px] font-black uppercase tracking-widest">{t('AutomatedSyncStatus')}</p>
                           </div>
                           <div className="flex items-center gap-1">
                             <button 
-                              onClick={(e) => { e.stopPropagation(); syncToLocalSystem(true); }}
+                              onClick={(e) => { e.stopPropagation(); authorizeLocalFolderNow(); }}
                               className="p-1.5 hover:bg-indigo-50 rounded-lg transition-colors text-indigo-600 flex items-center gap-1 text-[9px] font-bold"
                               title={t('ForceBackupNow')}
                               disabled={isSyncing}
                             >
                               <RefreshCcw size={12} className={cn(isSyncing && "animate-spin")} />
-                              <span>{L('今すぐ保存', 'Backup Now', 'Sauvegarder')}</span>
+                              <span>{L('今すぐ更新', 'Sync Now', 'Synchroniser')}</span>
                             </button>
                           </div>
                         </div>
@@ -4085,33 +4468,31 @@ export default function App() {
                               <label className="text-[8px] font-black text-slate-400 uppercase">{t('LocalDirectoryPath')}</label>
                               <span className={cn(
                                 "text-[8px] font-black uppercase px-1.5 py-0.5 rounded",
-                                dirHandle && dirPermission === 'granted'
+                                isLocalDiskReady
                                   ? "bg-emerald-100 text-emerald-700"
                                   : "bg-amber-100 text-amber-700"
                               )}>
-                                {dirHandle && dirPermission === 'granted'
+                                {isLocalDiskReady
                                   ? t('SyncActive')
-                                  : L('フォルダ連携確認', 'Verify Folder', 'Vérifier dossier')}
+                                  : dirHandle
+                                  ? L('要書き込み許可', 'Permission Needed', 'Autorisation requise')
+                                  : L('フォルダ未接続', 'Folder Disconnected', 'Dossier non lié')}
                               </span>
                             </div>
                             <p className="text-[10px] font-mono break-all text-slate-700 leading-tight">
-                              {settings.localBackupPath || t('AuthorizedLocalFolder')}
+                              {dirHandle?.name || settings.localBackupPath || t('AuthorizedLocalFolder')}
                             </p>
-                            {(!dirHandle || dirPermission !== 'granted') && window.showDirectoryPicker && window.self === window.top && (
+                            {!isLocalDiskReady && (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (!dirHandle) {
-                                    selectBackupFolder();
-                                  } else {
-                                    syncToLocalSystem(true);
-                                  }
+                                  authorizeLocalFolderNow();
                                 }}
-                                className="mt-2 w-full py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-white rounded text-[9px] font-bold transition-colors"
+                                className="mt-2 w-full py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-white rounded text-[9px] font-bold transition-colors cursor-pointer"
                               >
                                 {!dirHandle
-                                  ? L('保存先フォルダを再選択して自動上書きを有効化', 'Reselect Folder to Enable Direct Overwrite', 'Resélectionner le dossier')
-                                  : L('クリックしてローカル上書き保存を許可', 'Click to Authorize Local File Overwrite', 'Autoriser l\'écriture locale')}
+                                  ? L('保存先フォルダを選択して自動上書きを有効化', 'Select Folder to Enable Direct Overwrite', 'Sélectionner le dossier')
+                                  : L('クリックしてローカルファイル上書き保存を許可', 'Click to Authorize Local File Overwrite', 'Autoriser l\'écriture locale')}
                               </button>
                             )}
                           </div>
@@ -4250,6 +4631,17 @@ export default function App() {
                    settings.displayMode === 'large' ? <Grid2X2 size={16} /> : <LayoutGrid size={16} />}
                 </button>
 
+                {/* Mobile User Guide Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsUserGuideOpen(true)}
+                  className="h-9 px-2.5 rounded-xl flex items-center gap-1 bg-indigo-50 border border-indigo-200 text-indigo-700 text-[9px] font-bold shadow-sm cursor-pointer"
+                  title={L('使い方ガイド (README.md)', 'User Guide (README.md)', "Guide d'utilisation")}
+                >
+                  <BookOpen size={13} className="text-indigo-600 shrink-0" />
+                  <span>{L('使い方', 'Guide', 'Guide')}</span>
+                </button>
+
                 {/* Mobile Sync Status / Local Setting Button */}
                 {!isLocalLogConfigured ? (
                   <button
@@ -4303,6 +4695,15 @@ export default function App() {
               </>
             ) : (
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsUserGuideOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                  title={L("使い方ガイド (README.md)", "User Guide (README.md)", "Guide d'utilisation")}
+                >
+                  <BookOpen size={14} className="text-indigo-600" />
+                  <span>{L("使い方", "Guide", "Guide")}</span>
+                </button>
                 <button 
                   onClick={() => setIsAuthModalOpen(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer"
@@ -4333,12 +4734,17 @@ export default function App() {
       ) : (
         <main className={cn(
           "flex-1 min-h-0 overflow-hidden relative",
-          (viewMode === 'dashboard' || viewMode === 'archive' || viewMode === 'trash')
-            ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3"
-            : "p-4 md:p-6 grid grid-cols-12 gap-6"
+          isEffectiveTimelineFullscreen
+            ? "p-0 flex flex-col lg:flex-row gap-0"
+            : (viewMode === 'dashboard' || viewMode === 'archive' || viewMode === 'trash')
+              ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3"
+              : "p-4 md:p-6 grid grid-cols-12 gap-6"
         )}>
         {/* Mobile Navigation (Bottom) */}
-        <div className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-slate-200 z-[70] flex items-center justify-around px-2 shadow-[0_-4px_20px_rgba(0,0,0,0.1)]">
+        <div className={cn(
+          "lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-slate-200 z-[70] flex items-center justify-around px-2 shadow-[0_-4px_20px_rgba(0,0,0,0.1)]",
+          isEffectiveTimelineFullscreen && "hidden"
+        )}>
           <button 
             onClick={() => { setViewMode('dashboard'); setMobileView('summary'); }}
             className={cn("flex flex-col items-center gap-1 transition-colors", viewMode === 'dashboard' && mobileView === 'summary' ? "text-indigo-600" : "text-slate-400")}
@@ -4384,7 +4790,7 @@ export default function App() {
         </div>
 
         {/* VS Code-Style Explorer Tree */}
-        {viewMode === 'dashboard' && (
+        {viewMode === 'dashboard' && !isEffectiveTimelineFullscreen && (
           isExplorerCollapsed ? (
             <div className={cn(
               "h-full shrink-0 flex flex-col items-center py-2 px-1 bg-slate-50/90 border-r border-slate-200 select-none w-10 transition-all",
@@ -4456,7 +4862,7 @@ export default function App() {
         )}>
           <div className={cn(
             "flex-1 h-full min-w-0 flex flex-col min-h-0 overflow-hidden",
-            viewMode === 'dashboard' && mobileView === 'summary' && "hidden lg:flex"
+            viewMode === 'dashboard' && mobileView === 'summary' && !isEffectiveTimelineFullscreen && "hidden lg:flex"
           )}>
             <AnimatePresence mode="wait">
               <motion.div
@@ -4494,6 +4900,8 @@ export default function App() {
                       folderMetas={folderMetas}
                       onToggleFolderStar={handleToggleFolderStar}
                       onToggleFolderPin={handleToggleFolderPin}
+                      isFullscreen={isEffectiveTimelineFullscreen}
+                      onToggleFullscreen={handleToggleTimelineFullscreen}
                       t={t}
                     />
                   </div>
@@ -4557,6 +4965,71 @@ export default function App() {
                 </div>
 
                 <div className="space-y-8 md:space-y-12">
+                  {/* User Guide & README.md Documentation */}
+                  <div className="bg-gradient-to-br from-indigo-50/80 via-white to-slate-50 rounded-3xl p-6 md:p-8 border border-indigo-100 shadow-sm space-y-5">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="flex items-center gap-2.5 text-indigo-600">
+                        <BookOpen size={20} />
+                        <h3 className="font-bold text-sm uppercase tracking-wider">
+                          {L(
+                            '使い方ガイド & ドキュメント (README.md)',
+                            `User Guide & Documentation (${getReadmeFilenameByLang(settings.language)})`,
+                            `Guide d'utilisation (${getReadmeFilenameByLang(settings.language)})`
+                          )}
+                        </h3>
+                      </div>
+                      <span className="text-[10px] font-mono font-bold text-indigo-600 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-100">
+                        v{APP_VERSION} Latest
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      {L(
+                        'Explorer（フォルダ・サブフォルダ階層管理）、Project Timeline（期間バー・モバイル横画面の全画面表示・レーン幅調整）、Task Detail（マルチタブ・2画面分割）、タスク追加・Focus管理、およびローカル3世代バックアップの詳しい使い方を掲載しています。アプリ内ビューアで読むか、独立したWebページ（HTML）として新しいタブで開くことができます。',
+                        'Learn how to use Explorer, Project Timeline (date/phase bars, mobile landscape fullscreen, resizable lanes), Task Detail (multi-tab & split view), Focus management, and 3-file rolling local backups. Read directly inside the app or open as a standalone HTML web page.',
+                        'Découvrez comment utiliser Explorer, Project Timeline, Task Detail, Focus et la sauvegarde locale rotative. Consultez le guide dans l’application ou ouvrez-le comme page Web HTML.'
+                      )}
+                    </p>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setIsUserGuideOpen(true)}
+                        className="py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                      >
+                        <BookOpen size={15} />
+                        <span>{L('アプリ内で「使い方」を見る', 'Open User Guide in App', 'Ouvrir le guide dans l’app')}</span>
+                      </button>
+
+                      {standaloneReadmeHtmlUrl && (
+                        <a
+                          href={standaloneReadmeHtmlUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-3 px-4 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
+                        >
+                          <ExternalLink size={15} />
+                          <span>{L('Webページ(HTML)で別タブ表示', 'Open as HTML Web Page', 'Ouvrir en page Web HTML')}</span>
+                        </a>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => downloadReadmeMarkdown(settings.language)}
+                        className="py-3 px-4 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                      >
+                        <Download size={15} />
+                        <span>
+                          {L(
+                            'README.md を保存',
+                            `Download ${getReadmeFilenameByLang(settings.language)}`,
+                            `Télécharger ${getReadmeFilenameByLang(settings.language)}`
+                          )}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
                    {/* Data Synchronization & Import */}
                   <div className="bg-slate-50 rounded-3xl p-6 md:p-8 border border-slate-100 shadow-sm space-y-6">
                     <div className="flex items-center gap-2 text-indigo-600">
@@ -4875,36 +5348,47 @@ export default function App() {
                       >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
                           <div className="flex-1">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <p className="font-bold text-slate-900">{t('LocalFolderLog')}</p>
                               <span className={cn(
                                 "text-[9px] font-black uppercase px-2 py-0.5 rounded-full border",
-                                isLocalLogConfigured
+                                isLocalDiskReady
                                   ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                                   : "bg-amber-50 text-amber-700 border-amber-200"
                               )}>
-                                {isLocalLogConfigured
+                                {isLocalDiskReady
                                   ? t('SyncActive')
-                                  : L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
+                                  : !isLocalLogConfigured
+                                  ? L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')
+                                  : dirHandle
+                                  ? L('要書き込み許可 (クリックで再開)', 'Write Permission Needed', 'Autorisation requise')
+                                  : L('保存先フォルダ未接続', 'Folder Not Connected', 'Dossier non connecté')}
                               </span>
                             </div>
                             <p className="text-xs text-slate-500 mt-0.5">
                               {L(
-                                'PCへの自動CSVバックアップを有効にします（通し番号 1, 2, 3 の最大3ファイルでローテーション保存）。',
-                                'Enable automatic CSV backup (rotates across up to 3 numbered files: 1, 2, 3).',
-                                'Activer la sauvegarde CSV automatique (rotation sur 3 fichiers numérotés : 1, 2, 3).'
+                                'タスクやフォルダに変更があるたび、PCの指定フォルダ内のCSVファイル（通し番号 1, 2, 3 の最大3ファイル）を即座に自動保存・上書きします。',
+                                'Automatically saves & overwrites numbered CSV files (1, 2, 3, max 3 files) inside your selected PC folder whenever any change occurs.',
+                                'Enregistre et écrase automatiquement les fichiers CSV numérotés (1, 2, 3, max 3) dans votre dossier PC à chaque modification.'
                               )}
                             </p>
                           </div>
                           <button 
-                            onClick={() => {
+                            onClick={async () => {
                               const nextEnabled = !settings.isLocalBackupEnabled;
-                              saveSettings({
+                              if (nextEnabled && !dirHandle) {
+                                await selectBackupFolder();
+                                return;
+                              }
+                              await saveSettings({
                                 isLocalBackupEnabled: nextEnabled,
                                 localBackupPath: nextEnabled
-                                  ? (settings.localBackupPath || 'NavFOR_Local_Backup')
+                                  ? (dirHandle?.name || settings.localBackupPath || 'NavFOR_Local_Backup')
                                   : settings.localBackupPath
                               });
+                              if (nextEnabled && dirHandle) {
+                                await authorizeLocalFolderNow();
+                              }
                             }}
                             className={cn(
                               "w-12 h-6 rounded-full p-1 transition-all duration-300 shrink-0 cursor-pointer",
@@ -4920,12 +5404,63 @@ export default function App() {
                         </div>
                         
                         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-inner space-y-4">
+                          {isLocalLogConfigured && !isLocalDiskReady && (
+                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="text-xs text-amber-800">
+                                <p className="font-bold">
+                                  {dirHandle
+                                    ? L('ブラウザ再読み込み後の書き込み許可が必要です', 'Write permission needed after browser reload', 'Autorisation d\'écriture requise après rechargement')
+                                    : L('PCの保存先フォルダが接続されていません', 'Local PC folder is not connected yet', 'Le dossier PC local n\'est pas encore connecté')}
+                                </p>
+                                <p className="text-[11px] text-amber-700 mt-0.5">
+                                  {dirHandle
+                                    ? L('右のボタンを押すと、ローカルフォルダ内のCSVファイルを即座に最新状態へ上書き更新します。', 'Click the button to grant write access and immediately overwrite the local CSV file with the latest data.', 'Cliquez pour autoriser l\'accès et mettre à jour le fichier CSV local.')
+                                    : window.self !== window.top
+                                    ? L('プレビュー枠内ではフォルダ選択ダイアログが開けないため、「新しいタブで開く (↗)」から一度フォルダを選択してください（選択後はこの画面からも自動更新されます）。', 'Open in a new tab (↗) once to pick your PC folder. Once selected, changes here will also sync automatically.', 'Ouvrez dans un nouvel onglet (↗) pour choisir le dossier PC.')
+                                    : L('「フォルダを選択」からPC上の保存先フォルダを指定すると、変更のたびローカルファイルが自動更新されます。', 'Click "Select Folder" to choose a folder on your PC for automatic file updates.', 'Cliquez sur « Choisir dossier » pour sélectionner un dossier sur votre PC.')}
+                                </p>
+                              </div>
+                              {dirHandle ? (
+                                <button
+                                  onClick={authorizeLocalFolderNow}
+                                  className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
+                                >
+                                  {L('書き込みを許可して今すぐ更新', 'Allow Write & Sync Now', 'Autoriser et synchroniser')}
+                                </button>
+                              ) : window.self !== window.top ? (
+                                <a
+                                  href={window.location.href}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm flex items-center gap-1"
+                                >
+                                  <ArrowUpRight size={13} />
+                                  {L('新しいタブで開いてフォルダ設定', 'Open in New Tab to Select Folder', 'Ouvrir dans un nouvel onglet')}
+                                </a>
+                              ) : (
+                                <button
+                                  onClick={selectBackupFolder}
+                                  className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
+                                >
+                                  {t('SelectFolder')}
+                                </button>
+                              )}
+                            </div>
+                          )}
+
                           <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                             <div className="flex-1 min-w-0 w-full">
                               <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">{t('LocalDirectoryPath')}</label>
-                              <div className="text-xs font-mono break-all py-1.5 text-slate-600 bg-slate-50 px-2.5 rounded border border-slate-100 flex items-center gap-2">
-                                <Activity size={12} className={cn("shrink-0", isLocalLogConfigured ? "text-emerald-500" : "opacity-50")} />
-                                <span>{settings.localBackupPath || t('NoFolderSelected')}</span>
+                              <div className="text-xs font-mono break-all py-1.5 text-slate-600 bg-slate-50 px-2.5 rounded border border-slate-100 flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <Activity size={12} className={cn("shrink-0", isLocalDiskReady ? "text-emerald-500" : "text-amber-500")} />
+                                  <span className="truncate">{dirHandle?.name || settings.localBackupPath || t('NoFolderSelected')}</span>
+                                </div>
+                                {isLocalDiskReady && (
+                                  <span className="text-[9px] font-sans font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 shrink-0">
+                                    {L('ローカル直結・自動上書き中', 'Direct Disk Write Active', 'Écriture disque active')}
+                                  </span>
+                                )}
                               </div>
                             </div>
                             <div className="flex flex-col gap-2 shrink-0 sm:pt-5 w-full sm:w-48">
@@ -4936,20 +5471,32 @@ export default function App() {
                                 {t('SelectFolder')}
                               </button>
                               <button 
-                                onClick={downloadBackup}
+                                onClick={() => {
+                                  if (dirHandle) {
+                                    authorizeLocalFolderNow();
+                                  } else {
+                                    downloadBackup();
+                                  }
+                                }}
+                                disabled={isSyncing}
                                 className="p-2 px-3 rounded-lg text-[10px] font-bold transition-all w-full h-10 flex items-center justify-center gap-1.5 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
                               >
-                                <Download size={12} /> {L(`手動バックアップ (#${nextBackupSlot})`, `Manual Backup (#${nextBackupSlot})`, `Sauvegarde (#${nextBackupSlot})`)}
+                                <RefreshCcw size={12} className={cn(isSyncing && "animate-spin")} />
+                                {dirHandle
+                                  ? L(`今すぐローカル上書き (#${nextBackupSlot})`, `Overwrite Local Now (#${nextBackupSlot})`, `Écraser maintenant (#${nextBackupSlot})`)
+                                  : L(`手動バックアップ (#${nextBackupSlot})`, `Manual Backup (#${nextBackupSlot})`, `Sauvegarde (#${nextBackupSlot})`)}
                               </button>
                             </div>
                             {window.self !== window.top && (
-                              <button 
-                                onClick={() => window.open(window.location.href, '_blank')}
+                              <a 
+                                href={window.location.href}
+                                target="_blank"
+                                rel="noopener noreferrer"
                                 className="p-1.5 px-2 bg-slate-100 text-slate-600 rounded text-[10px] font-bold hover:bg-slate-200 transition-colors self-start sm:mt-5"
                                 title="Open in new tab to enable direct OS folder access"
                               >
                                 <ArrowUpRight size={14} />
-                              </button>
+                              </a>
                             )}
                           </div>
 
@@ -4957,7 +5504,7 @@ export default function App() {
                           <div className="pt-3 border-t border-slate-100">
                             <div className="flex items-center justify-between mb-2">
                               <span className="text-[10px] font-black text-slate-500 uppercase tracking-wider">
-                                {L('バックアップファイル一覧 (最大3ファイル: 1, 2, 3)', 'Backup Files (Max 3 Files: 1, 2, 3)', 'Fichiers de sauvegarde (Max 3 : 1, 2, 3)')}
+                                {L('ローカルフォルダ内のバックアップファイル (最大3ファイル: 1, 2, 3)', 'Local Folder Backup Files (Max 3 Files: 1, 2, 3)', 'Fichiers de sauvegarde locaux (Max 3 : 1, 2, 3)')}
                               </span>
                               <span className="text-[10px] font-mono font-bold text-indigo-600">
                                 {L(`次回保存先: #${nextBackupSlot}`, `Next Slot: #${nextBackupSlot}`, `Prochain slot : #${nextBackupSlot}`)}
@@ -5000,7 +5547,7 @@ export default function App() {
                                     </div>
                                     <div className="text-[9px] text-slate-400 font-medium">
                                       {info
-                                        ? `${format(info.timestamp, 'yyyy/MM/dd HH:mm')} (${info.taskCount} ${t('Items')})`
+                                        ? `${format(info.timestamp, 'yyyy/MM/dd HH:mm:ss')} (${info.taskCount} ${t('Items')})`
                                         : L('未保存', 'Not saved yet', 'Non enregistré')}
                                     </div>
                                   </div>
@@ -5103,8 +5650,8 @@ export default function App() {
               )}
 
               {/* Collapsed Detail Pane Bar when minimized with open tabs */}
-              {!isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
-                <div className="h-full shrink-0 flex flex-col items-center py-2 px-1 bg-slate-50/90 border-l border-slate-200 select-none w-10 transition-all z-10">
+              {!isDetailPaneVisible && !isEffectiveTimelineFullscreen && (activeTabTaskId || openTaskIds.length > 0) && (
+                <div className="hidden lg:flex h-full shrink-0 flex-col items-center py-2 px-1 bg-slate-50/90 border-l border-slate-200 select-none w-10 transition-all z-10">
                   <button
                     type="button"
                     onClick={handleExpandDetailPane}
@@ -5131,7 +5678,10 @@ export default function App() {
     )}
 
       {/* Footer Info Bar */}
-      <footer className="bg-white border-t border-slate-200 px-6 py-2 flex items-center justify-between shrink-0">
+      <footer className={cn(
+        "bg-white border-t border-slate-200 px-6 py-2 items-center justify-between shrink-0",
+        isEffectiveTimelineFullscreen ? "hidden" : "hidden lg:flex"
+      )}>
         <div className="flex gap-6 overflow-x-auto no-scrollbar text-[10px]">
           <span className="font-bold text-slate-400 uppercase tracking-widest hidden sm:inline">Operational Status:</span>
           <div className="flex items-center gap-2 whitespace-nowrap">
@@ -5183,6 +5733,14 @@ export default function App() {
               setAuthModalError(null);
               setMessage({ text: L("サインインに成功しました。クラウド同期が有効です。", "Signed in successfully. Cloud sync is active.", "Connexion réussie. La synchronisation cloud est active."), type: 'info' });
             }}
+            language={settings.language}
+            onChangeLanguage={(lang) => saveSettings({ language: lang })}
+          />
+        )}
+        {isUserGuideOpen && (
+          <UserGuideModal
+            isOpen={isUserGuideOpen}
+            onClose={() => setIsUserGuideOpen(false)}
             language={settings.language}
             onChangeLanguage={(lang) => saveSettings({ language: lang })}
           />

@@ -157,6 +157,25 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
     triggerSaveNotice();
   };
 
+  useEffect(() => {
+    const trimmed = title.trim();
+    if (!trimmed || trimmed === (folderMeta?.title || folderName)) return;
+    const timer = setTimeout(() => {
+      onUpdateFolderMeta?.(folderPath, { title: trimmed });
+      triggerSaveNotice();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [title, folderPath, folderMeta?.title, folderName]);
+
+  useEffect(() => {
+    if (notes === (folderMeta?.notes || '')) return;
+    const timer = setTimeout(() => {
+      onUpdateFolderMeta?.(folderPath, { notes });
+      triggerSaveNotice();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [notes, folderPath, folderMeta?.notes]);
+
   const handleStartDateCommit = (dateStr: string, timeStr: string, allDay: boolean) => {
     onPinTab(tabId);
     if (!dateStr) {

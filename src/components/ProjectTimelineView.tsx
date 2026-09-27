@@ -34,7 +34,9 @@ import {
   ArrowLeftRight,
   MoreHorizontal,
   Copy,
-  FilePlus
+  FilePlus,
+  Maximize2,
+  Minimize2
 } from 'lucide-react';
 import { Task, Category, FolderMeta } from '../types';
 import { cn, tr } from '../lib/utils';
@@ -148,6 +150,8 @@ interface ProjectTimelineViewProps {
   folderMetas?: Record<string, FolderMeta>;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
   t: (key: string) => string;
 }
 
@@ -175,6 +179,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   folderMetas,
   onToggleFolderStar,
   onToggleFolderPin,
+  isFullscreen = false,
+  onToggleFullscreen,
   t
 }) => {
   const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
@@ -240,6 +246,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [daysCount, setDaysCount] = useState<number>(14); // 7, 14, 21, 30
   const [showUnscheduledColumn, setShowUnscheduledColumn] = useState(true);
   const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(new Set());
+  const [showLanesInFullscreen, setShowLanesInFullscreen] = useState(true);
+  const hideSideColumns = Boolean(isFullscreen && !showLanesInFullscreen);
+  const effectiveShowUnscheduled = showUnscheduledColumn && !isFullscreen;
 
   // Fine Grid Step in hours (1h, 2h, 4h, 6h, 12h, 24h)
   const [gridStepHours, setGridStepHours] = useState<number>(() => {
@@ -467,7 +476,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   }, [activeTaskId, tasks]);
 
-  // User adjustable project column width
+  // User adjustable project column width (Standard view & Fullscreen view)
   const [projectColWidth, setProjectColWidth] = useState<number>(() => {
     try {
       const saved = localStorage.getItem('navfor_timeline_project_col_width');
@@ -475,24 +484,44 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     } catch {}
     return typeof window !== 'undefined' && window.innerWidth < 640 ? 210 : 256;
   });
+  const [fullscreenProjectColWidth, setFullscreenProjectColWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_fs_project_col_width');
+      if (saved) return parseInt(saved, 10);
+    } catch {}
+    return 135;
+  });
+  const effectiveProjectColWidth = isFullscreen ? fullscreenProjectColWidth : projectColWidth;
 
   const isResizingProject = useRef(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
 
-  const handleStartProjectResize = (clientX: number) => {
+  const handleStartProjectResize = (clientX: number, initialWidthOverride?: number) => {
     isResizingProject.current = true;
     startXRef.current = clientX;
-    startWidthRef.current = projectColWidth;
+    startWidthRef.current = initialWidthOverride ?? effectiveProjectColWidth;
+    if (isFullscreen && !showLanesInFullscreen) {
+      setShowLanesInFullscreen(true);
+    }
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
 
     const handleMove = (e: MouseEvent | TouchEvent) => {
       if (!isResizingProject.current) return;
+      if ('touches' in e && e.cancelable) {
+        e.preventDefault();
+      }
       const currentX = 'touches' in e ? e.touches[0].clientX : (e as MouseEvent).clientX;
       const delta = currentX - startXRef.current;
-      const newWidth = Math.max(140, Math.min(500, startWidthRef.current + delta));
-      setProjectColWidth(newWidth);
+      const minW = isFullscreen ? 56 : 64;
+      const maxW = isFullscreen ? 450 : 500;
+      const newWidth = Math.max(minW, Math.min(maxW, Math.round(startWidthRef.current + delta)));
+      if (isFullscreen) {
+        setFullscreenProjectColWidth(newWidth);
+      } else {
+        setProjectColWidth(newWidth);
+      }
     };
 
     const handleEnd = () => {
@@ -505,10 +534,17 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       window.removeEventListener('touchmove', handleMove);
       window.removeEventListener('touchend', handleEnd);
       try {
-        setProjectColWidth(w => {
-          localStorage.setItem('navfor_timeline_project_col_width', String(w));
-          return w;
-        });
+        if (isFullscreen) {
+          setFullscreenProjectColWidth(w => {
+            localStorage.setItem('navfor_timeline_fs_project_col_width', String(w));
+            return w;
+          });
+        } else {
+          setProjectColWidth(w => {
+            localStorage.setItem('navfor_timeline_project_col_width', String(w));
+            return w;
+          });
+        }
       } catch {}
     };
 
@@ -639,10 +675,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const handleResetColumnWidths = () => {
     const defaultProj = typeof window !== 'undefined' && window.innerWidth < 640 ? 210 : 256;
     setProjectColWidth(defaultProj);
+    setFullscreenProjectColWidth(135);
     setTodoColWidth(160);
     setCustomColWidths({});
     try {
       localStorage.removeItem('navfor_timeline_project_col_width');
+      localStorage.removeItem('navfor_timeline_fs_project_col_width');
       localStorage.removeItem('navfor_timeline_todo_col_width');
       localStorage.removeItem('navfor_timeline_custom_col_widths');
     } catch {}
@@ -1052,7 +1090,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       }
 
       rowEndPx[rowIdx] = endPx;
-      const topPx = 6 + rowIdx * 34;
+      const baseTop = hideSideColumns ? 22 : 6;
+      const rowStep = hideSideColumns ? 32 : 34;
+      const topPx = baseTop + rowIdx * rowStep;
 
       placed.push({
         task,
@@ -1065,7 +1105,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       });
     });
 
-    const laneHeight = Math.max(54, (rowEndPx.length || 1) * 34 + 14);
+    const laneHeight = Math.max(hideSideColumns ? 54 : 54, (rowEndPx.length || 1) * (hideSideColumns ? 32 : 34) + (hideSideColumns ? 24 : 14));
     return { placed, laneHeight };
   };
 
@@ -1132,7 +1172,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       }
 
       rowEndPx[rowIdx] = endPx;
-      const topPx = 6 + rowIdx * 34;
+      const baseTop = hideSideColumns ? 22 : 6;
+      const rowStep = hideSideColumns ? 32 : 34;
+      const topPx = baseTop + rowIdx * rowStep;
 
       placed.push({
         task,
@@ -1146,7 +1188,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       });
     });
 
-    const laneHeight = Math.max(54, (rowEndPx.length || 1) * 34 + 14);
+    const laneHeight = Math.max(54, (rowEndPx.length || 1) * (hideSideColumns ? 32 : 34) + (hideSideColumns ? 24 : 14));
     return { placed, laneHeight };
   };
 
@@ -1947,15 +1989,37 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       onFocus={() => {
         (window as any).__navforActivePane = 'timeline';
       }}
-      className="flex-1 h-full min-h-0 flex flex-col bg-white border border-slate-200/90 rounded-xl overflow-hidden shadow-2xs"
+      className={cn(
+        "flex-1 h-full min-h-0 flex flex-col bg-white overflow-hidden relative",
+        isFullscreen ? "border-0 rounded-none" : "border border-slate-200/90 rounded-xl shadow-2xs"
+      )}
     >
-      {/* Timeline Top Control Toolbar */}
+      {/* Timeline Top Control Toolbar (Hidden in Fullscreen Mode) */}
+      {!isFullscreen && (
       <div className="relative z-40 flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50/90 shrink-0 select-none flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+          <button
+            type="button"
+            onClick={() => onToggleFullscreen?.()}
+            className="flex items-center gap-1.5 text-xs font-bold text-slate-800 hover:text-indigo-600 transition-colors cursor-pointer"
+            title={L('タップしてタイムラインを全画面表示', 'Tap to enter Fullscreen Timeline', 'Appuyez pour passer en plein écran')}
+          >
             <CalendarDays size={16} className="text-indigo-600 shrink-0" />
             <span>{L('プロジェクト タイムライン', 'Project Timeline', 'Chronologie des projets')}</span>
-          </div>
+          </button>
+
+          {/* Quick Fullscreen Toggle Button next to title */}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              onClick={onToggleFullscreen}
+              className="px-2 py-1 text-[11px] font-bold rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-all flex items-center gap-1 shadow-2xs cursor-pointer"
+              title={L('タイムラインを全画面で表示 (周辺バーを非表示)', 'Fullscreen Timeline (hide surrounding bars)', 'Chronologie plein écran')}
+            >
+              <Maximize2 size={12} className="text-indigo-600 shrink-0" />
+              <span>{L('全画面', 'Fullscreen', 'Plein écran')}</span>
+            </button>
+          )}
 
           <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block" />
 
@@ -2191,6 +2255,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           )}
         </div>
       </div>
+      )}
 
       {/* Timeline Grid Container */}
       <div 
@@ -2203,7 +2268,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       >
         {/* Table/Grid Header - Permanently sticky top & max-width bounds */}
         <div className="flex border-b border-slate-200 bg-slate-100 sticky top-0 z-30 shrink-0 select-none min-w-max w-max">
-          {/* Project Column Header (Permanently sticky left cell, can add folder & receive drops) */}
+          {/* Project Column Header (Permanently sticky left cell, hidden in Fullscreen unless lanes toggled on) */}
+          {!hideSideColumns && (
           <div 
             onDragOver={(e) => {
               e.preventDefault();
@@ -2229,9 +2295,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 (window as any).__navforDraggingFolder = null;
               }
             }}
-            style={{ width: `${projectColWidth}px` }}
+            style={{ width: `${effectiveProjectColWidth}px` }}
             className={cn(
-              "shrink-0 px-2 sm:px-3 py-2 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sticky left-0 z-50 transition-colors group/projcol",
+              "shrink-0 px-2 sm:px-3 border-r border-slate-200 flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 sticky left-0 z-50 transition-colors group/projcol",
+              isFullscreen ? "py-1" : "py-2",
               isDragOverRootHeader && "bg-indigo-100 ring-2 ring-indigo-500 ring-inset"
             )}
             title={L("サブプロジェクトをここにドロップすると最上位プロジェクト化できます", "Drop subproject here to make it a top-level project", "Déposez un sous-projet ici pour en faire un projet racine")}
@@ -2241,19 +2308,21 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </div>
 
             {/* Quick Add Project Folder Button */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setTargetParentFolder(null);
-                setNewFolderName('');
-                setIsCreateFolderOpen(true);
-              }}
-              className="p-1 mr-2 text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80 rounded transition-colors"
-              title={L("プロジェクトフォルダを作成", "Add Project Folder", "Ajouter un dossier de projet")}
-            >
-              <FolderPlus size={13} />
-            </button>
+            {effectiveProjectColWidth >= 105 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setTargetParentFolder(null);
+                  setNewFolderName('');
+                  setIsCreateFolderOpen(true);
+                }}
+                className="p-1 mr-2 text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80 rounded transition-colors shrink-0"
+                title={L("プロジェクトフォルダを作成", "Add Project Folder", "Ajouter un dossier de projet")}
+              >
+                <FolderPlus size={13} />
+              </button>
+            )}
 
             {/* Draggable resize handle on right edge */}
             <div
@@ -2266,15 +2335,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 e.stopPropagation();
                 handleStartProjectResize(e.touches[0].clientX);
               }}
-              className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-50 flex items-center justify-center group-hover/projcol:bg-slate-300/60"
-              title={L("ドラッグしてプロジェクト列幅を調整", "Drag to resize project column width", "Glisser pour ajuster la largeur de la colonne")}
+              className="absolute -right-1 top-0 bottom-0 w-3.5 touch-none cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-50 flex items-center justify-center group-hover/projcol:bg-slate-300/60"
+              title={L("左右にドラッグしてプロジェクト列幅を調整", "Drag left/right to resize project column width", "Glisser pour ajuster la largeur de la colonne")}
             >
               <div className="w-0.5 h-3.5 bg-slate-400 rounded-full" />
             </div>
           </div>
+          )}
 
           {/* ToDo List Column Header */}
-          {showUnscheduledColumn && (
+          {effectiveShowUnscheduled && (
             <div 
               style={{ width: `${todoColWidth}px` }}
               className="shrink-0 px-2.5 py-2 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between relative z-10 group/todocol"
@@ -2316,19 +2386,29 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   <div
                     key={date.toISOString()}
                     style={{ width: `${dayWidth}px` }}
+                    onClick={() => onToggleFullscreen?.()}
+                    title={
+                      isFullscreen
+                        ? L('タップして全体画面に戻る', 'Tap to return to Full View', 'Appuyez pour revenir à la vue complète')
+                        : L('タップしてタイムラインを全画面表示', 'Tap to toggle Fullscreen Timeline', 'Appuyez pour passer en plein écran')
+                    }
                     className={cn(
-                      "shrink-0 border-r border-slate-300 select-none transition-colors flex flex-col justify-between",
+                      "shrink-0 border-r border-slate-300 select-none transition-colors flex flex-col justify-between cursor-pointer hover:brightness-95",
                       today && "bg-indigo-50/80 font-bold",
                       !today && isWeekend && "bg-slate-50 text-slate-500",
                       !today && !isWeekend && "bg-slate-100 text-slate-700"
                     )}
                   >
-                    <div className="px-2 py-1 flex items-center justify-between border-b border-slate-200/70">
+                    <div className={cn(
+                      "px-2 flex items-center justify-between border-b border-slate-200/70",
+                      isFullscreen ? "py-0.5" : "py-1"
+                    )}>
                       <span className="text-[10px] uppercase font-bold text-slate-400 leading-none">
                         {dayOfWeek}
                       </span>
                       <span className={cn(
-                        "text-xs font-mono font-bold px-1.5 py-0.5 rounded",
+                        "font-mono font-bold px-1.5 rounded",
+                        isFullscreen ? "text-[11px] py-0" : "text-xs py-0.5",
                         today ? "bg-indigo-600 text-white" : "text-slate-700"
                       )}>
                         {format(date, 'M/d')}
@@ -2342,7 +2422,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           <div
                             key={sIdx}
                             style={{ width: `${slotWidth}px` }}
-                            className="text-center py-0.5 truncate select-none"
+                            className={cn(
+                              "text-center truncate select-none",
+                              isFullscreen ? "py-0 leading-tight" : "py-0.5"
+                            )}
                             title={`${String(sIdx * gridStepHours).padStart(2, '0')}:00`}
                           >
                             {String(sIdx * gridStepHours).padStart(2, '0')}h
@@ -2366,9 +2449,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   <div
                     key={col.id}
                     style={{ width: `${colWidth}px` }}
-                    className="shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative select-none"
+                    onClick={() => {
+                      if (!isEditing && (isFullscreen || (typeof window !== 'undefined' && window.innerWidth < 1024))) {
+                        onToggleFullscreen?.();
+                      }
+                    }}
+                    className={cn(
+                      "shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative select-none",
+                      !isEditing && "cursor-pointer"
+                    )}
                   >
-                    <div className="px-2 py-1.5 flex items-center justify-between">
+                    <div className={cn(
+                      "px-2 flex items-center justify-between",
+                      isFullscreen ? "py-0.5" : "py-1.5"
+                    )}>
                       {isEditing ? (
                         <div className="flex items-center gap-1 w-full">
                           <input
@@ -2474,7 +2568,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         <div className="flex-1 flex flex-col divide-y divide-slate-100 min-w-max">
           {visibleProjectTree.map(project => {
             const isCollapsed = collapsedProjectPaths.has(project.fullPath);
-            const indentPx = project.level * 14;
+            const isCompactLaneCol = effectiveProjectColWidth < 120;
+            const indentPx = project.level * (isCompactLaneCol ? 8 : 14);
 
             // Separate tasks for this project
             const projectTasks = project.tasks;
@@ -2503,12 +2598,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             const placed = calendarPlaced;
 
             // Calculate minimum height required for unscheduled tasks column
-            const unscheduledEstimatedHeight = showUnscheduledColumn && unscheduledTasks.length > 0
+            const unscheduledEstimatedHeight = effectiveShowUnscheduled && unscheduledTasks.length > 0
               ? Math.max(56, unscheduledTasks.length * 34 + 14 + (quickAddCell?.project === project.fullPath && quickAddCell?.slotKey === 'backlog' ? 42 : 0))
               : 56;
 
             const gridContentHeight = timelineMode === 'calendar' ? calendarLaneHeight : customLaneHeight;
-            const laneHeight = Math.max(56, gridContentHeight, unscheduledEstimatedHeight);
+            const laneHeight = isCollapsed ? 34 : Math.max(54, gridContentHeight, unscheduledEstimatedHeight);
 
             return (
               <div 
@@ -2518,7 +2613,26 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   project.level === 0 ? "bg-white" : "bg-slate-50/20"
                 )}
               >
-                {/* Project Lane Title Column (Permanently Sticky Left, Draggable for Subproject Nesting / Movement) */}
+                {/* In Fullscreen Mode when side columns are hidden: Zero-width sticky-left inline folder badge */}
+                {hideSideColumns ? (
+                  <div className="sticky left-0 z-20 w-0 overflow-visible self-start pointer-events-none">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleProjectCollapse(project.fullPath);
+                      }}
+                      style={{ marginLeft: `${Math.max(4, project.level * 10 + 4)}px` }}
+                      className="pointer-events-auto mt-0.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900/65 hover:bg-indigo-600/90 text-white text-[10px] font-mono backdrop-blur-xs shadow-2xs transition-colors whitespace-nowrap leading-none"
+                      title={L(`${project.fullPath} (タップで折りたたみ/展開)`, `${project.fullPath} (Tap to collapse/expand)`, `${project.fullPath} (Appuyer pour réduire/développer)`)}
+                    >
+                      {isCollapsed ? <ChevronRight size={10} /> : <ChevronDown size={10} />}
+                      <Folder size={9} className={project.level === 0 ? "text-indigo-300 shrink-0" : "text-amber-300 shrink-0"} />
+                      <span className="max-w-[130px] truncate">{project.name}</span>
+                    </button>
+                  </div>
+                ) : (
+                /* Project Lane Title Column (Permanently Sticky Left, Draggable for Subproject Nesting / Movement) */
                 <div 
                   id={`timeline-project-${encodeURIComponent(project.fullPath)}`}
                   draggable={true}
@@ -2534,9 +2648,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     }
                   }}
                   onDrop={(e) => handleProjectHeaderDrop(e, project.fullPath)}
-                  style={{ width: `${projectColWidth}px`, minHeight: `${laneHeight}px`, paddingLeft: `${Math.max(4, indentPx + 4)}px` }}
+                  style={{ width: `${effectiveProjectColWidth}px`, minHeight: `${laneHeight}px`, paddingLeft: `${Math.max(4, indentPx + 4)}px` }}
                   className={cn(
-                    "shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-center justify-between bg-white sticky left-0 z-20 select-none transition-colors cursor-grab active:cursor-grabbing group/lane self-stretch min-h-[56px]",
+                    "shrink-0 px-1.5 sm:px-2 py-2 border-r border-slate-200 flex items-center justify-between bg-white sticky left-0 z-20 select-none transition-colors cursor-grab active:cursor-grabbing group/lane self-stretch",
+                    isCollapsed ? "min-h-[34px]" : "min-h-[54px]",
                     project.level === 0 ? "font-bold text-slate-800" : "font-medium text-slate-600",
                     dragOverProjectHeader === project.fullPath && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset",
                     (selectedFolderPath === project.fullPath || selectedKey === `folder:${project.fullPath}` || activeTaskId === `folder:${project.fullPath}`) && "bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset"
@@ -2680,42 +2795,46 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   </div>
 
                   {/* Subfolder add, quick task add, and 3-dots menu buttons */}
-                  <div className="flex items-center gap-0.5 shrink-0 ml-1">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setTargetParentFolder(project.fullPath);
-                        setNewFolderName('');
-                        setIsCreateFolderOpen(true);
-                      }}
-                      className="hidden group-hover/lane:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
-                      title={L('サブフォルダを追加', 'Add subfolder', 'Ajouter un sous-dossier')}
-                    >
-                      <FolderPlus size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (collapsedProjectPaths.has(project.fullPath)) {
-                          toggleProjectCollapse(project.fullPath);
-                        }
-                        if (!showUnscheduledColumn) {
-                          setShowUnscheduledColumn(true);
-                        }
-                        setQuickAddCell({ 
-                          project: project.fullPath, 
-                          slotKey: 'backlog', 
-                          type: 'backlog' 
-                        });
-                        setQuickAddTitle('');
-                      }}
-                      className="hidden sm:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
-                      title={L('このプロジェクトにタスク追加', 'Add task in project', 'Ajouter une tâche dans ce projet')}
-                    >
-                      <Plus size={12} />
-                    </button>
+                  <div className="flex items-center gap-0.5 shrink-0 ml-0.5">
+                    {!isCompactLaneCol && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setTargetParentFolder(project.fullPath);
+                            setNewFolderName('');
+                            setIsCreateFolderOpen(true);
+                          }}
+                          className="hidden group-hover/lane:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                          title={L('サブフォルダを追加', 'Add subfolder', 'Ajouter un sous-dossier')}
+                        >
+                          <FolderPlus size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (collapsedProjectPaths.has(project.fullPath)) {
+                              toggleProjectCollapse(project.fullPath);
+                            }
+                            if (!showUnscheduledColumn) {
+                              setShowUnscheduledColumn(true);
+                            }
+                            setQuickAddCell({ 
+                              project: project.fullPath, 
+                              slotKey: 'backlog', 
+                              type: 'backlog' 
+                            });
+                            setQuickAddTitle('');
+                          }}
+                          className="hidden sm:flex p-0.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                          title={L('このプロジェクトにタスク追加', 'Add task in project', 'Ajouter une tâche dans ce projet')}
+                        >
+                          <Plus size={12} />
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       onClick={(e) => {
@@ -2729,7 +2848,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         });
                       }}
                       className={cn(
-                        "p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-opacity shrink-0",
+                        "p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-opacity shrink-0 mr-1",
                         activeMenu?.type === 'folder' && activeMenu.idOrPath === project.fullPath
                           ? "opacity-100 bg-slate-200/70 text-slate-800"
                           : "opacity-70 group-hover/lane:opacity-100"
@@ -2739,13 +2858,36 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                       <MoreHorizontal size={13} />
                     </button>
                   </div>
+
+                  {/* Draggable resize handle on right edge of every Project Lane row */}
+                  <div
+                    draggable={false}
+                    onDragStart={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleStartProjectResize(e.clientX);
+                    }}
+                    onTouchStart={(e) => {
+                      e.stopPropagation();
+                      handleStartProjectResize(e.touches[0].clientX);
+                    }}
+                    className="absolute -right-1 top-0 bottom-0 w-3.5 touch-none cursor-col-resize hover:bg-indigo-500/40 active:bg-indigo-600 transition-colors z-30 flex items-center justify-center group-hover/lane:bg-slate-200/60"
+                    title={L("左右にドラッグしてプロジェクト列幅を調整", "Drag left/right to resize project column width", "Glisser pour ajuster la largeur de la colonne")}
+                  >
+                    <div className="w-0.5 h-4 bg-slate-300 group-hover/lane:bg-indigo-400 rounded-full" />
+                  </div>
                 </div>
+                )}
 
                 {/* Content cells (Visible only if project is not collapsed) */}
                 {!isCollapsed ? (
                   <>
                     {/* Unscheduled / Backlog Cell */}
-                    {showUnscheduledColumn && (
+                    {effectiveShowUnscheduled && (
                       <div
                         onDragOver={(e) => {
                           e.preventDefault();
@@ -3074,7 +3216,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   </>
                 ) : (
                   /* Collapsed Placeholder Lane */
-                  <div className="flex-1 px-4 py-2 text-xs text-slate-400 italic bg-slate-50/50 flex items-center gap-2">
+                  <div className={cn(
+                    "flex-1 py-1.5 text-xs text-slate-400 italic bg-slate-50/50 flex items-center gap-2",
+                    hideSideColumns ? "pl-36 pr-4 min-h-[30px]" : "px-4"
+                  )}>
                     <span>
                       {totalDescendantTasks} {L('件のタスクが折りたたまれています', 'tasks collapsed', 'tâches réduites')}
                     </span>
@@ -3091,6 +3236,76 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           })}
         </div>
       </div>
+
+      {/* Floating Fullscreen / Overall View Control Pill */}
+      {onToggleFullscreen && (
+        isFullscreen ? (
+          <div className="fixed bottom-2.5 right-2.5 z-[95] flex items-center gap-1 bg-slate-900/85 backdrop-blur-md text-white px-2 py-1 rounded-xl shadow-xl border border-white/15 select-none">
+            {timelineMode === 'calendar' && (
+              <div className="flex items-center gap-0.5 pr-1 border-r border-white/20">
+                <button
+                  type="button"
+                  onClick={() => handleNavigate('prev')}
+                  className="p-1 hover:bg-white/15 rounded text-slate-200 hover:text-white transition-colors"
+                  title={L('前の週へ', 'Previous week', 'Semaine précédente')}
+                >
+                  <ChevronLeft size={13} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleNavigate('today')}
+                  className="px-1.5 py-0.5 text-[10px] font-bold text-indigo-300 hover:text-white hover:bg-white/15 rounded transition-colors"
+                >
+                  {L('今日', 'Today', 'Auj.')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleNavigate('next')}
+                  className="p-1 hover:bg-white/15 rounded text-slate-200 hover:text-white transition-colors"
+                  title={L('次の週へ', 'Next week', 'Semaine suivante')}
+                >
+                  <ChevronRight size={13} />
+                </button>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setShowLanesInFullscreen(prev => !prev)}
+              className={cn(
+                "px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer",
+                showLanesInFullscreen
+                  ? "bg-indigo-600 text-white"
+                  : "text-slate-300 hover:text-white hover:bg-white/15"
+              )}
+              title={L('全画面のまま左側のプロジェクトレーン列を表示/非表示', 'Toggle Project Lanes column in Fullscreen', 'Afficher/masquer les couloirs de projets')}
+            >
+              <Folder size={11} />
+              <span>{L('レーン', 'Lanes', 'Couloirs')}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onToggleFullscreen}
+              className="px-2.5 py-1 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-[11px] font-bold flex items-center gap-1 shadow-xs transition-colors cursor-pointer"
+              title={L('全体画面に戻す (上部バー・ツールバーを表示)', 'Switch to Overall View (show all bars)', 'Revenir à la vue complète')}
+            >
+              <Minimize2 size={12} />
+              <span>{L('全体画面', 'Full View', 'Vue complète')}</span>
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={onToggleFullscreen}
+            className="lg:hidden fixed bottom-18 right-2.5 z-[65] flex items-center gap-1.5 bg-slate-900/85 hover:bg-indigo-600 backdrop-blur-md text-white px-3 py-1.5 rounded-xl shadow-lg border border-white/15 text-[11px] font-bold transition-all cursor-pointer select-none"
+            title={L('タイムラインを全画面で表示', 'Fullscreen Timeline', 'Chronologie plein écran')}
+          >
+            <Maximize2 size={13} />
+            <span>{L('全画面', 'Fullscreen', 'Plein écran')}</span>
+          </button>
+        )
+      )}
 
       {/* Folder Creation Modal */}
       {isCreateFolderOpen && (

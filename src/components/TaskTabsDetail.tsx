@@ -310,6 +310,27 @@ const SinglePane: React.FC<SinglePaneProps> = ({
     triggerSaveNotice();
   };
 
+  // Auto-save title and notes while typing (debounced 500ms) so changes immediately sync to local backup file
+  useEffect(() => {
+    if (!activeTask) return;
+    if (!title.trim() || title.trim() === activeTask.title) return;
+    const timer = setTimeout(() => {
+      onUpdateTask(activeTask.id, { title: title.trim() });
+      triggerSaveNotice();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [title, activeTask?.id, activeTask?.title]);
+
+  useEffect(() => {
+    if (!activeTask) return;
+    if (notes === (activeTask.notes || '')) return;
+    const timer = setTimeout(() => {
+      onUpdateTask(activeTask.id, { notes });
+      triggerSaveNotice();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [notes, activeTask?.id, activeTask?.notes]);
+
   const parentDeadlineLimit = useMemo(() => {
     if (!activeTask || !activeTask.project) return undefined;
     return getParentFolderDeadline(activeTask.project, folderMetas || {}, true);
@@ -2207,14 +2228,14 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   return (
     <div 
       ref={rootPaneRef}
-      className="fixed inset-0 z-[150] max-sm:w-full! h-full sm:relative sm:inset-auto sm:z-20 sm:h-full sm:min-h-0 sm:max-w-[calc(100%-220px)] flex shrink-0 bg-white sm:border-l sm:border-slate-200/90 shadow-2xl sm:shadow-md select-text"
+      className="fixed inset-0 z-[150] max-lg:w-full! h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 lg:max-w-[calc(100%-220px)] flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-2xl lg:shadow-md select-text"
       style={{ width: `${width}px` }}
     >
       {/* Left resize handle for the entire Task Detail area */}
       <div 
         onMouseDown={handleResizeWidthMouseDown}
         onDoubleClick={() => onWidthChange(480)}
-        className="hidden sm:flex absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize items-center justify-center group/resizer z-40"
+        className="hidden lg:flex absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize items-center justify-center group/resizer z-40"
         title={L("ドラッグして詳細エリアの幅を調整 (ダブルクリックでリセット)", "Drag to resize detail pane (Double-click to reset)", "Glisser pour redimensionner (Double-clic pour réinitialiser)")}
       >
         <div className="w-1 h-full group-hover/resizer:bg-indigo-500/60 group-active/resizer:bg-indigo-600 transition-colors flex items-center justify-center">
