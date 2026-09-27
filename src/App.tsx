@@ -356,7 +356,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.11'";
+  const APP_VERSION = "3.1.13";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -766,6 +766,8 @@ export default function App() {
       localStorage.setItem(storageKey, JSON.stringify(merged));
       window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch {}
+
+    updateFolderMeta(newFolderPath, { createdAt: now });
 
     setMessage({
       text: L(
@@ -3006,13 +3008,24 @@ export default function App() {
 
   const updateFolderMeta = async (path: string, updates: Partial<FolderMeta>) => {
     if (!path) return;
+    const now = Date.now();
     const current = folderMetas[path] || { path, section: activeSection, category: 'Focus' };
+    const existingTaskTimes = tasks
+      .filter(t => t.project === path || t.project.startsWith(path + '/'))
+      .map(t => t.createdAt)
+      .filter((ts): ts is number => typeof ts === 'number' && ts > 0);
+    const resolvedCreatedAt =
+      updates.createdAt ||
+      current.createdAt ||
+      (existingTaskTimes.length > 0 ? Math.min(...existingTaskTimes) : now);
+
     const sanitizedLocal: FolderMeta = {
       ...current,
       ...updates,
       path,
       section: current.section || activeSection,
-      updatedAt: Date.now()
+      createdAt: resolvedCreatedAt,
+      updatedAt: now
     };
     for (const k of Object.keys(updates)) {
       if ((updates as any)[k] === undefined) {
@@ -3032,8 +3045,10 @@ export default function App() {
         const firestoreUpdates: Record<string, any> = {
           path,
           section: sanitizedLocal.section || activeSection,
+          category: sanitizedLocal.category || 'Focus',
           userId: user.uid,
-          updatedAt: Date.now()
+          createdAt: resolvedCreatedAt,
+          updatedAt: now
         };
         for (const [k, v] of Object.entries(updates)) {
           if (v === undefined) {
@@ -5255,6 +5270,7 @@ export default function App() {
                 deadlineThresholdDays={settings.deadlineThreshold}
                 language={settings.language}
                 folderMetas={folderMetas}
+                onUpdateFolderMeta={updateFolderMeta}
                 onToggleFolderStar={handleToggleFolderStar}
                 onToggleFolderPin={handleToggleFolderPin}
                 t={t}

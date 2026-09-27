@@ -65,6 +65,7 @@ interface TaskExplorerTreeProps {
   deadlineThresholdDays?: number;
   language?: string;
   folderMetas?: Record<string, FolderMeta>;
+  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   t: (key: string) => string;
@@ -97,6 +98,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   deadlineThresholdDays = 3,
   language = 'en',
   folderMetas,
+  onUpdateFolderMeta,
   onToggleFolderStar,
   onToggleFolderPin,
   t
@@ -895,6 +897,9 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         if (!customFolders.includes(newFolderPath)) {
           const next = [...customFolders, newFolderPath];
           saveCustomFolders(next);
+        }
+        if (!folderMetas?.[newFolderPath]?.createdAt) {
+          onUpdateFolderMeta?.(newFolderPath, { createdAt: Date.now() });
         }
         if (path && collapsedFolders.has(path)) {
           const next = new Set<string>(collapsedFolders);

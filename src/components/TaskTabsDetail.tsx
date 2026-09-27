@@ -1432,6 +1432,18 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                 </span>
               </button>
             </div>
+
+            {/* File Timestamps (Created & Updated) at the very bottom */}
+            <div className="pt-2.5 border-t border-slate-100 text-[10px] text-slate-400 flex flex-col gap-1 font-mono">
+              <div className="flex items-center justify-between">
+                <span>{L('作成日時:', 'Created:', 'Créé le :')}</span>
+                <span>{activeTask.createdAt ? format(new Date(activeTask.createdAt), 'yyyy/MM/dd HH:mm') : '-'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>{L('更新日時:', 'Updated:', 'Mis à jour le :')}</span>
+                <span>{(activeTask.updatedAt || activeTask.createdAt) ? format(new Date(activeTask.updatedAt || activeTask.createdAt), 'yyyy/MM/dd HH:mm') : '-'}</span>
+              </div>
+            </div>
           </div>
 
           {/* Expanded Notes Modal */}

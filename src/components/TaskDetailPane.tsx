@@ -688,11 +688,6 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
 
           {/* Metadata & Actions */}
           <div className="pt-4 border-t border-slate-100 space-y-3">
-            <div className="text-[10px] text-slate-400 flex flex-col gap-0.5 font-mono">
-              <div>{L('作成:', 'Created:', 'Créé :')} {format(new Date(task.createdAt), 'yyyy/MM/dd HH:mm')}</div>
-              <div>{L('更新:', 'Updated:', 'Mis à jour :')} {format(new Date(task.updatedAt), 'yyyy/MM/dd HH:mm')}</div>
-            </div>
-
             <div className="flex items-center justify-between gap-2 pt-1">
               <button
                 type="button"
@@ -720,6 +715,17 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
                   <Trash2 size={12} />
                   <span>{L('ゴミ箱', 'Trash', 'Corbeille')}</span>
                 </button>
+              </div>
+            </div>
+
+            <div className="pt-2.5 border-t border-slate-100 text-[10px] text-slate-400 flex flex-col gap-1 font-mono">
+              <div className="flex items-center justify-between">
+                <span>{L('作成日時:', 'Created:', 'Créé le :')}</span>
+                <span>{task.createdAt ? format(new Date(task.createdAt), 'yyyy/MM/dd HH:mm') : '-'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>{L('更新日時:', 'Updated:', 'Mis à jour le :')}</span>
+                <span>{(task.updatedAt || task.createdAt) ? format(new Date(task.updatedAt || task.createdAt), 'yyyy/MM/dd HH:mm') : '-'}</span>
               </div>
             </div>
           </div>

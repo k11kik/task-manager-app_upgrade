@@ -326,6 +326,34 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
     t.category !== 'Trash'
   );
 
+  // All tasks in this folder (including subfolders) for timestamp calculation
+  const allFolderTasks = tasks.filter(t =>
+    t.project === folderPath || t.project.startsWith(folderPath + '/')
+  );
+
+  const folderCreatedAt = (() => {
+    if (folderMeta?.createdAt) return folderMeta.createdAt;
+    const taskCreatedTimes = allFolderTasks.map(t => t.createdAt).filter((ts): ts is number => typeof ts === 'number' && ts > 0);
+    if (taskCreatedTimes.length > 0) {
+      return Math.min(...taskCreatedTimes);
+    }
+    if (folderMeta?.updatedAt) return folderMeta.updatedAt;
+    return undefined;
+  })();
+
+  const latestChildUpdatedAt = (() => {
+    const targetTasks = containedTasks.length > 0
+      ? containedTasks
+      : allFolderTasks.filter(t => t.category !== 'Trash');
+    const childUpdateTimes = targetTasks
+      .map(t => t.updatedAt || t.createdAt)
+      .filter((ts): ts is number => typeof ts === 'number' && ts > 0);
+    if (childUpdateTimes.length > 0) {
+      return Math.max(...childUpdateTimes);
+    }
+    return undefined;
+  })();
+
   return (
     <div className="flex-1 h-full min-h-0 flex flex-col overflow-hidden bg-white">
       {/* Subheader / Breadcrumb */}
@@ -853,6 +881,18 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             <Trash2 size={11} />
             <span>{L('フォルダをゴミ箱へ', 'Trash Folder', 'Mettre le dossier à la corbeille')}</span>
           </button>
+        </div>
+
+        {/* Folder Timestamps (Folder Created & Latest Child File Updated) at the very bottom */}
+        <div className="pt-2.5 border-t border-slate-100 text-[10px] text-slate-400 flex flex-col gap-1 font-mono">
+          <div className="flex items-center justify-between">
+            <span>{L('フォルダ作成日時:', 'Folder Created:', 'Dossier créé le :')}</span>
+            <span>{folderCreatedAt ? format(new Date(folderCreatedAt), 'yyyy/MM/dd HH:mm') : '-'}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>{L('子ファイルの最新更新日時:', 'Latest Child File Updated:', 'Dernière mise à jour (fichiers) :')}</span>
+            <span>{latestChildUpdatedAt ? format(new Date(latestChildUpdatedAt), 'yyyy/MM/dd HH:mm') : L('なし', 'None', 'Aucun')}</span>
+          </div>
         </div>
       </div>
 
