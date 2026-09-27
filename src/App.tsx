@@ -199,7 +199,14 @@ const IDB_NAME = 'navfor_local_sync_db';
 const IDB_STORE = 'handles';
 const IDB_KEY = 'backup_dir';
 
-async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle): Promise<void> {
+async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle, uid?: string | null): Promise<void> {
+  try {
+    localStorage.setItem('navfor_pc_local_path', handle.name);
+    if (uid) {
+      localStorage.setItem(`navfor_pc_local_path_${uid}`, handle.name);
+      localStorage.removeItem(`navfor_local_backup_explicit_off_${uid}`);
+    }
+  } catch {}
   return new Promise((resolve) => {
     try {
       const req = indexedDB.open(IDB_NAME, 1);
@@ -213,7 +220,11 @@ async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle): Promise<vo
         try {
           const db = req.result;
           const tx = db.transaction(IDB_STORE, 'readwrite');
-          tx.objectStore(IDB_STORE).put(handle, IDB_KEY);
+          const store = tx.objectStore(IDB_STORE);
+          store.put(handle, IDB_KEY);
+          if (uid) {
+            store.put(handle, `${IDB_KEY}_${uid}`);
+          }
           tx.oncomplete = () => {
             db.close();
             resolve();
@@ -233,7 +244,7 @@ async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle): Promise<vo
   });
 }
 
-async function loadDirHandleFromIDB(): Promise<FileSystemDirectoryHandle | null> {
+async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string): Promise<FileSystemDirectoryHandle | null> {
   return new Promise((resolve) => {
     try {
       const req = indexedDB.open(IDB_NAME, 1);
@@ -247,15 +258,48 @@ async function loadDirHandleFromIDB(): Promise<FileSystemDirectoryHandle | null>
         try {
           const db = req.result;
           const tx = db.transaction(IDB_STORE, 'readonly');
-          const getReq = tx.objectStore(IDB_STORE).get(IDB_KEY);
-          getReq.onsuccess = () => {
-            db.close();
-            resolve((getReq.result as FileSystemDirectoryHandle) || null);
-          };
-          getReq.onerror = () => {
-            db.close();
-            resolve(null);
-          };
+          const store = tx.objectStore(IDB_STORE);
+          if (uid) {
+            const userReq = store.get(`${IDB_KEY}_${uid}`);
+            userReq.onsuccess = () => {
+              const userHandle = (userReq.result as FileSystemDirectoryHandle) || null;
+              if (userHandle) {
+                db.close();
+                resolve(userHandle);
+                return;
+              }
+              const fallbackReq = store.get(IDB_KEY);
+              fallbackReq.onsuccess = () => {
+                db.close();
+                const fbHandle = (fallbackReq.result as FileSystemDirectoryHandle) || null;
+                if (fbHandle && (!expectedPath || fbHandle.name === expectedPath)) {
+                  resolve(fbHandle);
+                } else if (fbHandle && !expectedPath) {
+                  resolve(fbHandle);
+                } else {
+                  resolve(null);
+                }
+              };
+              fallbackReq.onerror = () => {
+                db.close();
+                resolve(null);
+              };
+            };
+            userReq.onerror = () => {
+              db.close();
+              resolve(null);
+            };
+          } else {
+            const getReq = store.get(IDB_KEY);
+            getReq.onsuccess = () => {
+              db.close();
+              resolve((getReq.result as FileSystemDirectoryHandle) || null);
+            };
+            getReq.onerror = () => {
+              db.close();
+              resolve(null);
+            };
+          }
         } catch {
           resolve(null);
         }
@@ -267,7 +311,13 @@ async function loadDirHandleFromIDB(): Promise<FileSystemDirectoryHandle | null>
   });
 }
 
-async function clearDirHandleFromIDB(): Promise<void> {
+async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
+  try {
+    localStorage.removeItem('navfor_pc_local_path');
+    if (uid) {
+      localStorage.removeItem(`navfor_pc_local_path_${uid}`);
+    }
+  } catch {}
   return new Promise((resolve) => {
     try {
       const req = indexedDB.open(IDB_NAME, 1);
@@ -281,7 +331,11 @@ async function clearDirHandleFromIDB(): Promise<void> {
         try {
           const db = req.result;
           const tx = db.transaction(IDB_STORE, 'readwrite');
-          tx.objectStore(IDB_STORE).delete(IDB_KEY);
+          const store = tx.objectStore(IDB_STORE);
+          store.delete(IDB_KEY);
+          if (uid) {
+            store.delete(`${IDB_KEY}_${uid}`);
+          }
           tx.oncomplete = () => {
             db.close();
             resolve();
@@ -862,6 +916,9 @@ export default function App() {
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [dirPermission, setDirPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
   const [isIdbLoaded, setIsIdbLoaded] = useState(false);
+  const [isSettingsLoaded, setIsSettingsLoaded] = useState(false);
+  const settingsLoadedRef = useRef<boolean>(false);
+  const lastCloudSyncedSlotsRef = useRef<string>('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(() => {
     const saved = Number(localStorage.getItem('trifocus_last_backup'));
@@ -930,10 +987,16 @@ export default function App() {
   const [showProjectFilter, setShowProjectFilter] = useState(false);
 
   // Restore saved FileSystemDirectoryHandle from IndexedDB on startup, focus, and cross-tab events
-  const refreshDirHandleFromIDB = async () => {
+  const refreshDirHandleFromIDB = async (uidOverride?: string | null, expectedPathOverride?: string) => {
     try {
-      const handle = await loadDirHandleFromIDB();
+      const targetUid = uidOverride !== undefined ? uidOverride : userRef.current?.uid;
+      const expectedPath = expectedPathOverride !== undefined ? expectedPathOverride : settingsRef.current?.localBackupPath;
+      const handle = await loadDirHandleFromIDB(targetUid, expectedPath);
       if (!handle) {
+        if (dirHandleRef.current !== null) {
+          dirHandleRef.current = null;
+          setDirHandle(null);
+        }
         setIsIdbLoaded(true);
         return null;
       }
@@ -945,22 +1008,30 @@ export default function App() {
         } catch {}
       }
       if (!isSame) {
-        setDirHandle(handle);
-        dirHandleRef.current = handle;
         activeHandle = handle;
       }
+      let resolvedPerm: 'granted' | 'prompt' | 'denied' = 'prompt';
       try {
         if (typeof (activeHandle as any).queryPermission === 'function') {
-          const perm = await (activeHandle as any).queryPermission({ mode: 'readwrite' });
-          setDirPermission(perm);
-          dirPermissionRef.current = perm;
+          resolvedPerm = await (activeHandle as any).queryPermission({ mode: 'readwrite' });
         } else {
-          setDirPermission('granted');
-          dirPermissionRef.current = 'granted';
+          resolvedPerm = 'granted';
         }
       } catch {
-        setDirPermission('prompt');
-        dirPermissionRef.current = 'prompt';
+        resolvedPerm = 'prompt';
+      }
+      if (!isSame) {
+        dirHandleRef.current = activeHandle;
+        setDirHandle(activeHandle);
+      }
+      if (dirPermissionRef.current !== resolvedPerm) {
+        dirPermissionRef.current = resolvedPerm;
+        setDirPermission(resolvedPerm);
+      }
+      if (targetUid && activeHandle) {
+        try {
+          localStorage.setItem(`navfor_pc_local_path_${targetUid}`, activeHandle.name);
+        } catch {}
       }
       setIsIdbLoaded(true);
       return activeHandle;
@@ -1126,22 +1197,34 @@ export default function App() {
     }
   }, [message]);
 
-  const [settings, setSettings] = useState({
-    urgentLimit: 3,
-    deadlineThreshold: 3,
-    archiveThresholdDays: 90,
-    doneToTrashThresholdDays: 7,
-    trashCleanupThresholdDays: 30,
-    archiveDoneToTrashDays: 7,
-    archiveInactiveToTrashDays: 99999,
-    criticalThreshold: 100,
-    isLocalBackupEnabled: false,
-    localBackupPath: '',
-    displayMode: 'standard' as 'compact' | 'standard' | 'large',
-    displayModeFocus: 'standard' as 'compact' | 'standard' | 'large',
-    displayModeTodo: 'standard' as 'compact' | 'standard' | 'large',
-    language: 'en' as 'en' | 'ja' | 'fr',
-    sections: []
+  const [settings, setSettings] = useState(() => {
+    const defaults = {
+      urgentLimit: 3,
+      deadlineThreshold: 3,
+      archiveThresholdDays: 90,
+      doneToTrashThresholdDays: 7,
+      trashCleanupThresholdDays: 30,
+      archiveDoneToTrashDays: 7,
+      archiveInactiveToTrashDays: 99999,
+      criticalThreshold: 100,
+      isLocalBackupEnabled: false,
+      localBackupPath: '',
+      displayMode: 'standard' as 'compact' | 'standard' | 'large',
+      displayModeFocus: 'standard' as 'compact' | 'standard' | 'large',
+      displayModeTodo: 'standard' as 'compact' | 'standard' | 'large',
+      language: 'en' as 'en' | 'ja' | 'fr',
+      sections: [] as string[]
+    };
+    try {
+      const lastUid = localStorage.getItem('navfor_last_uid');
+      if (lastUid) {
+        const cached = localStorage.getItem(`navfor_cached_settings_${lastUid}`);
+        if (cached) {
+          return { ...defaults, ...JSON.parse(cached) };
+        }
+      }
+    } catch {}
+    return defaults;
   });
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -1725,7 +1808,14 @@ export default function App() {
   };
 
   const isLocalLogConfigured = Boolean(settings.isLocalBackupEnabled && settings.localBackupPath);
-  const isLocalDiskReady = Boolean(isLocalLogConfigured && dirHandle && dirPermission === 'granted');
+  const isPcFolderConnected = Boolean(
+    dirHandle &&
+    (!settings.localBackupPath ||
+      dirHandle.name === settings.localBackupPath ||
+      settings.localBackupPath === 'NavFOR_Local_Backup' ||
+      settings.localBackupPath === 'Local_Backup_Folder')
+  );
+  const isLocalDiskReady = Boolean(isLocalLogConfigured && isPcFolderConnected);
 
   const jumpToLocalLogSettings = () => {
     setShowSyncDetails(false);
@@ -1740,11 +1830,30 @@ export default function App() {
     }, 3200);
   };
 
-  // Auth State
+  // Auth State: resolve IDB handle and cached settings before completing authLoading
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthLoading(false);
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+      userRef.current = u;
+      if (u) {
+        try {
+          localStorage.setItem('navfor_last_uid', u.uid);
+          const cached = localStorage.getItem(`navfor_cached_settings_${u.uid}`);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            settingsRef.current = { ...settingsRef.current, ...parsed };
+            setSettings(prev => ({ ...prev, ...parsed }));
+          }
+        } catch {}
+        await refreshDirHandleFromIDB(u.uid, settingsRef.current.localBackupPath);
+        setUser(u);
+        setAuthLoading(false);
+      } else {
+        await refreshDirHandleFromIDB(null, '');
+        settingsLoadedRef.current = true;
+        setIsSettingsLoaded(true);
+        setUser(null);
+        setAuthLoading(false);
+      }
     });
     return () => unsubscribe();
   }, []);
@@ -1753,8 +1862,15 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
-    const settingsRef = doc(db, 'settings', user.uid);
-    const unsubscribe = onSnapshot(settingsRef, (docSnap) => {
+    // Fallback timer so UI never blocks if offline with an uncached new account
+    const safetyTimer = setTimeout(() => {
+      settingsLoadedRef.current = true;
+      setIsSettingsLoaded(true);
+    }, 1500);
+
+    const settingsRefDoc = doc(db, 'settings', user.uid);
+    const unsubscribe = onSnapshot(settingsRefDoc, async (docSnap) => {
+      clearTimeout(safetyTimer);
       if (docSnap.exists()) {
         const data = docSnap.data();
         const loadedSections = (data.sections && data.sections.length > 0) ? data.sections : ['General'];
@@ -1764,11 +1880,44 @@ export default function App() {
             localStorage.setItem('navfor_migrated_archive_threshold_90_v1', '1');
             if (resolvedArchiveThresholdDays === 99999) {
               resolvedArchiveThresholdDays = 90;
-              setDoc(settingsRef, { archiveThresholdDays: 90 }, { merge: true }).catch(() => {});
+              updateDoc(settingsRefDoc, { archiveThresholdDays: 90 }).catch(() => {});
             }
           }
         } catch {}
-        setSettings({
+
+        // Ensure we have checked IDB for this user/path before finalizing Sync button state
+        let currentHandle = dirHandleRef.current;
+        if (!currentHandle) {
+          currentHandle = await refreshDirHandleFromIDB(user.uid, data.localBackupPath || '');
+        }
+
+        let resolvedIsLocalBackupEnabled = Boolean(data.isLocalBackupEnabled);
+        let resolvedLocalBackupPath = data.localBackupPath || '';
+
+        // Self-heal if a previous startup race wiped isLocalBackupEnabled/localBackupPath while dirHandle is still present on this PC
+        let explicitlyDisabled = false;
+        try {
+          explicitlyDisabled = localStorage.getItem(`navfor_local_backup_explicit_off_${user.uid}`) === '1';
+        } catch {}
+
+        if (
+          currentHandle &&
+          !explicitlyDisabled &&
+          (!resolvedIsLocalBackupEnabled || !resolvedLocalBackupPath) &&
+          (data.localBackupSlots || data.lastLocalSyncTime || localStorage.getItem(`navfor_pc_local_path_${user.uid}`) || localStorage.getItem('trifocus_last_backup'))
+        ) {
+          resolvedIsLocalBackupEnabled = true;
+          resolvedLocalBackupPath = resolvedLocalBackupPath || currentHandle.name;
+          saveDirHandleToIDB(currentHandle, user.uid);
+          updateDoc(settingsRefDoc, {
+            isLocalBackupEnabled: true,
+            localBackupPath: resolvedLocalBackupPath,
+          }).catch(() => {});
+        } else if (currentHandle && resolvedIsLocalBackupEnabled && resolvedLocalBackupPath === currentHandle.name) {
+          saveDirHandleToIDB(currentHandle, user.uid);
+        }
+
+        const nextSettingsObj = {
           urgentLimit: data.urgentLimit || 3,
           deadlineThreshold: data.deadlineThreshold || 3,
           archiveThresholdDays: resolvedArchiveThresholdDays,
@@ -1777,14 +1926,20 @@ export default function App() {
           archiveDoneToTrashDays: data.archiveDoneToTrashDays !== undefined ? data.archiveDoneToTrashDays : 7,
           archiveInactiveToTrashDays: data.archiveInactiveToTrashDays !== undefined ? data.archiveInactiveToTrashDays : 99999,
           criticalThreshold: data.criticalThreshold || 100,
-          isLocalBackupEnabled: data.isLocalBackupEnabled || false,
-          localBackupPath: data.localBackupPath || '',
-          displayMode: data.displayMode === 'card' ? 'standard' : (data.displayMode === 'list' ? 'compact' : (data.displayMode || 'standard')),
-          displayModeFocus: data.displayModeFocus || 'standard',
-          displayModeTodo: data.displayModeTodo || 'standard',
-          language: data.language || 'en',
+          isLocalBackupEnabled: resolvedIsLocalBackupEnabled,
+          localBackupPath: resolvedLocalBackupPath,
+          displayMode: (data.displayMode === 'card' ? 'standard' : (data.displayMode === 'list' ? 'compact' : (data.displayMode || 'standard'))) as 'compact' | 'standard' | 'large',
+          displayModeFocus: (data.displayModeFocus || 'standard') as 'compact' | 'standard' | 'large',
+          displayModeTodo: (data.displayModeTodo || 'standard') as 'compact' | 'standard' | 'large',
+          language: (data.language || 'en') as 'en' | 'ja' | 'fr',
           sections: loadedSections
-        });
+        };
+
+        settingsRef.current = nextSettingsObj;
+        setSettings(nextSettingsObj);
+        try {
+          localStorage.setItem(`navfor_cached_settings_${user.uid}`, JSON.stringify(nextSettingsObj));
+        } catch {}
 
         if (data.localBackupSlots && typeof data.localBackupSlots === 'object') {
           const remoteSlots = data.localBackupSlots;
@@ -1840,9 +1995,12 @@ export default function App() {
           }
           return prev;
         });
+
+        settingsLoadedRef.current = true;
+        setIsSettingsLoaded(true);
       } else {
         // Init default settings for new user
-        setDoc(settingsRef, {
+        const defaultUserSettings = {
           userId: user.uid,
           urgentLimit: 3,
           deadlineThreshold: 3,
@@ -1859,11 +2017,22 @@ export default function App() {
           displayModeTodo: 'standard',
           language: 'en',
           sections: ['General']
-        }).catch(err => handleFirestoreError(err, OperationType.WRITE, `settings/${user.uid}`));
+        };
+        settingsLoadedRef.current = true;
+        setIsSettingsLoaded(true);
+        setDoc(settingsRefDoc, defaultUserSettings).catch(err => handleFirestoreError(err, OperationType.WRITE, `settings/${user.uid}`));
       }
-    }, (err) => handleFirestoreError(err, OperationType.GET, `settings/${user.uid}`));
+    }, (err) => {
+      clearTimeout(safetyTimer);
+      settingsLoadedRef.current = true;
+      setIsSettingsLoaded(true);
+      handleFirestoreError(err, OperationType.GET, `settings/${user.uid}`);
+    });
 
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(safetyTimer);
+      unsubscribe();
+    };
   }, [user]);
 
   // Tasks & Folders Sync
@@ -1998,14 +2167,30 @@ export default function App() {
   const saveSettings = async (updates: Partial<typeof settings>) => {
     setSettings(prev => {
       const next = { ...prev, ...updates };
+      settingsRef.current = next;
 
       // If sync is disabled, clear the directory handle inside the update logic
-      if ('isLocalBackupEnabled' in updates && !updates.isLocalBackupEnabled) {
-        setDirHandle(null);
-        clearDirHandleFromIDB();
+      if ('isLocalBackupEnabled' in updates) {
+        if (!updates.isLocalBackupEnabled) {
+          dirHandleRef.current = null;
+          setDirHandle(null);
+          clearDirHandleFromIDB(user?.uid);
+          if (user?.uid) {
+            try {
+              localStorage.setItem(`navfor_local_backup_explicit_off_${user.uid}`, '1');
+            } catch {}
+          }
+        } else if (user?.uid) {
+          try {
+            localStorage.removeItem(`navfor_local_backup_explicit_off_${user.uid}`);
+          } catch {}
+        }
       }
 
       if (user) {
+        try {
+          localStorage.setItem(`navfor_cached_settings_${user.uid}`, JSON.stringify(next));
+        } catch {}
         // Trigger Firestore update with the most current state
         setDoc(doc(db, 'settings', user.uid), {
           userId: user.uid,
@@ -3360,7 +3545,7 @@ export default function App() {
     syncTimestamp: number
   ) => {
     const currentUser = userRef.current;
-    if (!currentUser) return;
+    if (!currentUser || !settingsLoadedRef.current) return;
     try {
       const cleanSlots: Record<string, any> = {};
       for (const s of [1, 2, 3] as const) {
@@ -3378,16 +3563,15 @@ export default function App() {
           cleanSlots[String(s)] = null;
         }
       }
-      setDoc(
-        doc(db, 'settings', currentUser.uid),
-        {
-          userId: currentUser.uid,
-          ...settingsRef.current,
-          localBackupSlots: cleanSlots,
-          lastLocalSyncTime: syncTimestamp,
-        },
-        { merge: true }
-      ).catch(() => {});
+      const serialized = JSON.stringify(cleanSlots);
+      if (lastCloudSyncedSlotsRef.current === serialized) {
+        return;
+      }
+      lastCloudSyncedSlotsRef.current = serialized;
+      updateDoc(doc(db, 'settings', currentUser.uid), {
+        localBackupSlots: cleanSlots,
+        lastLocalSyncTime: syncTimestamp,
+      }).catch(() => {});
     } catch {}
   };
 
@@ -3795,7 +3979,7 @@ export default function App() {
       dirPermissionRef.current = 'granted';
       setDirHandle(handle);
       setDirPermission('granted');
-      await saveDirHandleToIDB(handle);
+      await saveDirHandleToIDB(handle, userRef.current?.uid);
       if (backupChannelRef.current) {
         try {
           backupChannelRef.current.postMessage({ type: 'DIR_HANDLE_UPDATED', handle });
@@ -4397,7 +4581,7 @@ export default function App() {
     });
   };
 
-  if (authLoading) {
+  if (authLoading || !isIdbLoaded || (user && !isSettingsLoaded)) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] text-slate-800 flex flex-col items-center justify-center font-sans">
         <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4" />
