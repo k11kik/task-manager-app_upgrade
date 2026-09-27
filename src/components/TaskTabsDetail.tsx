@@ -221,6 +221,19 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   const [isSavedNotice, setIsSavedNotice] = useState(false);
   const [isExpandedNotesOpen, setIsExpandedNotesOpen] = useState(false);
 
+  // Track focus and unsaved edits so typing in Notes/Title never triggers mid-typing backups or cursor jumps
+  const isTitleFocusedRef = useRef(false);
+  const isNotesFocusedRef = useRef(false);
+  const syncedTaskIdRef = useRef<string | null>(null);
+  const lastSavedTitleRef = useRef<string>('');
+  const lastSavedNotesRef = useRef<string>('');
+  const dirtyTitleRef = useRef<{ taskId: string; value: string } | null>(null);
+  const dirtyNotesRef = useRef<{ taskId: string; value: string } | null>(null);
+  const onUpdateTaskRef = useRef(onUpdateTask);
+  onUpdateTaskRef.current = onUpdateTask;
+  const onPinTabRef = useRef(onPinTab);
+  onPinTabRef.current = onPinTab;
+
   // Drag and Drop Tab states
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dropSlot, setDropSlot] = useState<number | null>(null);
@@ -250,11 +263,53 @@ const SinglePane: React.FC<SinglePaneProps> = ({
     };
   }, []);
 
-  // Sync state whenever activeTask changes
+  // Flush any pending Title / Notes edits when switching tasks or unmounting
+  useEffect(() => {
+    const flushDirtyEdits = () => {
+      if (dirtyTitleRef.current) {
+        const { taskId, value } = dirtyTitleRef.current;
+        dirtyTitleRef.current = null;
+        const trimmed = value.trim();
+        if (trimmed && trimmed !== lastSavedTitleRef.current) {
+          lastSavedTitleRef.current = trimmed;
+          onPinTabRef.current(taskId);
+          onUpdateTaskRef.current(taskId, { title: trimmed });
+        }
+      }
+      if (dirtyNotesRef.current) {
+        const { taskId, value } = dirtyNotesRef.current;
+        dirtyNotesRef.current = null;
+        if (value !== lastSavedNotesRef.current) {
+          lastSavedNotesRef.current = value;
+          onPinTabRef.current(taskId);
+          onUpdateTaskRef.current(taskId, { notes: value });
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', flushDirtyEdits);
+    return () => {
+      window.removeEventListener('beforeunload', flushDirtyEdits);
+      flushDirtyEdits();
+    };
+  }, [activeTask?.id]);
+
+  // Sync state whenever activeTask changes (without overwriting focused inputs mid-typing)
   useEffect(() => {
     if (activeTask) {
-      setTitle(activeTask.title || '');
-      setNotes(activeTask.notes || '');
+      const isTaskSwitch = syncedTaskIdRef.current !== activeTask.id;
+      syncedTaskIdRef.current = activeTask.id;
+
+      if (isTaskSwitch || (!isTitleFocusedRef.current && !dirtyTitleRef.current)) {
+        const nextTitle = activeTask.title || '';
+        setTitle(nextTitle);
+        lastSavedTitleRef.current = nextTitle;
+      }
+      if (isTaskSwitch || (!isNotesFocusedRef.current && !dirtyNotesRef.current)) {
+        const nextNotes = activeTask.notes || '';
+        setNotes(nextNotes);
+        lastSavedNotesRef.current = nextNotes;
+      }
       setUrls(activeTask.urls || []);
       setIsAllDay(activeTask.isAllDay || false);
       if (activeTask.startDate) {
@@ -286,6 +341,8 @@ const SinglePane: React.FC<SinglePaneProps> = ({
         setRecurrenceInterval(1);
         setRecurrenceEndDate('');
       }
+    } else {
+      syncedTaskIdRef.current = null;
     }
   }, [activeTask?.id, activeTask?.updatedAt]);
 
@@ -296,40 +353,24 @@ const SinglePane: React.FC<SinglePaneProps> = ({
 
   const saveTitle = (newTitle: string) => {
     if (!activeTask) return;
-    if (!newTitle.trim() || newTitle === activeTask.title) return;
+    dirtyTitleRef.current = null;
+    const trimmed = newTitle.trim();
+    if (!trimmed || trimmed === lastSavedTitleRef.current) return;
+    lastSavedTitleRef.current = trimmed;
     onPinTab(activeTask.id); // Promotes to permanent on edit
-    onUpdateTask(activeTask.id, { title: newTitle.trim() });
+    onUpdateTask(activeTask.id, { title: trimmed });
     triggerSaveNotice();
   };
 
   const saveNotes = (newNotes: string) => {
     if (!activeTask) return;
-    if (newNotes === (activeTask.notes || '')) return;
+    dirtyNotesRef.current = null;
+    if (newNotes === lastSavedNotesRef.current) return;
+    lastSavedNotesRef.current = newNotes;
     onPinTab(activeTask.id); // Promotes to permanent on edit
     onUpdateTask(activeTask.id, { notes: newNotes });
     triggerSaveNotice();
   };
-
-  // Auto-save title and notes while typing (debounced 500ms) so changes immediately sync to local backup file
-  useEffect(() => {
-    if (!activeTask) return;
-    if (!title.trim() || title.trim() === activeTask.title) return;
-    const timer = setTimeout(() => {
-      onUpdateTask(activeTask.id, { title: title.trim() });
-      triggerSaveNotice();
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [title, activeTask?.id, activeTask?.title]);
-
-  useEffect(() => {
-    if (!activeTask) return;
-    if (notes === (activeTask.notes || '')) return;
-    const timer = setTimeout(() => {
-      onUpdateTask(activeTask.id, { notes });
-      triggerSaveNotice();
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [notes, activeTask?.id, activeTask?.notes]);
 
   const parentDeadlineLimit = useMemo(() => {
     if (!activeTask || !activeTask.project) return undefined;
@@ -880,14 +921,23 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                 <textarea
                   rows={1}
                   value={title}
+                  onFocus={() => {
+                    isTitleFocusedRef.current = true;
+                  }}
                   onChange={(e) => {
                     const nextVal = e.target.value.replace(/\r?\n/g, ' ');
                     setTitle(nextVal);
-                    if (nextVal !== activeTask.title) {
+                    if (nextVal.trim() !== lastSavedTitleRef.current) {
+                      dirtyTitleRef.current = { taskId: activeTask.id, value: nextVal };
                       onPinTab(activeTask.id);
+                    } else {
+                      dirtyTitleRef.current = null;
                     }
                   }}
-                  onBlur={() => saveTitle(title)}
+                  onBlur={() => {
+                    isTitleFocusedRef.current = false;
+                    saveTitle(title);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -1237,13 +1287,23 @@ const SinglePane: React.FC<SinglePaneProps> = ({
               </div>
               <textarea
                 value={notes}
+                onFocus={() => {
+                  isNotesFocusedRef.current = true;
+                }}
                 onChange={(e) => {
-                  setNotes(e.target.value);
-                  if (e.target.value !== (activeTask.notes || '')) {
+                  const nextVal = e.target.value;
+                  setNotes(nextVal);
+                  if (nextVal !== lastSavedNotesRef.current) {
+                    dirtyNotesRef.current = { taskId: activeTask.id, value: nextVal };
                     onPinTab(activeTask.id);
+                  } else {
+                    dirtyNotesRef.current = null;
                   }
                 }}
-                onBlur={() => saveNotes(notes)}
+                onBlur={() => {
+                  isNotesFocusedRef.current = false;
+                  saveNotes(notes);
+                }}
                 placeholder={L("ノート、メモ、コンテキストを記入...", "Notes, context, thoughts...", "Notes, contexte, idées...")}
                 className="w-full min-h-[120px] resize-y bg-slate-50/70 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 leading-relaxed outline-none focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-sans"
               />
@@ -1408,15 +1468,27 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                 <div className="flex-1 p-5 overflow-hidden flex flex-col min-h-0">
                   <textarea
                     value={notes}
+                    onFocus={() => {
+                      isNotesFocusedRef.current = true;
+                    }}
                     onChange={(e) => {
-                      setNotes(e.target.value);
-                      if (e.target.value !== (activeTask.notes || '')) {
+                      const nextVal = e.target.value;
+                      setNotes(nextVal);
+                      if (nextVal !== lastSavedNotesRef.current) {
+                        dirtyNotesRef.current = { taskId: activeTask.id, value: nextVal };
                         onPinTab(activeTask.id);
+                      } else {
+                        dirtyNotesRef.current = null;
                       }
+                    }}
+                    onBlur={() => {
+                      isNotesFocusedRef.current = false;
+                      saveNotes(notes);
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') {
                         e.stopPropagation();
+                        isNotesFocusedRef.current = false;
                         saveNotes(notes);
                         setIsExpandedNotesOpen(false);
                       }

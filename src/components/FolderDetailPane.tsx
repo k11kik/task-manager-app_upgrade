@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   Folder, 
@@ -97,10 +97,65 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
   const [isSavedNotice, setIsSavedNotice] = useState(false);
   const [isExpandedNotesOpen, setIsExpandedNotesOpen] = useState(false);
 
-  // Sync state whenever folderPath or folderMeta changes
+  // Track focus and unsaved edits so typing in Notes/Title never triggers mid-typing backups or cursor jumps
+  const isTitleFocusedRef = useRef(false);
+  const isNotesFocusedRef = useRef(false);
+  const syncedFolderPathRef = useRef<string | null>(null);
+  const lastSavedTitleRef = useRef<string>(folderMeta?.title || folderName);
+  const lastSavedNotesRef = useRef<string>(folderMeta?.notes || '');
+  const dirtyTitleRef = useRef<{ folderPath: string; tabId: string; value: string } | null>(null);
+  const dirtyNotesRef = useRef<{ folderPath: string; tabId: string; value: string } | null>(null);
+  const onUpdateFolderMetaRef = useRef(onUpdateFolderMeta);
+  onUpdateFolderMetaRef.current = onUpdateFolderMeta;
+  const onPinTabRef = useRef(onPinTab);
+  onPinTabRef.current = onPinTab;
+
+  // Flush any pending Title / Notes edits when switching folders or unmounting
   useEffect(() => {
-    setTitle(folderMeta?.title || folderName);
-    setNotes(folderMeta?.notes || '');
+    const flushDirtyEdits = () => {
+      if (dirtyTitleRef.current) {
+        const { folderPath: fp, tabId: tId, value } = dirtyTitleRef.current;
+        dirtyTitleRef.current = null;
+        const trimmed = value.trim();
+        if (trimmed && trimmed !== lastSavedTitleRef.current) {
+          lastSavedTitleRef.current = trimmed;
+          onPinTabRef.current(tId);
+          onUpdateFolderMetaRef.current?.(fp, { title: trimmed });
+        }
+      }
+      if (dirtyNotesRef.current) {
+        const { folderPath: fp, tabId: tId, value } = dirtyNotesRef.current;
+        dirtyNotesRef.current = null;
+        if (value !== lastSavedNotesRef.current) {
+          lastSavedNotesRef.current = value;
+          onPinTabRef.current(tId);
+          onUpdateFolderMetaRef.current?.(fp, { notes: value });
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', flushDirtyEdits);
+    return () => {
+      window.removeEventListener('beforeunload', flushDirtyEdits);
+      flushDirtyEdits();
+    };
+  }, [folderPath]);
+
+  // Sync state whenever folderPath or folderMeta changes (without overwriting focused inputs mid-typing)
+  useEffect(() => {
+    const isFolderSwitch = syncedFolderPathRef.current !== folderPath;
+    syncedFolderPathRef.current = folderPath;
+
+    if (isFolderSwitch || (!isTitleFocusedRef.current && !dirtyTitleRef.current)) {
+      const nextTitle = folderMeta?.title || folderName;
+      setTitle(nextTitle);
+      lastSavedTitleRef.current = nextTitle;
+    }
+    if (isFolderSwitch || (!isNotesFocusedRef.current && !dirtyNotesRef.current)) {
+      const nextNotes = folderMeta?.notes || '';
+      setNotes(nextNotes);
+      lastSavedNotesRef.current = nextNotes;
+    }
     setUrls(folderMeta?.urls || []);
     setIsAllDay(folderMeta?.isAllDay ?? true);
 
@@ -143,38 +198,23 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
   };
 
   const saveTitle = (newTitle: string) => {
+    dirtyTitleRef.current = null;
     const trimmed = newTitle.trim();
-    if (!trimmed || trimmed === (folderMeta?.title || folderName)) return;
+    if (!trimmed || trimmed === lastSavedTitleRef.current) return;
+    lastSavedTitleRef.current = trimmed;
     onPinTab(tabId);
     onUpdateFolderMeta?.(folderPath, { title: trimmed });
     triggerSaveNotice();
   };
 
   const saveNotes = (newNotes: string) => {
-    if (newNotes === (folderMeta?.notes || '')) return;
+    dirtyNotesRef.current = null;
+    if (newNotes === lastSavedNotesRef.current) return;
+    lastSavedNotesRef.current = newNotes;
     onPinTab(tabId);
     onUpdateFolderMeta?.(folderPath, { notes: newNotes });
     triggerSaveNotice();
   };
-
-  useEffect(() => {
-    const trimmed = title.trim();
-    if (!trimmed || trimmed === (folderMeta?.title || folderName)) return;
-    const timer = setTimeout(() => {
-      onUpdateFolderMeta?.(folderPath, { title: trimmed });
-      triggerSaveNotice();
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [title, folderPath, folderMeta?.title, folderName]);
-
-  useEffect(() => {
-    if (notes === (folderMeta?.notes || '')) return;
-    const timer = setTimeout(() => {
-      onUpdateFolderMeta?.(folderPath, { notes });
-      triggerSaveNotice();
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [notes, folderPath, folderMeta?.notes]);
 
   const handleStartDateCommit = (dateStr: string, timeStr: string, allDay: boolean) => {
     onPinTab(tabId);
@@ -349,14 +389,23 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             <textarea
               rows={1}
               value={title}
+              onFocus={() => {
+                isTitleFocusedRef.current = true;
+              }}
               onChange={(e) => {
                 const nextVal = e.target.value.replace(/\r?\n/g, ' ');
                 setTitle(nextVal);
-                if (nextVal !== (folderMeta?.title || folderName)) {
+                if (nextVal.trim() !== lastSavedTitleRef.current) {
+                  dirtyTitleRef.current = { folderPath, tabId, value: nextVal };
                   onPinTab(tabId);
+                } else {
+                  dirtyTitleRef.current = null;
                 }
               }}
-              onBlur={() => saveTitle(title)}
+              onBlur={() => {
+                isTitleFocusedRef.current = false;
+                saveTitle(title);
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
@@ -648,13 +697,23 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
           </div>
           <textarea
             value={notes}
+            onFocus={() => {
+              isNotesFocusedRef.current = true;
+            }}
             onChange={(e) => {
-              setNotes(e.target.value);
-              if (e.target.value !== (folderMeta?.notes || '')) {
+              const nextVal = e.target.value;
+              setNotes(nextVal);
+              if (nextVal !== lastSavedNotesRef.current) {
+                dirtyNotesRef.current = { folderPath, tabId, value: nextVal };
                 onPinTab(tabId);
+              } else {
+                dirtyNotesRef.current = null;
               }
             }}
-            onBlur={() => saveNotes(notes)}
+            onBlur={() => {
+              isNotesFocusedRef.current = false;
+              saveNotes(notes);
+            }}
             placeholder={L("このフォルダに関するノートやメモ...", "Folder notes...", "Notes du dossier...")}
             rows={4}
             className="w-full bg-slate-50/70 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 leading-relaxed outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-all font-sans resize-y custom-scrollbar"
@@ -831,15 +890,27 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
             <div className="flex-1 p-5 overflow-hidden flex flex-col min-h-0">
               <textarea
                 value={notes}
+                onFocus={() => {
+                  isNotesFocusedRef.current = true;
+                }}
                 onChange={(e) => {
-                  setNotes(e.target.value);
-                  if (e.target.value !== (folderMeta?.notes || '')) {
+                  const nextVal = e.target.value;
+                  setNotes(nextVal);
+                  if (nextVal !== lastSavedNotesRef.current) {
+                    dirtyNotesRef.current = { folderPath, tabId, value: nextVal };
                     onPinTab(tabId);
+                  } else {
+                    dirtyNotesRef.current = null;
                   }
+                }}
+                onBlur={() => {
+                  isNotesFocusedRef.current = false;
+                  saveNotes(notes);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') {
                     e.stopPropagation();
+                    isNotesFocusedRef.current = false;
                     saveNotes(notes);
                     setIsExpandedNotesOpen(false);
                   }
