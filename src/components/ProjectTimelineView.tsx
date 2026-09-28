@@ -152,6 +152,7 @@ interface ProjectTimelineViewProps {
   onToggleFolderPin?: (folderPath: string) => void;
   isFullscreen?: boolean;
   onToggleFullscreen?: () => void;
+  onOpenCreateTaskModal?: (defaultProject?: string) => void;
   t: (key: string) => string;
 }
 
@@ -181,6 +182,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   onToggleFolderPin,
   isFullscreen = false,
   onToggleFullscreen,
+  onOpenCreateTaskModal,
   t
 }) => {
   const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
@@ -3292,6 +3294,38 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             <span>{L('全画面', 'Fullscreen', 'Plein écran')}</span>
           </button>
         )
+      )}
+
+      {/* Floating Circular Add Task Button (Bottom-Right of Timeline on PC & Mobile) */}
+      {onOpenCreateTaskModal && (
+        <button
+          type="button"
+          onClick={() => {
+            const activeTaskObj = activeTaskId && !activeTaskId.startsWith('folder:')
+              ? tasks.find(t => t.id === activeTaskId)
+              : null;
+            const folderFromActiveTab = activeTaskId?.startsWith('folder:')
+              ? activeTaskId.slice(7)
+              : '';
+            const targetFolder =
+              selectedFolderPath ||
+              (selectedKey?.startsWith('folder:') ? selectedKey.slice(7) : '') ||
+              folderFromActiveTab ||
+              activeTaskObj?.project ||
+              'General';
+            onOpenCreateTaskModal(targetFolder);
+          }}
+          className={cn(
+            "w-12 h-12 rounded-full bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white shadow-xl shadow-indigo-600/30 border border-indigo-400/30 flex items-center justify-center transition-all cursor-pointer select-none",
+            isFullscreen
+              ? "fixed bottom-13 right-3.5 z-[95]"
+              : "fixed bottom-29 right-3.5 z-[66] lg:absolute lg:bottom-4 lg:right-4 lg:z-40"
+          )}
+          title={L('新規タスクを追加', 'Add New Task', 'Ajouter une nouvelle tâche')}
+          aria-label={L('新規タスクを追加', 'Add New Task', 'Ajouter une nouvelle tâche')}
+        >
+          <Plus size={22} strokeWidth={2.5} />
+        </button>
       )}
 
       {/* Folder Creation Modal */}

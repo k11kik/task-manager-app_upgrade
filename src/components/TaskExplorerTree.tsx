@@ -68,6 +68,7 @@ interface TaskExplorerTreeProps {
   onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
+  onOpenCreateTaskModal?: (defaultProject?: string) => void;
   t: (key: string) => string;
 }
 
@@ -101,6 +102,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   onUpdateFolderMeta,
   onToggleFolderStar,
   onToggleFolderPin,
+  onOpenCreateTaskModal,
   t
 }) => {
   const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
@@ -2138,6 +2140,22 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             })()
           )}
         </div>
+      )}
+
+      {/* Floating Circular Add Task Button on Mobile Explorer (Bottom-Right) */}
+      {onOpenCreateTaskModal && (
+        <button
+          type="button"
+          onClick={() => {
+            const targetFolder = getTargetFolderForNewItem() || 'General';
+            onOpenCreateTaskModal(targetFolder);
+          }}
+          className="lg:hidden fixed bottom-20 right-3.5 z-[66] w-12 h-12 rounded-full bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white shadow-xl shadow-indigo-600/30 border border-indigo-400/30 flex items-center justify-center transition-all cursor-pointer select-none"
+          title={L('新規タスクを追加', 'Add New Task', 'Ajouter une nouvelle tâche')}
+          aria-label={L('新規タスクを追加', 'Add New Task', 'Ajouter une nouvelle tâche')}
+        >
+          <Plus size={22} strokeWidth={2.5} />
+        </button>
       )}
 
       {/* Resize Handle on Right Border (Desktop only) */}

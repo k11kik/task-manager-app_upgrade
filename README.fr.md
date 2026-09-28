@@ -8,7 +8,7 @@
 
 1. [Architecture générale de l'écran (Disposition en 3 volets)](#1-architecture-générale-de-lécran-disposition-en-3-volets)
 2. [Explorer (Volet gauche : Dossiers hiérarchiques & Focus)](#2-explorer-volet-gauche--dossiers-hiérarchiques--focus)
-3. [Ajout de tâches, Focus (Tâches prioritaires) & Daily Pick](#3-ajout-de-tâches-focus-tâches-prioritaires--daily-pick)
+3. [Ajout de tâches & Focus (Tâches prioritaires)](#3-ajout-de-tâches--focus-tâches-prioritaires)
 4. [Project Timeline (Volet central : Planification & Phases)](#4-project-timeline-volet-central--planification--phases)
 5. [Mode paysage mobile (Bascule Plein écran / Vue complète)](#5-mode-paysage-mobile-bascule-plein-écran--vue-complète)
 6. [Task & Folder Detail (Volet droit : Multi-onglets & Écran scindé)](#6-task--folder-detail-volet-droit--multi-onglets--écran-scindé)
@@ -25,7 +25,7 @@ Le **Dashboard** (écran principal) s'inspire des environnements de développeme
 
 | Zone | Nom | Rôle principal |
 | :--- | :--- | :--- |
-| **Barre supérieure** | **Header & Workspaces** | Changement d'espace de travail, navigation (Dashboard / Calendar / Archive / Trash / Settings), Annuler/Rétablir (Undo/Redo), filtres de projets, état de synchronisation locale et Guide d'utilisation (`Guide`) |
+| **Barre supérieure** | **Header & Workspaces** | Changement d'espace de travail, navigation (Dashboard / Calendar / Archive / Trash / Settings), Annuler/Rétablir (Undo/Redo), état de synchronisation locale et Guide d'utilisation (`Guide`) |
 | **Volet gauche** | **Explorer** | Section `Focus` (tâches prioritaires), alertes d'échéances proches et arborescence hiérarchique des dossiers et tâches |
 | **Volet central** | **Project Timeline** | Visualisation et planification inter-projets par dates calendaires (`Dates`) ou par étapes personnalisées (`Phase 1–5`, etc.) |
 | **Volet droit** | **Task / Folder Detail** | Éditeur détaillé pour les tâches et dossiers sélectionnés (gestion multi-onglets et division d'écran jusqu'à 4 sous-volets : Gauche/Droite, Haut/Bas ou Grille 2x2) |
@@ -49,22 +49,25 @@ Le volet **Explorer** à gauche permet de structurer vos projets en dossiers et 
 
 ---
 
-## 3. Ajout de tâches, Focus (Tâches prioritaires) & Daily Pick
+## 3. Ajout de tâches & Focus (Tâches prioritaires)
 
 ### Comment ajouter une tâche
-1. **Depuis l'Explorer** :
-   - Utilisez le champ de saisie rapide en haut de l'Explorer ou cliquez sur l'icône `+` à côté d'un dossier (ou `...` > `Nouvelle tâche`) pour créer immédiatement une tâche dans ce dossier.
-2. **Directement sur la Project Timeline (Création rapide)** :
+1. **Bouton circulaire `+` en bas à droite (Fenêtre complète de création de tâche)** :
+   - Cliquez sur le **bouton circulaire `+`** situé **en bas à droite de la Project Timeline** sur PC, ou **en bas à droite des écrans Explorer et Timeline** sur mobile, pour ouvrir la fenêtre complète de création de tâche.
+   - **Sélection & création automatique de dossier** : Saisissez ou sélectionnez un dossier de projet avec suggestion automatique des dossiers existants. Si vous saisissez un chemin de dossier inexistant (y compris un sous-dossier tel que `ProjetA/NouveauSousDossier`), NavFOR **crée automatiquement le dossier et y ajoute la tâche**.
+   - **Toutes les options de Task Detail** : Configurez dès la création le titre, le statut terminé, la catégorie (`ToDo` / `Focus`), l'étoile (Star), l'épingle (Pin), la date/heure de début, l'échéance (Deadline), le mode toute la journée, la récurrence, les notes et les URL associées.
+2. **Depuis l'Explorer** :
+   - Cliquez sur l'icône `+` à côté d'un dossier (ou `...` > `Nouvelle tâche`) pour créer immédiatement une tâche dans ce dossier.
+3. **Directement sur la Project Timeline (Création rapide)** :
    - **Double-cliquez** sur n'importe quelle cellule vide de la Timeline (un créneau date/heure, une étape de Phase ou la colonne ToDo List) pour créer instantanément une tâche pré-planifiée à cet emplacement.
-   - Vous pouvez également cliquer sur le bouton `+` à côté du nom de chaque ligne de projet (Project Lane).
+   - Vous pouvez également cliquer sur le bouton `+` à côté du nom de chaque ligne de projet (Project Lane) ou sur le **bouton circulaire `+` en bas à droite de la Timeline**.
 
-### Focus (Tâches prioritaires) & Daily Pick
+### Focus (Tâches prioritaires) & Alertes d'échéance
 - **Section Focus** :
-  - Épinglez vos tâches les plus importantes du moment (jusqu'à 3 tâches recommandées) dans la section **Focus** (signalée par un éclair rouge ⚡) tout en haut de l'Explorer.
-- **Daily Pick (Sélection du jour)** :
-  - Cliquez sur le bouton `+ Pick` dans l'en-tête Focus pour ouvrir la fenêtre **Daily Pick** et promouvoir en un clic vos tâches du jour vers la zone Focus.
+  - Placez vos tâches les plus importantes du moment (limite par défaut : **3 tâches simultanées**, modifiable dans `Settings` > `Capacité Focus`) dans la section **Focus** (signalée par un éclair rouge ⚡) tout en haut de l'Explorer.
+  - Basculez une tâche entre `Focus` et `ToDo` à tout moment depuis le volet Task Detail, la fenêtre de création de tâche ou le menu contextuel.
 - **Alertes d'échéance** :
-  - Les tâches dont la date limite approche (par défaut à moins de 3 jours) sont mises en évidence en jaune, et les tâches en retard s'affichent avec une icône et un badge rouges.
+  - Les tâches dont la date limite approche (par défaut à moins de **3 jours**) sont mises en évidence en jaune, et les tâches en retard s'affichent avec une icône et un badge rouges.
 
 ---
 
@@ -126,14 +129,16 @@ Cliquer sur une tâche ou un dossier ouvre le volet **Detail** à droite (dispon
 ### Champs d'édition d'une tâche
 - **Paramètres généraux** : Titre, dossier de projet parent, statut terminé, bascule Focus (⚡), Étoile (★) et Épingle (📌).
 - **Date/Heure de début & Échéance (Deadline)** : Choix de la date et de l'heure ou option `Toute la journée (All Day)` (avec validation par rapport à l'échéance du dossier parent).
-- **Récurrence (Recurrence)** : `Aucune` / `Quotidienne` / `Tous les N jours` / `Hebdomadaire (jours au choix)` / `Toutes les N semaines`.
+- **Récurrence (Recurrence)** : `Aucune` / `Quotidienne` / `Tous les N jours` / `Hebdomadaire (jours au choix)` / `Toutes les N semaines` (avec date de fin optionnelle).
 - **Affectation de Phase** : Choix de l'étape (`Phase`) et de la sous-étape.
 - **Liste d'URL associées** : Ajoutez plusieurs liens web ou documents de référence ouvrables en un clic.
 - **Notes / Mémo** : Rédigez des notes détaillées avec sauvegarde automatique.
+- **Dates de création et de mise à jour** : Affiche tout en bas du volet Task Detail la **date de création** et la **date de dernière modification** du fichier.
 
 ### Détails d'un dossier (Folder Detail)
 - Cliquez sur le **nom d'un dossier** dans l'Explorer ou la Timeline pour ouvrir son onglet dédié **Folder Detail**.
 - Gérez l'**échéance globale du dossier**, les **notes du dossier**, la barre de progression et l'archivage groupé des tâches terminées.
+- Affiche tout en bas du volet Folder Detail la **date de création du dossier** ainsi que la **date de dernière mise à jour des fichiers enfants**.
 
 ---
 
@@ -142,12 +147,15 @@ Cliquer sur une tâche ou un dossier ouvre le volet **Detail** à droite (dispon
 - **Calendar (Calendrier mensuel)** :
   - Affiche l'ensemble des tâches et échéances récurrentes sur une grille mensuelle interactive.
 - **Archive & Trash (Vue Explorer + Volet Detail)** :
-  - Consultez et recherchez vos tâches archivées ou supprimées tout en conservant l'arborescence d'origine de vos dossiers.
+  - Consultez et recherchez vos tâches archivées ou placées dans la corbeille tout en conservant l'arborescence d'origine de vos dossiers.
   - Sélectionnez une tâche pour ouvrir ses détails à droite, la **Restaurer (Restore)** dans son dossier d'origine ou la **Supprimer définitivement**.
-- **Nettoyage automatique (Auto Sweep dans Settings)** :
-  - Dans **Settings > Data Lifecycle**, configurez l'entretien automatique :
-    - **Archivage automatique des tâches terminées** : Déplace les tâches terminées vers l'Archive après N jours (par défaut : **14 jours**).
-    - **Suppression automatique de la corbeille** : Supprime définitivement les éléments présents dans la corbeille depuis plus de N jours (par défaut : **30 jours**).
+- **Traitement des tâches terminées & Corbeille (`Settings` > `Cycle de vie Terminé & Corbeille`)** :
+  - **Terminé vers Corbeille (`Done to Trash`)** : Déplace automatiquement les tâches terminées de ToDo/Focus vers la corbeille après N jours (par défaut : **7 jours**).
+  - **Nettoyage auto de la corbeille (`Trash Auto-Cleanup`)** : Supprime définitivement les éléments présents dans la corbeille après N jours (par défaut : **30 jours**).
+- **Nettoyage automatique des archives (`Settings` > `Balayage d'archivage auto`)** :
+  - **Seuil d'archivage (`Archive Threshold`)** : Déplace automatiquement les éléments inactifs vers les Archives après une période d'inactivité (par défaut : **90 jours**).
+  - **Mise à la corbeille auto des archives terminées (`Auto-trash completed archive items`)** : Déplace automatiquement vers la corbeille les tâches marquées comme terminées dans les Archives après N jours (par défaut : **7 jours**).
+  - **Mise à la corbeille auto des archives inactives (`Auto-trash inactive archive items`)** : Déplace les tâches non terminées et inactives des Archives vers la corbeille après la période choisie (par défaut : **Jamais / Manuel uniquement**).
 
 ---
 

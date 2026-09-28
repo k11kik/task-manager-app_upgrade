@@ -82,7 +82,7 @@ import {
   eachMonthOfInterval
 } from 'date-fns';
 import { ja, fr, enUS } from 'date-fns/locale';
-import { Category, Task, FolderMeta } from './types';
+import { Category, Task, FolderMeta, TaskRecurrence } from './types';
 import { cn, formatDate, tr } from './lib/utils';
 import { getParentFolderDeadline } from './lib/folderDeadlineUtils';
 import { isTaskOccurringOnDate } from './lib/taskDateUtils';
@@ -97,6 +97,7 @@ import { TaskTabsDetail } from './components/TaskTabsDetail';
 import { FocusHeaderSection } from './components/FocusHeaderSection';
 import { ArchiveTrashExplorerView } from './components/ArchiveTrashExplorerView';
 import { UserGuideModal, useStandaloneReadmeHtmlUrl, downloadReadmeMarkdown, getReadmeFilenameByLang } from './components/UserGuideModal';
+import { CreateTaskModal } from './components/CreateTaskModal';
 import Papa from 'papaparse';
 import { 
   collection, 
@@ -356,7 +357,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.13";
+  const APP_VERSION = "3.1.14";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -618,12 +619,27 @@ export default function App() {
     }
   };
 
+  const [isCreateTaskModalOpen, setIsCreateTaskModalOpen] = useState(false);
+  const [createTaskModalInitialProject, setCreateTaskModalInitialProject] = useState<string>('General');
+
+  const handleOpenCreateTaskModal = (defaultProject?: string) => {
+    setCreateTaskModalInitialProject(defaultProject || 'General');
+    setIsCreateTaskModalOpen(true);
+  };
+
   const handleCreateTaskDirect = async (taskData: {
     title: string;
     project: string;
+    category?: Category;
+    isDone?: boolean;
+    isStarred?: boolean;
+    isPinned?: boolean;
+    startDate?: number;
     deadline?: number;
     isAllDay?: boolean;
+    recurrence?: TaskRecurrence;
     notes?: string;
+    urls?: string[];
     timelineColumn?: string;
     timelineStep?: number;
     timelinePresetColumns?: Record<string, string>;
@@ -633,20 +649,68 @@ export default function App() {
       setIsAuthModalOpen(true);
       return;
     }
+
+    const now = Date.now();
+    const normalizedProject =
+      (taskData.project || 'General')
+        .split('/')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .join('/') || 'General';
+
+    // Ensure all folder path segments exist in customFolders and folderMetas
+    const pathSegments = normalizedProject.split('/').filter(Boolean);
+    const segmentPaths: string[] = [];
+    let currentSeg = '';
+    for (const seg of pathSegments) {
+      currentSeg = currentSeg ? `${currentSeg}/${seg}` : seg;
+      segmentPaths.push(currentSeg);
+    }
+
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      const existingCustom: string[] = saved ? JSON.parse(saved) : [];
+      let customChanged = false;
+      const nextCustom = [...existingCustom];
+      for (const sp of segmentPaths) {
+        if (!nextCustom.includes(sp)) {
+          nextCustom.push(sp);
+          customChanged = true;
+        }
+      }
+      if (customChanged) {
+        localStorage.setItem(storageKey, JSON.stringify(nextCustom));
+        window.dispatchEvent(new Event('navfor_folders_updated'));
+      }
+    } catch {}
+
+    // Initialize folderMetas for any newly created folder path segments
+    for (const sp of segmentPaths) {
+      if (!folderMetas[sp]?.createdAt) {
+        updateFolderMeta(sp, { createdAt: now });
+      }
+    }
+
+    const resolvedCategory: Category = taskData.category || 'Focus';
+
     const newTask: any = {
       userId: user.uid,
       title: taskData.title.trim(),
-      project: taskData.project.trim() || 'General',
+      project: normalizedProject,
       notes: taskData.notes || '',
-      urls: [],
+      urls: taskData.urls || [],
       section: activeSection,
-      category: 'Focus' as Category,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      isDone: false,
-      isStarred: false,
+      category: resolvedCategory,
+      createdAt: now,
+      updatedAt: now,
+      isDone: Boolean(taskData.isDone),
+      isStarred: Boolean(taskData.isStarred),
+      isPinned: Boolean(taskData.isPinned),
       isAllDay: taskData.isAllDay ?? true,
+      ...(taskData.startDate ? { startDate: taskData.startDate } : {}),
       ...(taskData.deadline ? { deadline: taskData.deadline } : {}),
+      ...(taskData.recurrence ? { recurrence: sanitizeForFirestore(taskData.recurrence) } : {}),
       ...(taskData.timelineColumn ? { timelineColumn: taskData.timelineColumn } : {}),
       ...(taskData.timelineStep !== undefined ? { timelineStep: taskData.timelineStep } : {}),
       ...(taskData.timelinePresetColumns ? { timelinePresetColumns: taskData.timelinePresetColumns } : {}),
@@ -3009,7 +3073,8 @@ export default function App() {
   const updateFolderMeta = async (path: string, updates: Partial<FolderMeta>) => {
     if (!path) return;
     const now = Date.now();
-    const current = folderMetas[path] || { path, section: activeSection, category: 'Focus' };
+    const baseMap = folderMetasRef.current || folderMetas;
+    const current = baseMap[path] || { path, section: activeSection, category: 'Focus' };
     const existingTaskTimes = tasks
       .filter(t => t.project === path || t.project.startsWith(path + '/'))
       .map(t => t.createdAt)
@@ -3034,10 +3099,14 @@ export default function App() {
     }
 
     const nextMap = {
-      ...folderMetas,
+      ...baseMap,
       [path]: sanitizedLocal
     };
-    setFolderMetas(nextMap);
+    folderMetasRef.current = nextMap;
+    setFolderMetas(prev => ({
+      ...prev,
+      [path]: sanitizedLocal
+    }));
 
     if (user) {
       try {
@@ -4863,21 +4932,6 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* Display Mode Toggle (Mobile only) */}
-                <button 
-                  onClick={() => {
-                    const next: 'compact' | 'standard' | 'large' = 
-                      settings.displayMode === 'standard' ? 'large' : 
-                      settings.displayMode === 'large' ? 'compact' : 'standard';
-                    saveSettings({ displayMode: next });
-                  }}
-                  className="md:hidden w-7 h-7 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl flex items-center justify-center bg-white border border-slate-200 text-slate-400 shadow-sm shrink-0"
-                  title={L('表示モード切替', 'Toggle View Mode', 'Changer le mode d\'affichage')}
-                >
-                  {settings.displayMode === 'compact' ? <LayoutList size={14} /> : 
-                   settings.displayMode === 'large' ? <Grid2X2 size={14} /> : <LayoutGrid size={14} />}
-                </button>
-
                 {/* User Guide Button (Icon-only on Mobile & Tablet < lg) */}
                 <button
                   type="button"
@@ -5273,6 +5327,7 @@ export default function App() {
                 onUpdateFolderMeta={updateFolderMeta}
                 onToggleFolderStar={handleToggleFolderStar}
                 onToggleFolderPin={handleToggleFolderPin}
+                onOpenCreateTaskModal={handleOpenCreateTaskModal}
                 t={t}
               />
             </div>
@@ -5328,6 +5383,7 @@ export default function App() {
                       onToggleFolderPin={handleToggleFolderPin}
                       isFullscreen={isEffectiveTimelineFullscreen}
                       onToggleFullscreen={handleToggleTimelineFullscreen}
+                      onOpenCreateTaskModal={handleOpenCreateTaskModal}
                       t={t}
                     />
                   </div>
@@ -6172,6 +6228,20 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      <CreateTaskModal
+        isOpen={isCreateTaskModalOpen}
+        onClose={() => setIsCreateTaskModalOpen(false)}
+        onCreateTask={handleCreateTaskDirect}
+        tasks={tasks}
+        folderMetas={folderMetas}
+        activeSection={activeSection}
+        initialProject={createTaskModalInitialProject}
+        urgentCount={stats.urgentCount}
+        urgentLimit={settings.urgentLimit}
+        language={settings.language}
+        onShowMessage={setMessage}
+      />
     </div>
   );
 }

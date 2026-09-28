@@ -8,7 +8,7 @@
 
 1. [Overall Screen Layout (3-Pane Architecture)](#1-overall-screen-layout-3-pane-architecture)
 2. [Explorer (Left Pane: Hierarchical Folders & Focus Management)](#2-explorer-left-pane-hierarchical-folders--focus-management)
-3. [Adding Tasks, Focus (Priority Slots), & Daily Pick](#3-adding-tasks-focus-priority-slots--daily-pick)
+3. [Adding Tasks & Focus (Priority Tasks)](#3-adding-tasks--focus-priority-tasks)
 4. [Project Timeline (Center Pane: Schedule & Phase Management)](#4-project-timeline-center-pane-schedule--phase-management)
 5. [Mobile Landscape Mode (Fullscreen / Full App View Toggle)](#5-mobile-landscape-mode-fullscreen--full-app-view-toggle)
 6. [Task & Folder Detail (Right Pane: Multi-Tab & Split Detail Editor)](#6-task--folder-detail-right-pane-multi-tab--split-detail-editor)
@@ -25,7 +25,7 @@ The **Dashboard** (main workspace view) uses an IDE-inspired **3-pane architectu
 
 | Area | Name | Primary Role |
 | :--- | :--- | :--- |
-| **Top Bar** | **Header & Workspaces** | Workspace switching, view navigation (Dashboard / Calendar / Archive / Trash / Settings), Undo/Redo, project filters, local sync status indicator, and User Guide (`Guide`) |
+| **Top Bar** | **Header & Workspaces** | Workspace switching, view navigation (Dashboard / Calendar / Archive / Trash / Settings), Undo/Redo, local sync status indicator, and User Guide (`Guide`) |
 | **Left Pane** | **Explorer** | Top-priority `Focus` task slots, approaching deadline alerts, and the hierarchical project folder & task tree |
 | **Center Pane** | **Project Timeline** | Cross-project schedule visualization and interactive editing in either calendar date mode (`Dates`) or custom stage mode (`Phase 1–5`, etc.) |
 | **Right Pane** | **Task / Folder Detail** | Rich inspector for selected tasks and folders (supports multiple open tabs and up to 4-way split views: Left/Right, Top/Bottom, or 2x2 Grid) |
@@ -49,22 +49,25 @@ The left **Explorer** pane organizes your tasks into project folders and nested 
 
 ---
 
-## 3. Adding Tasks, Focus (Priority Slots), & Daily Pick
+## 3. Adding Tasks & Focus (Priority Tasks)
 
 ### How to Add Tasks
-1. **From the Explorer**:
-   - Use the quick-input bar at the top of the Explorer, or click the `+` icon next to any folder (or `...` > `New Task`) to create a task directly inside that folder.
-2. **Directly on the Project Timeline (Quick Create)**:
+1. **Bottom-Right `+` Add Task Button (Full Task Creation Modal)**:
+   - Click the circular **`+` button** located in the **bottom-right corner of the Project Timeline** on PC, or in the **bottom-right corner of the Explorer and Timeline screens** on mobile, to open the New Task modal.
+   - **Project Folder Autocomplete & Auto-Creation**: Type or select a destination project folder with live autocomplete suggestions from existing folders. If you enter a folder path that does not exist yet (including nested paths like `ProjectA/NewSub`), NavFOR **automatically creates the new folder(s) and adds the task inside**.
+   - **Full Task Detail Options**: Configure the task title, completion status, category (`ToDo` / `Focus`), Star, Pin, Start Date/Time, Deadline Date/Time, All-Day toggle, Recurrence rules, Notes, and reference URLs all at once.
+2. **From the Explorer**:
+   - Click the `+` icon next to any folder (or `...` > `New Task`) to create a task directly inside that folder.
+3. **Directly on the Project Timeline (Quick Create)**:
    - **Double-click** any empty cell on the Timeline (a specific date/time slot, a custom Phase step, or the ToDo List column) to immediately create a task pre-scheduled for that exact slot and project lane.
-   - You can also click the `+` button next to any project lane title.
+   - You can also click the `+` button next to any project lane title or the circular **`+` button in the bottom-right corner of the Timeline**.
 
-### Focus (Priority Tasks) & Daily Pick
+### Focus (Priority Tasks) & Deadline Alerts
 - **Focus Section**:
-  - Pin your most critical, high-impact tasks (up to 3 active slots recommended) to the **Focus** section (marked with a red lightning bolt ⚡) at the very top of the Explorer.
-- **Daily Pick Modal**:
-  - Click the `+ Pick` button in the Focus header to open the **Daily Pick** modal, allowing you to review your active tasks and promote today's priorities into Focus with a single click.
+  - Pin your most critical, high-impact tasks (default limit: **3 active slots**, customizable in `Settings` > `Focus Capacity`) to the **Focus** section (marked with a red lightning bolt ⚡) at the top of the Explorer.
+  - Switch any task between `Focus` and `ToDo` at any time from the Task Detail pane, the New Task modal, or the task context menu.
 - **Deadline Alerts**:
-  - Tasks with approaching deadlines (within 3 days by default) are highlighted in yellow, while overdue tasks are highlighted with a red clock icon and badge.
+  - Tasks with approaching deadlines (within **3 days** by default) are highlighted in yellow, while overdue tasks are highlighted with a red clock icon and badge.
 
 ---
 
@@ -126,14 +129,16 @@ Clicking any task or folder opens the **Detail Pane** on the right side of the s
 ### Task Detail Fields
 - **Core Properties**: Title, parent project folder, completion checkbox, Focus toggle (⚡), Star (★), and Pin (📌).
 - **Start Date/Time & Deadline**: Set specific dates and times or toggle `All Day` (automatically validated against parent folder deadlines if configured).
-- **Recurrence**: Configure repeating schedules (`None` / `Daily` / `Every N Days` / `Weekly on specific days` / `Every N Weeks`).
+- **Recurrence**: Configure repeating schedules (`None` / `Daily` / `Every N Days` / `Weekly on specific days` / `Every N Weeks`, plus optional repeat end date).
 - **Phase Assignment**: Assign the task's custom Stage (`Phase`) and sub-step index.
 - **Related URLs**: Attach multiple reference links or document URLs and open them with one click.
 - **Notes / Memo**: Write detailed notes, markdown checklists, or meeting minutes with automatic saving.
+- **Creation & Modification Timestamps**: Displays the file's **Created** and **Updated** timestamps at the very bottom of the Task Detail pane.
 
 ### Folder Detail Inspector
 - Clicking a **folder name** in the Explorer or Timeline opens a dedicated **Folder Detail** tab.
 - Manage the **Folder Deadline**, **Folder Notes**, overall completion progress bar, and inspect or batch-archive all tasks inside that folder.
+- Displays the **Folder Creation Date** and the **Latest Child File Updated Date** at the very bottom of the Folder Detail pane.
 
 ---
 
@@ -142,12 +147,15 @@ Clicking any task or folder opens the **Detail Pane** on the right side of the s
 - **Calendar (Monthly View)**:
   - Visualizes all workspace tasks (deadlines and recurring occurrences) on a monthly calendar grid. Click any task on the calendar to inspect or edit it.
 - **Archive & Trash (Explorer View + Detail Pane)**:
-  - Browse and search completed/archived tasks or deleted tasks while preserving their original project folder hierarchy.
+  - Browse and search archived tasks or trashed tasks while preserving their original project folder hierarchy.
   - Clicking a task in Archive or Trash opens the **Task Detail** pane on the right, where you can review its notes, **Restore** it to its original folder, or **Permanently Delete** it.
-- **Automatic Cleanup (Auto Sweep in Settings)**:
-  - In **Settings > Data Lifecycle**, you can configure automatic cleanup rules:
-    - **Auto-Archive Completed Tasks**: Automatically moves completed tasks to Archive after N days (default: **14 days**).
-    - **Auto-Delete Trashed Tasks**: Automatically purges tasks that have been in Trash for N days (default: **30 days**).
+- **Done & Trash Lifecycle (`Settings` > `Done & Trash Lifecycle`)**:
+  - **Done to Trash**: Automatically moves completed tasks in ToDo/Focus to Trash after a specified period (default: **7 days**).
+  - **Trash Auto-Cleanup**: Automatically permanently deletes items that have been in Trash after a specified period (default: **30 days**).
+- **Auto Archive Sweep (`Settings` > `Auto Archive Sweep`)**:
+  - **Archive Threshold**: Automatically moves inactive items to Archive after a specified inactivity period (default: **90 days**).
+  - **Auto-trash completed archive items**: Automatically moves completed tasks in Archive to Trash after a specified period (default: **7 days**).
+  - **Auto-trash inactive archive items**: Moves incomplete, inactive tasks in Archive to Trash after a specified period (default: **Never**).
 
 ---
 
