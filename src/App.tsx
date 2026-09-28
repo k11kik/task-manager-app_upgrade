@@ -54,7 +54,9 @@ import {
   Lock,
   ShieldAlert,
   Repeat,
-  BookOpen
+  BookOpen,
+  Edit2,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DragDropContext, Droppable, Draggable as DraggableDnd } from '@hello-pangea/dnd';
@@ -357,7 +359,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.14";
+  const APP_VERSION = "3.1.15";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -376,10 +378,16 @@ export default function App() {
   }, []);
 
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [folderMetas, setFolderMetas] = useState<Record<string, FolderMeta>>(() => {
+  const [allFolderMetas, setAllFolderMetas] = useState<Record<string, Record<string, FolderMeta>>>(() => {
     try {
-      const saved = localStorage.getItem('navfor_folder_metas');
-      return saved ? JSON.parse(saved) : {};
+      const savedBySec = localStorage.getItem('navfor_folder_metas_by_section');
+      if (savedBySec) return JSON.parse(savedBySec);
+      const savedLegacy = localStorage.getItem('navfor_folder_metas');
+      if (savedLegacy) {
+        const parsed = JSON.parse(savedLegacy);
+        return { General: parsed };
+      }
+      return {};
     } catch {
       return {};
     }
@@ -398,13 +406,33 @@ export default function App() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [message, setMessage] = useState<{ text: string, type: 'error' | 'info' } | null>(null);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
-  const [activeSection, setActiveSection] = useState<string>('General');
+  const [activeSection, setActiveSection] = useState<string>(() => {
+    try {
+      return localStorage.getItem('navfor_active_section') || 'General';
+    } catch {
+      return 'General';
+    }
+  });
   const [mobileView, setMobileView] = useState<'summary' | 'urgent' | 'focus' | 'calendar' | 'archive' | 'trash' | 'settings'>('urgent');
 
-  // Multi-tab and Explorer state
+  const folderMetas = useMemo<Record<string, FolderMeta>>(() => {
+    return allFolderMetas[activeSection] || {};
+  }, [allFolderMetas, activeSection]);
+
+  const getFolderDocId = (uid: string, section: string, folderPath: string) => {
+    const safePath = encodeURIComponent(folderPath).replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (!section || section === 'General') {
+      return `${uid}_${safePath}`;
+    }
+    const safeSec = encodeURIComponent(section).replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `${uid}_sec_${safeSec}__${safePath}`;
+  };
+
+  // Multi-tab and Explorer state (isolated per workspace)
   const [openTaskIds, setOpenTaskIds] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem('navfor_open_tabs');
+      const sec = localStorage.getItem('navfor_active_section') || 'General';
+      const saved = localStorage.getItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_open_tabs') : null);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -412,7 +440,8 @@ export default function App() {
   });
   const [activeTabTaskId, setActiveTabTaskId] = useState<string | null>(() => {
     try {
-      return localStorage.getItem('navfor_active_tab') || null;
+      const sec = localStorage.getItem('navfor_active_section') || 'General';
+      return localStorage.getItem(`navfor_active_tab_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_active_tab') : null) || null;
     } catch {
       return null;
     }
@@ -541,18 +570,45 @@ export default function App() {
     }
   };
 
+  // Switch open tabs & active tab when workspace (activeSection) changes
+  const prevSectionForTabsRef = useRef<string>(activeSection);
   useEffect(() => {
     try {
-      localStorage.setItem('navfor_open_tabs', JSON.stringify(openTaskIds));
+      localStorage.setItem('navfor_active_section', activeSection);
+    } catch {}
+    if (prevSectionForTabsRef.current !== activeSection) {
+      prevSectionForTabsRef.current = activeSection;
+      setSelectedProject('All');
+      setEditingTask(null);
+      try {
+        const savedTabs = localStorage.getItem(`navfor_open_tabs_${activeSection}`);
+        const parsedTabs: string[] = savedTabs ? JSON.parse(savedTabs) : [];
+        const savedActive = localStorage.getItem(`navfor_active_tab_${activeSection}`) || null;
+        setOpenTaskIds(Array.isArray(parsedTabs) ? parsedTabs : []);
+        setActiveTabTaskId(savedActive);
+        if (!parsedTabs || parsedTabs.length === 0) {
+          setIsDetailPaneVisible(false);
+        }
+      } catch {
+        setOpenTaskIds([]);
+        setActiveTabTaskId(null);
+        setIsDetailPaneVisible(false);
+      }
+    }
+  }, [activeSection]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`navfor_open_tabs_${activeSection}`, JSON.stringify(openTaskIds));
       if (activeTabTaskId) {
-        localStorage.setItem('navfor_active_tab', activeTabTaskId);
+        localStorage.setItem(`navfor_active_tab_${activeSection}`, activeTabTaskId);
       } else {
-        localStorage.removeItem('navfor_active_tab');
+        localStorage.removeItem(`navfor_active_tab_${activeSection}`);
       }
     } catch (e) {
       console.error(e);
     }
-  }, [openTaskIds, activeTabTaskId]);
+  }, [openTaskIds, activeTabTaskId, activeSection]);
 
   const [lastOpenEvent, setLastOpenEvent] = useState<{ taskId: string; isPermanent: boolean; timestamp: number } | null>(null);
 
@@ -595,8 +651,8 @@ export default function App() {
     setActiveTabTaskId(null);
     setIsDetailPaneVisible(false);
     try {
-      localStorage.setItem('navfor_open_tabs', '[]');
-      localStorage.removeItem('navfor_active_tab');
+      localStorage.setItem(`navfor_open_tabs_${activeSection}`, '[]');
+      localStorage.removeItem(`navfor_active_tab_${activeSection}`);
       localStorage.setItem('navfor_detail_visible', 'false');
       const emptyPanes = [
         { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
@@ -604,7 +660,7 @@ export default function App() {
         { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
         { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
       ];
-      localStorage.setItem('navfor_editor_panes', JSON.stringify(emptyPanes));
+      localStorage.setItem(`navfor_editor_panes_${activeSection}`, JSON.stringify(emptyPanes));
     } catch (e) {
       console.error(e);
     }
@@ -756,7 +812,11 @@ export default function App() {
     const copySuffix = L(' (コピー)', ' (Copy)', ' (Copie)');
     const newFolderPath = `${folderPath}${copySuffix}`;
     const isInsideFolder = (p: string) => p === folderPath || p.startsWith(folderPath + '/');
-    const tasksToCopy = tasks.filter(t => t.category !== 'Trash' && isInsideFolder(t.project));
+    const isInCurrentSection = (t: Task) => {
+      const sec = t.section || (settings.sections.includes('General') ? 'General' : (settings.sections[0] || 'General'));
+      return sec === activeSection;
+    };
+    const tasksToCopy = tasks.filter(t => isInCurrentSection(t) && t.category !== 'Trash' && isInsideFolder(t.project));
     const now = Date.now();
 
     pushToHistory();
@@ -1037,17 +1097,24 @@ export default function App() {
   const dirHandleRef = useRef<FileSystemDirectoryHandle | null>(dirHandle);
   const dirPermissionRef = useRef<'granted' | 'prompt' | 'denied'>(dirPermission);
   const tasksRef = useRef<Task[]>(tasks);
+  const allFolderMetasRef = useRef<Record<string, Record<string, FolderMeta>>>(allFolderMetas);
   const folderMetasRef = useRef<Record<string, FolderMeta>>(folderMetas);
   const userRef = useRef<User | null>(user);
   dirHandleRef.current = dirHandle;
   dirPermissionRef.current = dirPermission;
   tasksRef.current = tasks;
+  allFolderMetasRef.current = allFolderMetas;
   folderMetasRef.current = folderMetas;
   userRef.current = user;
   const localLogSettingsRef = useRef<HTMLDivElement>(null);
   const [highlightLocalSettings, setHighlightLocalSettings] = useState(false);
   const [showCleanupMenu, setShowCleanupMenu] = useState(false);
   const [showSectionMenu, setShowSectionMenu] = useState(false);
+  const [isAddingWorkspace, setIsAddingWorkspace] = useState(false);
+  const [newWorkspaceName, setNewWorkspaceName] = useState('');
+  const [editingWorkspaceName, setEditingWorkspaceName] = useState<string | null>(null);
+  const [editingWorkspaceValue, setEditingWorkspaceValue] = useState('');
+  const [deletingWorkspaceName, setDeletingWorkspaceName] = useState<string | null>(null);
   const [showSyncDetails, setShowSyncDetails] = useState(false);
   const [showTrashMenu, setShowTrashMenu] = useState(false);
   const [showProjectFilter, setShowProjectFilter] = useState(false);
@@ -1279,7 +1346,7 @@ export default function App() {
       displayModeFocus: 'standard' as 'compact' | 'standard' | 'large',
       displayModeTodo: 'standard' as 'compact' | 'standard' | 'large',
       language: 'en' as 'en' | 'ja' | 'fr',
-      sections: [] as string[]
+      sections: ['General'] as string[]
     };
     try {
       const lastUid = localStorage.getItem('navfor_last_uid');
@@ -2106,7 +2173,7 @@ export default function App() {
     if (!user) {
       // When not signed in, ensure folders and tasks are completely empty
       setTasks([]);
-      setFolderMetas({});
+      setAllFolderMetas({});
       return;
     }
 
@@ -2128,20 +2195,24 @@ export default function App() {
 
     const foldersQuery = query(collection(db, 'folders'), where('userId', '==', user.uid));
     const unsubscribeFolders = onSnapshot(foldersQuery, (snapshot) => {
-      const metasMap: Record<string, FolderMeta> = {};
-      snapshot.forEach((doc) => {
-        const data = doc.data();
+      const bySection: Record<string, Record<string, FolderMeta>> = {};
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
         if (data.userId === user.uid) {
-          const p = data.path || doc.id;
-          metasMap[p] = {
+          const p = data.path || docSnap.id;
+          const sec = data.section || 'General';
+          if (!bySection[sec]) {
+            bySection[sec] = {};
+          }
+          bySection[sec][p] = {
             path: p,
-            section: data.section || 'General',
+            section: sec,
             ...data
           } as FolderMeta;
         }
       });
-      folderMetasRef.current = metasMap;
-      setFolderMetas(metasMap);
+      allFolderMetasRef.current = bySection;
+      setAllFolderMetas(bySection);
     }, (err) => {
       console.warn("Folders listener notice:", err.message);
     });
@@ -2220,13 +2291,17 @@ export default function App() {
     }
   };
 
-  const syncLocalFolderMetas = (newMetas: Record<string, FolderMeta>) => {
-    setFolderMetas(newMetas);
-    try {
-      localStorage.setItem('navfor_folder_metas', JSON.stringify(newMetas));
-    } catch (e) {
-      console.error('Failed to save folder metas to local storage', e);
-    }
+  const syncLocalFolderMetas = (newSectionMetas: Record<string, FolderMeta>, targetSection: string = activeSection) => {
+    setAllFolderMetas(prev => {
+      const next = { ...prev, [targetSection]: newSectionMetas };
+      allFolderMetasRef.current = next;
+      try {
+        localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify(next));
+      } catch (e) {
+        console.error('Failed to save folder metas to local storage', e);
+      }
+      return next;
+    });
   };
 
   // Save Settings wrapper
@@ -2275,31 +2350,40 @@ export default function App() {
 
   const isListMode = settings.displayMode === 'compact';
 
+  const getTaskSection = (t: Task): string => {
+    if (t.section) return t.section;
+    if (settings.sections.includes('General')) return 'General';
+    return settings.sections[0] || 'General';
+  };
+
+  const sectionTasks = useMemo(() => {
+    return tasks.filter(t => getTaskSection(t) === activeSection);
+  }, [tasks, activeSection, settings.sections]);
+
   const projects = useMemo(() => {
-    const sectionTasks = tasks.filter(t => t.section === activeSection || (!t.section && activeSection === settings.sections[0]));
     const p = Array.from(new Set(sectionTasks.map(t => t.project)));
     return ['All', ...p];
-  }, [tasks, activeSection, settings.sections]);
+  }, [sectionTasks]);
 
   const stats = useMemo(() => {
     // Current workspace filter
-    const isInActiveSection = (t: Task) => t.section === activeSection || (!t.section && activeSection === settings.sections[0]);
+    const isInActiveSection = (t: Task) => getTaskSection(t) === activeSection;
     
-    // Global metrics (Urgent + Focus) - include all for threshold comparison but count active for load
-    const priorityTasks = tasks.filter(t => (t.category === 'Focus' || t.category === 'Urgent'));
+    // Current workspace metrics (Urgent + Focus)
+    const priorityTasks = sectionTasks.filter(t => (t.category === 'Focus' || t.category === 'Urgent'));
     const combinedCount = priorityTasks.filter(t => !t.isDone).length;
     
-    const urgentCount = tasks.filter(t => t.category === 'Urgent' && !t.isDone).length;
-    const activeTasksCount = tasks.filter(t => (t.category === 'Focus' || t.category === 'Urgent') && !t.isDone).length;
+    const urgentCount = sectionTasks.filter(t => t.category === 'Urgent' && !t.isDone).length;
+    const activeTasksCount = sectionTasks.filter(t => (t.category === 'Focus' || t.category === 'Urgent') && !t.isDone).length;
     
     // Per-section metrics (Urgent, Focus, Archive and Total in section)
-    const sectionMetrics = settings.sections.reduce((acc, sec, idx) => {
-      const sectionTasks = tasks.filter(t => (t.section === sec || (!t.section && idx === 0)));
+    const sectionMetrics = settings.sections.reduce((acc, sec) => {
+      const secTasks = tasks.filter(t => getTaskSection(t) === sec);
       acc[sec] = {
-        urgent: sectionTasks.filter(t => t.category === 'Urgent' && !t.isDone).length,
-        focus: sectionTasks.filter(t => t.category === 'Focus' && !t.isDone).length,
-        archive: sectionTasks.filter(t => t.category === 'Archive' && !t.isDone).length,
-        total: sectionTasks.length
+        urgent: secTasks.filter(t => t.category === 'Urgent' && !t.isDone).length,
+        focus: secTasks.filter(t => t.category === 'Focus' && !t.isDone).length,
+        archive: secTasks.filter(t => t.category === 'Archive' && !t.isDone).length,
+        total: secTasks.filter(t => t.category !== 'Trash').length
       };
       return acc;
     }, {} as Record<string, { urgent: number, focus: number, archive: number, total: number }>);
@@ -2320,8 +2404,8 @@ export default function App() {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     
-    // Done today (Urgent + Focus)
-    const doneTodayCount = tasks.filter(t => 
+    // Done today (Urgent + Focus in active workspace)
+    const doneTodayCount = sectionTasks.filter(t => 
       t.isDone && 
       (t.category === 'Urgent' || t.category === 'Focus') && 
       t.updatedAt >= todayStart.getTime()
@@ -2526,17 +2610,17 @@ export default function App() {
   }, [settings.language]);
 
   const searchAndProjectFilteredTasks = useMemo(() => {
-    return tasks.filter(t => {
+    return sectionTasks.filter(t => {
       const matchesSearch = t.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
                            t.project.toLowerCase().includes(searchTerm.toLowerCase()) ||
                            (t.notes || '').toLowerCase().includes(searchTerm.toLowerCase());
       const matchesProject = selectedProject === 'All' ? true : (t.project === selectedProject);
       return matchesSearch && matchesProject;
     });
-  }, [tasks, searchTerm, selectedProject]);
+  }, [sectionTasks, searchTerm, selectedProject]);
 
   const filteredTasks = useMemo(() => {
-    return tasks
+    return sectionTasks
       .filter(t => {
         const matchesSearch = t.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
                              t.project.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -2545,8 +2629,7 @@ export default function App() {
         // Pinned tasks should respect project filter if one is active
         const matchesProject = selectedProject === 'All' ? true : (t.project === selectedProject);
         
-        const matchesSection = t.section === activeSection || (!t.section && activeSection === settings.sections[0]);
-        return matchesSearch && matchesProject && matchesSection;
+        return matchesSearch && matchesProject;
       })
       .sort((a, b) => {
         // Universal Priority 1: Done state (lowest priority)
@@ -2565,7 +2648,7 @@ export default function App() {
         // Universal Priority 3: Recency (updatedAt descending)
         return (b.updatedAt || 0) - (a.updatedAt || 0);
       });
-  }, [tasks, searchTerm, selectedProject, activeSection, settings.sections]);
+  }, [sectionTasks, searchTerm, selectedProject]);
 
   const groupedFocusTasks = useMemo(() => {
     const focusTasks = filteredTasks.filter(t => t.category === 'Focus');
@@ -2743,12 +2826,11 @@ export default function App() {
   const moveTask = async (id: string, newCategory: Category) => {
     if (!user) return;
     if (newCategory === 'Urgent') {
-      const isAlreadyUrgent = tasks.find(t => t.id === id)?.category === 'Urgent';
+      const isAlreadyUrgent = sectionTasks.find(t => t.id === id)?.category === 'Urgent';
       if (!isAlreadyUrgent) {
-        const urgentCount = tasks.filter(t => t.category === 'Urgent').length;
+        const urgentCount = sectionTasks.filter(t => t.category === 'Urgent').length;
         if (urgentCount >= settings.urgentLimit) {
           const errMsg = `Urgent Capacity Full: You have reached the ${settings.urgentLimit} task limit. Complete or archive an existing task first.`;
-          alert(errMsg); // More prominent alert
           setMessage({ 
             text: errMsg,
             type: 'error'
@@ -2944,10 +3026,39 @@ export default function App() {
   const addSection = async (name: string) => {
     if (!user || !name.trim()) return;
     const trimmedName = name.trim();
+    if (settings.sections.includes(trimmedName)) {
+      setActiveSection(trimmedName);
+      setIsAddingWorkspace(false);
+      setNewWorkspaceName('');
+      setShowSectionMenu(false);
+      return;
+    }
+
+    // Ensure new workspace starts from a completely clean initial state in localStorage
+    try {
+      localStorage.removeItem(`navfor_folders_${trimmedName}`);
+      localStorage.removeItem(`navfor_collapsed_${trimmedName}`);
+      localStorage.removeItem(`navfor_open_tabs_${trimmedName}`);
+      localStorage.removeItem(`navfor_active_tab_${trimmedName}`);
+      localStorage.removeItem(`navfor_editor_panes_${trimmedName}`);
+      localStorage.removeItem(`navfor_custom_timeline_cols_${trimmedName}`);
+    } catch {}
+
     const next = [...settings.sections, trimmedName];
     try {
-      await updateDoc(doc(db, 'settings', user.uid), { sections: next });
+      await saveSettings({ sections: next });
       setActiveSection(trimmedName);
+      setIsAddingWorkspace(false);
+      setNewWorkspaceName('');
+      setShowSectionMenu(false);
+      setMessage({
+        text: L(
+          `新しいワークスペース「${trimmedName}」を作成しました。`,
+          `Created new workspace "${trimmedName}".`,
+          `Nouvel espace de travail « ${trimmedName} » créé.`
+        ),
+        type: 'info'
+      });
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `settings/${user.uid}`);
     }
@@ -2955,20 +3066,84 @@ export default function App() {
 
   const renameSection = async (oldName: string, newName: string) => {
     if (!user || !newName.trim()) return;
-    const next = settings.sections.map(s => s === oldName ? newName.trim() : s);
+    const trimmedNew = newName.trim();
+    if (trimmedNew === oldName) {
+      setEditingWorkspaceName(null);
+      setEditingWorkspaceValue('');
+      return;
+    }
+    if (settings.sections.includes(trimmedNew)) {
+      setMessage({
+        text: L(
+          `ワークスペース「${trimmedNew}」は既に存在します。`,
+          `Workspace "${trimmedNew}" already exists.`,
+          `L'espace de travail « ${trimmedNew} » existe déjà.`
+        ),
+        type: 'error'
+      });
+      return;
+    }
+
+    const next = settings.sections.map(s => s === oldName ? trimmedNew : s);
     try {
       // 1. Update settings
-      await updateDoc(doc(db, 'settings', user.uid), { sections: next });
+      await saveSettings({ sections: next });
       
-      // 2. Update all tasks in this section
+      // 2. Update all tasks and folders in this section
       const batch = writeBatch(db);
-      const affectedTasks = tasks.filter(t => t.section === oldName);
+      const affectedTasks = tasks.filter(t => getTaskSection(t) === oldName);
       affectedTasks.forEach(t => {
-        batch.update(doc(db, 'tasks', t.id), { section: newName.trim() });
+        batch.update(doc(db, 'tasks', t.id), { section: trimmedNew });
       });
+
+      const oldSecFolders = allFolderMetas[oldName] || {};
+      Object.entries(oldSecFolders).forEach(([p, meta]) => {
+        const oldDocId = getFolderDocId(user.uid, oldName, p);
+        const newDocId = getFolderDocId(user.uid, trimmedNew, p);
+        batch.set(doc(db, 'folders', newDocId), {
+          ...meta,
+          path: p,
+          section: trimmedNew,
+          userId: user.uid,
+          updatedAt: Date.now()
+        }, { merge: true });
+        if (oldDocId !== newDocId) {
+          batch.delete(doc(db, 'folders', oldDocId));
+        }
+      });
+
       await batch.commit();
 
-      if (activeSection === oldName) setActiveSection(newName.trim());
+      // 3. Migrate per-workspace localStorage keys
+      try {
+        const keysToMigrate = [
+          'navfor_folders_',
+          'navfor_collapsed_',
+          'navfor_open_tabs_',
+          'navfor_active_tab_',
+          'navfor_editor_panes_',
+          'navfor_custom_timeline_cols_'
+        ];
+        keysToMigrate.forEach(prefix => {
+          const val = localStorage.getItem(`${prefix}${oldName}`);
+          if (val !== null) {
+            localStorage.setItem(`${prefix}${trimmedNew}`, val);
+            localStorage.removeItem(`${prefix}${oldName}`);
+          }
+        });
+      } catch {}
+
+      if (activeSection === oldName) setActiveSection(trimmedNew);
+      setEditingWorkspaceName(null);
+      setEditingWorkspaceValue('');
+      setMessage({
+        text: L(
+          `ワークスペース名を「${trimmedNew}」に変更しました。`,
+          `Renamed workspace to "${trimmedNew}".`,
+          `Espace de travail renommé en « ${trimmedNew} ».`
+        ),
+        type: 'info'
+      });
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `settings/${user.uid}`);
     }
@@ -2977,26 +3152,61 @@ export default function App() {
   const deleteSection = async (name: string) => {
     if (!user) return;
     if (settings.sections.length <= 1) {
-      setMessage({ text: "Cannot delete the last workspace. Please add another one first.", type: 'error' });
+      setMessage({
+        text: L(
+          '最後のワークスペースは削除できません。先に別のワークスペースを追加してください。',
+          'Cannot delete the last workspace. Please add another one first.',
+          'Impossible de supprimer le dernier espace de travail.'
+        ),
+        type: 'error'
+      });
+      setDeletingWorkspaceName(null);
       return;
     }
-    if (!window.confirm(`Delete workspace "${name}" and ALL tasks within it? This cannot be undone.`)) return;
 
     const next = settings.sections.filter(s => s !== name);
     try {
       // 1. Update settings
-      await updateDoc(doc(db, 'settings', user.uid), { sections: next });
+      await saveSettings({ sections: next });
       
-      // 2. Delete all tasks in this section
+      // 2. Delete all tasks and folders in this section
       const batch = writeBatch(db);
-      const affectedTasks = tasks.filter(t => t.section === name);
+      const affectedTasks = tasks.filter(t => getTaskSection(t) === name);
       affectedTasks.forEach(t => {
         batch.delete(doc(db, 'tasks', t.id));
       });
+
+      const secFolders = allFolderMetas[name] || {};
+      Object.keys(secFolders).forEach(p => {
+        const docId = getFolderDocId(user.uid, name, p);
+        batch.delete(doc(db, 'folders', docId));
+      });
+
       await batch.commit();
 
-      if (activeSection === name) setActiveSection(next[0]);
-      setMessage({ text: `Workspace "${name}" and ${affectedTasks.length} tasks deleted.`, type: 'info' });
+      // 3. Clean up per-workspace localStorage keys
+      try {
+        localStorage.removeItem(`navfor_folders_${name}`);
+        localStorage.removeItem(`navfor_collapsed_${name}`);
+        localStorage.removeItem(`navfor_open_tabs_${name}`);
+        localStorage.removeItem(`navfor_active_tab_${name}`);
+        localStorage.removeItem(`navfor_editor_panes_${name}`);
+        localStorage.removeItem(`navfor_custom_timeline_cols_${name}`);
+      } catch {}
+
+      setDeletingWorkspaceName(null);
+      if (activeSection === name) {
+        setActiveSection(next[0]);
+        setShowSectionMenu(false);
+      }
+      setMessage({
+        text: L(
+          `ワークスペース「${name}」を削除しました。`,
+          `Workspace "${name}" and ${affectedTasks.length} tasks deleted.`,
+          `Espace de travail « ${name} » supprimé.`
+        ),
+        type: 'info'
+      });
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `settings/${user.uid}`);
     }
@@ -3073,9 +3283,9 @@ export default function App() {
   const updateFolderMeta = async (path: string, updates: Partial<FolderMeta>) => {
     if (!path) return;
     const now = Date.now();
-    const baseMap = folderMetasRef.current || folderMetas;
-    const current = baseMap[path] || { path, section: activeSection, category: 'Focus' };
-    const existingTaskTimes = tasks
+    const currentSecMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
+    const current = currentSecMetas[path] || { path, section: activeSection, category: 'Focus' };
+    const existingTaskTimes = sectionTasks
       .filter(t => t.project === path || t.project.startsWith(path + '/'))
       .map(t => t.createdAt)
       .filter((ts): ts is number => typeof ts === 'number' && ts > 0);
@@ -3088,7 +3298,7 @@ export default function App() {
       ...current,
       ...updates,
       path,
-      section: current.section || activeSection,
+      section: activeSection,
       createdAt: resolvedCreatedAt,
       updatedAt: now
     };
@@ -3098,22 +3308,29 @@ export default function App() {
       }
     }
 
-    const nextMap = {
-      ...baseMap,
+    const nextSecMap = {
+      ...currentSecMetas,
       [path]: sanitizedLocal
     };
-    folderMetasRef.current = nextMap;
-    setFolderMetas(prev => ({
+    folderMetasRef.current = nextSecMap;
+    allFolderMetasRef.current = {
+      ...allFolderMetasRef.current,
+      [activeSection]: nextSecMap
+    };
+    setAllFolderMetas(prev => ({
       ...prev,
-      [path]: sanitizedLocal
+      [activeSection]: {
+        ...(prev[activeSection] || {}),
+        [path]: sanitizedLocal
+      }
     }));
 
     if (user) {
       try {
-        const folderDocId = `${user.uid}_${encodeURIComponent(path).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        const folderDocId = getFolderDocId(user.uid, activeSection, path);
         const firestoreUpdates: Record<string, any> = {
           path,
-          section: sanitizedLocal.section || activeSection,
+          section: activeSection,
           category: sanitizedLocal.category || 'Focus',
           userId: user.uid,
           createdAt: resolvedCreatedAt,
@@ -3131,7 +3348,7 @@ export default function App() {
         handleFirestoreError(err, OperationType.UPDATE, `folders/${path}`);
       }
     } else {
-      syncLocalFolderMetas(nextMap);
+      syncLocalFolderMetas(nextSecMap, activeSection);
     }
   };
 
@@ -3150,7 +3367,7 @@ export default function App() {
     pushToHistory();
 
     const isInsideFolder = (p: string) => p === folderPath || p.startsWith(folderPath + '/');
-    const affectedTasks = tasks.filter(t => isInsideFolder(t.project));
+    const affectedTasks = sectionTasks.filter(t => isInsideFolder(t.project));
     const now = Date.now();
 
     if (user) {
@@ -3160,16 +3377,18 @@ export default function App() {
           batch.update(doc(db, 'tasks', t.id), { category: 'Archive', updatedAt: now });
         });
 
-        // Update folder meta and all subfolder metas
+        // Update folder meta and all subfolder metas in activeSection
         const currentMetas: Record<string, FolderMeta> = { ...folderMetas };
         if (!currentMetas[folderPath]) {
           currentMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Archive' };
         }
         (Object.entries(currentMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
           if (isInsideFolder(p)) {
-            const folderDocId = `${user.uid}_${encodeURIComponent(p).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+            const folderDocId = getFolderDocId(user.uid, activeSection, p);
             batch.set(doc(db, 'folders', folderDocId), {
               ...meta,
+              path: p,
+              section: activeSection,
               category: 'Archive',
               userId: user.uid,
               updatedAt: now
@@ -3181,17 +3400,17 @@ export default function App() {
         handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
       }
     } else {
-      syncLocalTasks(tasks.map(t => isInsideFolder(t.project) ? { ...t, category: 'Archive', updatedAt: now } : t));
+      syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Archive', updatedAt: now } : t));
       const nextMetas = { ...folderMetas };
       if (!nextMetas[folderPath]) {
         nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Archive' };
       }
       Object.keys(nextMetas).forEach(p => {
         if (isInsideFolder(p)) {
-          nextMetas[p] = { ...nextMetas[p], category: 'Archive', updatedAt: now };
+          nextMetas[p] = { ...nextMetas[p], section: activeSection, category: 'Archive', updatedAt: now };
         }
       });
-      syncLocalFolderMetas(nextMetas);
+      syncLocalFolderMetas(nextMetas, activeSection);
     }
 
     setMessage({
@@ -3209,7 +3428,7 @@ export default function App() {
     pushToHistory();
 
     const isInsideFolder = (p: string) => p === folderPath || p.startsWith(folderPath + '/');
-    const affectedTasks = tasks.filter(t => isInsideFolder(t.project));
+    const affectedTasks = sectionTasks.filter(t => isInsideFolder(t.project));
     const now = Date.now();
 
     if (user) {
@@ -3219,16 +3438,18 @@ export default function App() {
           batch.update(doc(db, 'tasks', t.id), { category: 'Trash', updatedAt: now });
         });
 
-        // Update folder meta and subfolder metas
+        // Update folder meta and subfolder metas in activeSection
         const currentMetas: Record<string, FolderMeta> = { ...folderMetas };
         if (!currentMetas[folderPath]) {
           currentMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Trash' };
         }
         (Object.entries(currentMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
           if (isInsideFolder(p)) {
-            const folderDocId = `${user.uid}_${encodeURIComponent(p).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+            const folderDocId = getFolderDocId(user.uid, activeSection, p);
             batch.set(doc(db, 'folders', folderDocId), {
               ...meta,
+              path: p,
+              section: activeSection,
               category: 'Trash',
               userId: user.uid,
               updatedAt: now
@@ -3240,23 +3461,23 @@ export default function App() {
         handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
       }
     } else {
-      syncLocalTasks(tasks.map(t => isInsideFolder(t.project) ? { ...t, category: 'Trash', updatedAt: now } : t));
+      syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Trash', updatedAt: now } : t));
       const nextMetas = { ...folderMetas };
       if (!nextMetas[folderPath]) {
         nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Trash' };
       }
       Object.keys(nextMetas).forEach(p => {
         if (isInsideFolder(p)) {
-          nextMetas[p] = { ...nextMetas[p], category: 'Trash', updatedAt: now };
+          nextMetas[p] = { ...nextMetas[p], section: activeSection, category: 'Trash', updatedAt: now };
         }
       });
-      syncLocalFolderMetas(nextMetas);
+      syncLocalFolderMetas(nextMetas, activeSection);
     }
 
     // Close any tabs related to this folder or tasks inside it
     const isTabInFolder = (tabId: string) => {
       if (tabId === `folder:${folderPath}` || tabId.startsWith(`folder:${folderPath}/`)) return true;
-      const t = tasks.find(task => task.id === tabId);
+      const t = sectionTasks.find(task => task.id === tabId);
       return t ? isInsideFolder(t.project) : false;
     };
     setOpenTaskIds(prev => prev.filter(id => !isTabInFolder(id)));
@@ -3290,7 +3511,7 @@ export default function App() {
     if (!oldFolderPath || !newFolderPath || oldFolderPath === newFolderPath) return;
     pushToHistory();
 
-    const affectedTasks = tasks.filter(t => 
+    const affectedTasks = sectionTasks.filter(t => 
       t.project === oldFolderPath || t.project.startsWith(oldFolderPath + '/')
     );
 
@@ -3309,6 +3530,7 @@ export default function App() {
       }
     } else {
       syncLocalTasks(tasks.map(t => {
+        if (getTaskSection(t) !== activeSection) return t;
         if (t.project === oldFolderPath) {
           return { ...t, project: newFolderPath, updatedAt: Date.now() };
         }
@@ -3319,26 +3541,42 @@ export default function App() {
       }));
     }
 
-    // Update folderMetas map
+    // Update folderMetas map for activeSection
     const nextMetas = { ...folderMetas };
+    const oldKeysRemoved: string[] = [];
     let metasChanged = false;
     Object.keys(nextMetas).forEach(k => {
       if (k === oldFolderPath || k.startsWith(oldFolderPath + '/')) {
         const newKey = k === oldFolderPath ? newFolderPath : newFolderPath + k.slice(oldFolderPath.length);
-        nextMetas[newKey] = { ...nextMetas[k], path: newKey, updatedAt: Date.now() };
+        nextMetas[newKey] = { ...nextMetas[k], path: newKey, section: activeSection, updatedAt: Date.now() };
         delete nextMetas[k];
+        oldKeysRemoved.push(k);
         metasChanged = true;
       }
     });
     if (metasChanged) {
+      setAllFolderMetas(prev => ({
+        ...prev,
+        [activeSection]: nextMetas
+      }));
       if (user) {
-        // Also update / migrate folder docs in Firestore
+        // Also update / migrate folder docs in Firestore and delete old folder docs
         try {
           const batch = writeBatch(db);
+          oldKeysRemoved.forEach(oldK => {
+            const oldDocId = getFolderDocId(user.uid, activeSection, oldK);
+            batch.delete(doc(db, 'folders', oldDocId));
+          });
           (Object.entries(nextMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
             if (p === newFolderPath || p.startsWith(newFolderPath + '/')) {
-              const folderDocId = `${user.uid}_${encodeURIComponent(p).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-              batch.set(doc(db, 'folders', folderDocId), { ...meta, userId: user.uid, updatedAt: Date.now() }, { merge: true });
+              const folderDocId = getFolderDocId(user.uid, activeSection, p);
+              batch.set(doc(db, 'folders', folderDocId), {
+                ...meta,
+                path: p,
+                section: activeSection,
+                userId: user.uid,
+                updatedAt: Date.now()
+              }, { merge: true });
             }
           });
           await batch.commit();
@@ -3346,7 +3584,7 @@ export default function App() {
           console.error('Failed to update folder doc in firestore', e);
         }
       } else {
-        syncLocalFolderMetas(nextMetas);
+        syncLocalFolderMetas(nextMetas, activeSection);
       }
     }
 
@@ -3406,7 +3644,7 @@ export default function App() {
 
   const pickDailyTasks = async (selectedIds: string[]) => {
     if (!user) return;
-    const currentUrgentCount = tasks.filter(t => t.category === 'Urgent').length;
+    const currentUrgentCount = sectionTasks.filter(t => t.category === 'Urgent').length;
     if (currentUrgentCount + selectedIds.length > settings.urgentLimit) {
       setMessage({ 
         text: `Daily Pick Violation: This batch would exceed the ${settings.urgentLimit} slot limit.`,
@@ -4720,12 +4958,23 @@ export default function App() {
         isEffectiveTimelineFullscreen && "hidden"
       )}>
         {/* Left Side: Logo & Workspace Menu */}
-        <div className="flex items-center gap-2 sm:gap-4 min-w-0 shrink overflow-hidden">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0 shrink">
           <div className="relative min-w-0 max-w-full">
             {user ? (
               <button 
-                onClick={() => setShowSectionMenu(!showSectionMenu)}
-                className="flex items-center gap-1.5 sm:gap-2 hover:opacity-80 transition-opacity cursor-pointer group min-w-0 max-w-full"
+                type="button"
+                onClick={() => {
+                  const nextOpen = !showSectionMenu;
+                  setShowSectionMenu(nextOpen);
+                  if (!nextOpen) {
+                    setIsAddingWorkspace(false);
+                    setNewWorkspaceName('');
+                    setEditingWorkspaceName(null);
+                    setDeletingWorkspaceName(null);
+                  }
+                }}
+                className="flex items-center gap-1.5 sm:gap-2 hover:opacity-80 transition-opacity cursor-pointer group min-w-0 max-w-full text-left"
+                title={L('クリックしてワークスペースを切り替え・追加', 'Click to switch or add workspace', "Cliquez pour changer ou ajouter un espace de travail")}
               >
                 <div className="w-7 h-7 sm:w-8 sm:h-8 bg-white rounded-lg flex items-center justify-center transition-transform shadow-lg shadow-indigo-100 group-active:scale-95 overflow-hidden border border-slate-100 shrink-0">
                   <img src={`${(import.meta as any).env?.BASE_URL || '/'}icon-192.png`} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
@@ -4734,8 +4983,8 @@ export default function App() {
                   <h1 className="text-xs sm:text-sm font-black tracking-tighter text-slate-800 uppercase whitespace-nowrap truncate max-w-full">
                     NavFOR <span className="text-indigo-600">v{APP_VERSION}</span>
                   </h1>
-                  <p className="text-[9px] sm:text-[10px] font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-0.5 min-w-0 max-w-full">
-                    <span className="truncate max-w-[80px] sm:max-w-[110px]">{activeSection}</span> <ChevronDown size={10} className={cn("transition-transform shrink-0", showSectionMenu && "rotate-180")} />
+                  <p className="text-[9px] sm:text-[10px] font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-0.5 min-w-0 max-w-full mt-0.5">
+                    <span className="truncate max-w-[90px] sm:max-w-[140px]">{activeSection}</span> <ChevronDown size={10} className={cn("transition-transform shrink-0", showSectionMenu && "rotate-180")} />
                   </p>
                 </div>
               </button>
@@ -4756,82 +5005,261 @@ export default function App() {
             )}
             {user && showSectionMenu && (
               <>
-                <div className="fixed inset-0 z-[55]" onClick={() => setShowSectionMenu(false)} />
-                <div className="absolute top-full left-0 mt-2 w-64 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] py-2 overflow-hidden">
-                  <div className="px-4 py-2 border-b border-slate-50 flex items-center justify-between bg-slate-50/50">
-                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Workspaces</p>
-                    <button 
+                <div
+                  className="fixed inset-0 z-[55]"
+                  onClick={() => {
+                    setShowSectionMenu(false);
+                    setIsAddingWorkspace(false);
+                    setNewWorkspaceName('');
+                    setEditingWorkspaceName(null);
+                    setDeletingWorkspaceName(null);
+                  }}
+                />
+                <div className="absolute top-full left-0 mt-2 w-72 sm:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] py-2 overflow-hidden">
+                  <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between bg-slate-50/70">
+                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                      {L('ワークスペース', 'Workspaces', 'Espaces de travail')}
+                    </p>
+                    <button
+                      type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        const name = window.prompt("New Workspace Name?");
-                        if (name) addSection(name);
-                        setShowSectionMenu(false);
+                        setIsAddingWorkspace(prev => !prev);
+                        setNewWorkspaceName('');
+                        setEditingWorkspaceName(null);
+                        setDeletingWorkspaceName(null);
                       }}
-                      className="text-indigo-600 hover:text-indigo-700 p-1 bg-white rounded-lg border border-indigo-100 shadow-sm"
+                      className="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 px-2 py-1 bg-white rounded-lg border border-indigo-200 shadow-2xs flex items-center gap-1 text-[10px] font-bold transition-colors cursor-pointer"
+                      title={L('新しいワークスペースを作成', 'Create new workspace', 'Créer un nouvel espace')}
                     >
-                      <Plus size={14} />
+                      <Plus size={12} />
+                      <span>{L('新規作成', 'New', 'Nouveau')}</span>
                     </button>
                   </div>
+
+                  {isAddingWorkspace && (
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (newWorkspaceName.trim()) {
+                          addSection(newWorkspaceName.trim());
+                        }
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="p-3 bg-indigo-50/50 border-b border-indigo-100 space-y-2"
+                    >
+                      <input
+                        autoFocus
+                        type="text"
+                        value={newWorkspaceName}
+                        onChange={(e) => setNewWorkspaceName(e.target.value)}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === 'Escape') {
+                            setIsAddingWorkspace(false);
+                            setNewWorkspaceName('');
+                          }
+                        }}
+                        placeholder={L('新しいワークスペース名...', 'New workspace name...', 'Nom du nouvel espace...')}
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-indigo-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500 font-medium text-slate-800"
+                      />
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setIsAddingWorkspace(false);
+                            setNewWorkspaceName('');
+                          }}
+                          className="px-2.5 py-1 text-[10px] font-bold text-slate-500 hover:bg-white rounded-md transition-colors cursor-pointer"
+                        >
+                          {L('キャンセル', 'Cancel', 'Annuler')}
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={!newWorkspaceName.trim()}
+                          className="px-3 py-1 text-[10px] font-bold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-md shadow-2xs transition-colors cursor-pointer"
+                        >
+                          {L('作成', 'Create', 'Créer')}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
                   <DragDropContext onDragEnd={onSectionDragEnd}>
                     <Droppable droppableId="sections">
                       {(provided) => (
                         <div {...provided.droppableProps} ref={provided.innerRef} className="max-h-[350px] overflow-y-auto custom-scrollbar">
-                          {settings.sections.map((s, index) => (
-                            <Draggable key={s} draggableId={s} index={index}>
-                              {(provided, snapshot) => (
-                                <div 
-                                  ref={provided.innerRef}
-                                  {...provided.draggableProps}
-                                  className={cn(
-                                    "group/item flex items-center border-b border-slate-50 last:border-0",
-                                    snapshot.isDragging && "bg-white shadow-xl border border-indigo-200 rounded-lg z-[100]"
-                                  )}
-                                >
-                                  <div {...provided.dragHandleProps} className="pl-3 pr-1 text-slate-300 hover:text-slate-400 cursor-grab active:cursor-grabbing">
-                                    <GripVertical size={14} />
-                                  </div>
-                                  <button 
-                                    onClick={() => {
-                                      setActiveSection(s);
-                                      setShowSectionMenu(false);
-                                    }}
+                          {(settings.sections.length > 0 ? settings.sections : ['General']).map((s, index) => {
+                            const secCount = stats.sectionMetrics[s]?.total ?? 0;
+                            const isEditingThis = editingWorkspaceName === s;
+                            const isDeletingThis = deletingWorkspaceName === s;
+                            return (
+                              <Draggable key={s} draggableId={s} index={index}>
+                                {(provided, snapshot) => (
+                                  <div 
+                                    ref={provided.innerRef}
+                                    {...provided.draggableProps}
                                     className={cn(
-                                      "flex-1 text-left px-2 py-3.5 text-xs font-bold transition-all flex items-center justify-between",
-                                      activeSection === s ? "text-indigo-600" : "text-slate-600 hover:bg-slate-50"
+                                      "group/item flex flex-col border-b border-slate-50 last:border-0",
+                                      snapshot.isDragging && "bg-white shadow-xl border border-indigo-200 rounded-lg z-[100]"
                                     )}
                                   >
-                                    <span className="flex items-center gap-2">
-                                       <div className={cn("w-1.5 h-1.5 rounded-full", activeSection === s ? "bg-indigo-500" : "bg-slate-200")} />
-                                       {s}
-                                    </span>
-                                    {activeSection === s && <CheckCircle2 size={12} />}
-                                  </button>
-                                  <div className="flex px-2 md:opacity-0 group-hover/item:opacity-100 transition-opacity gap-1">
-                                    <button 
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        const name = window.prompt(t('RenameWorkspace'), s);
-                                        if (name) renameSection(s, name);
-                                      }}
-                                      className="p-1.5 hover:bg-indigo-50 hover:text-indigo-600 text-slate-300 rounded"
-                                    >
-                                      <SettingsIcon size={12} />
-                                    </button>
-                                    <button 
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        deleteSection(s);
-                                        if (activeSection === s) setShowSectionMenu(false);
-                                      }}
-                                      className="p-1.5 hover:bg-red-50 hover:text-red-600 text-slate-300 rounded"
-                                    >
-                                      <Trash2 size={12} />
-                                    </button>
+                                    {isEditingThis ? (
+                                      <form
+                                        onSubmit={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          if (editingWorkspaceValue.trim()) {
+                                            renameSection(s, editingWorkspaceValue.trim());
+                                          }
+                                        }}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="p-2.5 bg-slate-50 flex items-center gap-1.5"
+                                      >
+                                        <input
+                                          autoFocus
+                                          type="text"
+                                          value={editingWorkspaceValue}
+                                          onChange={(e) => setEditingWorkspaceValue(e.target.value)}
+                                          onKeyDown={(e) => {
+                                            e.stopPropagation();
+                                            if (e.key === 'Escape') {
+                                              setEditingWorkspaceName(null);
+                                              setEditingWorkspaceValue('');
+                                            }
+                                          }}
+                                          className="flex-1 min-w-0 px-2 py-1 text-xs bg-white border border-indigo-300 rounded-md outline-none focus:ring-1 focus:ring-indigo-500 font-bold text-slate-800"
+                                        />
+                                        <button
+                                          type="submit"
+                                          className="p-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md cursor-pointer shrink-0"
+                                          title={L('保存', 'Save', 'Enregistrer')}
+                                        >
+                                          <Check size={12} />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setEditingWorkspaceName(null);
+                                            setEditingWorkspaceValue('');
+                                          }}
+                                          className="p-1.5 bg-white hover:bg-slate-200 text-slate-500 border border-slate-200 rounded-md cursor-pointer shrink-0"
+                                          title={L('キャンセル', 'Cancel', 'Annuler')}
+                                        >
+                                          <X size={12} />
+                                        </button>
+                                      </form>
+                                    ) : isDeletingThis ? (
+                                      <div
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="p-2.5 bg-red-50/80 flex items-center justify-between gap-2"
+                                      >
+                                        <span className="text-[11px] font-bold text-red-700 truncate">
+                                          {L(`「${s}」を削除しますか？`, `Delete "${s}"?`, `Supprimer « ${s} » ?`)}
+                                        </span>
+                                        <div className="flex items-center gap-1 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setDeletingWorkspaceName(null);
+                                            }}
+                                            className="px-2 py-1 text-[10px] font-bold bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 rounded cursor-pointer"
+                                          >
+                                            {L('キャンセル', 'Cancel', 'Annuler')}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              deleteSection(s);
+                                            }}
+                                            className="px-2 py-1 text-[10px] font-bold bg-red-600 hover:bg-red-700 text-white rounded cursor-pointer"
+                                          >
+                                            {L('削除', 'Delete', 'Supprimer')}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center">
+                                        <div {...provided.dragHandleProps} className="pl-3 pr-1 text-slate-300 hover:text-slate-400 cursor-grab active:cursor-grabbing">
+                                          <GripVertical size={14} />
+                                        </div>
+                                        <button 
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveSection(s);
+                                            setShowSectionMenu(false);
+                                            setIsAddingWorkspace(false);
+                                            setEditingWorkspaceName(null);
+                                            setDeletingWorkspaceName(null);
+                                          }}
+                                          className={cn(
+                                            "flex-1 min-w-0 text-left px-2 py-3 text-xs font-bold transition-all flex items-center justify-between gap-2 cursor-pointer",
+                                            activeSection === s ? "text-indigo-600 bg-indigo-50/40" : "text-slate-600 hover:bg-slate-50"
+                                          )}
+                                        >
+                                          <span className="flex items-center gap-2 min-w-0">
+                                            <div className={cn("w-1.5 h-1.5 rounded-full shrink-0", activeSection === s ? "bg-indigo-500" : "bg-slate-300")} />
+                                            <span className="truncate">{s}</span>
+                                          </span>
+                                          <span className="flex items-center gap-1.5 shrink-0">
+                                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-semibold">
+                                              {secCount}
+                                            </span>
+                                            {activeSection === s && <CheckCircle2 size={13} className="text-indigo-600 shrink-0" />}
+                                          </span>
+                                        </button>
+                                        <div className="flex px-2 md:opacity-0 group-hover/item:opacity-100 transition-opacity gap-1 shrink-0">
+                                          <button 
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setEditingWorkspaceName(s);
+                                              setEditingWorkspaceValue(s);
+                                              setDeletingWorkspaceName(null);
+                                              setIsAddingWorkspace(false);
+                                            }}
+                                            className="p-1.5 hover:bg-indigo-50 hover:text-indigo-600 text-slate-400 rounded cursor-pointer"
+                                            title={L('ワークスペース名を変更', 'Rename workspace', "Renommer l'espace")}
+                                          >
+                                            <Edit2 size={12} />
+                                          </button>
+                                          <button 
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              if (settings.sections.length <= 1) {
+                                                setMessage({
+                                                  text: L(
+                                                    '最後のワークスペースは削除できません。先に別のワークスペースを追加してください。',
+                                                    'Cannot delete the last workspace. Please add another one first.',
+                                                    'Impossible de supprimer le dernier espace de travail.'
+                                                  ),
+                                                  type: 'error'
+                                                });
+                                                return;
+                                              }
+                                              setDeletingWorkspaceName(s);
+                                              setEditingWorkspaceName(null);
+                                              setIsAddingWorkspace(false);
+                                            }}
+                                            className="p-1.5 hover:bg-red-50 hover:text-red-600 text-slate-400 rounded cursor-pointer"
+                                            title={L('ワークスペースを削除', 'Delete workspace', "Supprimer l'espace")}
+                                          >
+                                            <Trash2 size={12} />
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
-                                </div>
-                              )}
-                            </Draggable>
-                          ))}
+                                )}
+                              </Draggable>
+                            );
+                          })}
                           {provided.placeholder}
                         </div>
                       )}
@@ -5298,6 +5726,7 @@ export default function App() {
               mobileView !== 'summary' && "hidden lg:flex"
             )}>
               <TaskExplorerTree
+                key={activeSection}
                 tasks={filteredTasks}
                 activeTaskId={activeTabTaskId}
                 openTaskIds={openTaskIds}
@@ -5358,6 +5787,7 @@ export default function App() {
                   /* Project Timeline View */
                   <div className="flex-1 h-full min-w-0 flex flex-col min-h-0 overflow-hidden">
                     <ProjectTimelineView
+                      key={activeSection}
                       tasks={filteredTasks}
                       activeTaskId={activeTabTaskId}
                       onSelectTask={handleOpenTaskInTab}
@@ -5379,6 +5809,7 @@ export default function App() {
                       activeSection={activeSection}
                       language={settings.language}
                       folderMetas={folderMetas}
+                      onUpdateFolderMeta={updateFolderMeta}
                       onToggleFolderStar={handleToggleFolderStar}
                       onToggleFolderPin={handleToggleFolderPin}
                       isFullscreen={isEffectiveTimelineFullscreen}
@@ -6095,7 +6526,8 @@ export default function App() {
             <>
               {isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
                 <TaskTabsDetail
-                  tasks={tasks}
+                  key={activeSection}
+                  tasks={sectionTasks}
                   activeTaskId={activeTabTaskId}
                   openTaskIds={openTaskIds}
                   lastOpenEvent={lastOpenEvent}
@@ -6123,6 +6555,7 @@ export default function App() {
                   onToggleFolderStar={handleToggleFolderStar}
                   onToggleFolderPin={handleToggleFolderPin}
                   onShowMessage={setMessage}
+                  activeSection={activeSection}
                   deadlineThresholdDays={settings.deadlineThreshold}
                   language={settings.language}
                   width={detailPaneWidth}
@@ -6183,7 +6616,7 @@ export default function App() {
       <AnimatePresence>
         {isPickingDaily && (
           <DailyPickModal 
-            tasks={tasks.filter(t => t.category === 'Focus' && !t.isDone)} 
+            tasks={sectionTasks.filter(t => t.category === 'Focus' && !t.isDone)} 
             onClose={() => setIsPickingDaily(false)} 
             onPick={pickDailyTasks} 
             t={t}
@@ -6233,7 +6666,7 @@ export default function App() {
         isOpen={isCreateTaskModalOpen}
         onClose={() => setIsCreateTaskModalOpen(false)}
         onCreateTask={handleCreateTaskDirect}
-        tasks={tasks}
+        tasks={sectionTasks}
         folderMetas={folderMetas}
         activeSection={activeSection}
         initialProject={createTaskModalInitialProject}

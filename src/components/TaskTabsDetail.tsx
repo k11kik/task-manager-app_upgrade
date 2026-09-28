@@ -69,6 +69,7 @@ export interface TaskTabsDetailProps {
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   onShowMessage?: (msg: { text: string; type: 'error' | 'info' }) => void;
+  activeSection?: string;
   deadlineThresholdDays?: number;
   language?: string;
   width: number;
@@ -1572,6 +1573,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   onToggleFolderStar,
   onToggleFolderPin,
   onShowMessage,
+  activeSection = 'General',
   deadlineThresholdDays = 3,
   language = 'en',
   width,
@@ -1580,6 +1582,9 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 }) => {
   const isJa = language === 'ja';
   const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
+  const panesStorageKey = `navfor_editor_panes_${activeSection}`;
+  const openTabsStorageKey = `navfor_open_tabs_${activeSection}`;
+  const activeTabStorageKey = `navfor_active_tab_${activeSection}`;
 
   // Overall detail pane resizer
   const isResizingWidthRef = useRef(false);
@@ -1607,7 +1612,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     );
 
     try {
-      const saved = localStorage.getItem('navfor_editor_panes');
+      const saved = localStorage.getItem(panesStorageKey) || (activeSection === 'General' ? localStorage.getItem('navfor_editor_panes') : null);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length >= 4) {
@@ -1672,7 +1677,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   useEffect(() => {
     try {
       localStorage.setItem('navfor_editor_layout', layout);
-      localStorage.setItem('navfor_editor_panes', JSON.stringify(panes));
+      localStorage.setItem(panesStorageKey, JSON.stringify(panes));
       localStorage.setItem('navfor_split_x_ratio', String(splitXRatio));
       localStorage.setItem('navfor_split_y_ratio', String(splitYRatio));
       const allOpenIds = Array.from(new Set(panes.flatMap(p => p.openTaskIds)));
@@ -1682,7 +1687,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     } catch (e) {
       console.error(e);
     }
-  }, [layout, panes, splitXRatio, splitYRatio]);
+  }, [layout, panes, splitXRatio, splitYRatio, panesStorageKey]);
 
   // Synchronize incoming activeTaskId & lastOpenEvent from props (e.g. from Explorer, Timeline, Focus click)
   const prevActiveTaskIdRef = useRef<string | null>(null);
@@ -1764,9 +1769,9 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
         { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
       ];
       try {
-        localStorage.setItem('navfor_open_tabs', '[]');
-        localStorage.removeItem('navfor_active_tab');
-        localStorage.setItem('navfor_editor_panes', JSON.stringify(emptyPanes));
+        localStorage.setItem(openTabsStorageKey, '[]');
+        localStorage.removeItem(activeTabStorageKey);
+        localStorage.setItem(panesStorageKey, JSON.stringify(emptyPanes));
       } catch (e) {
         console.error(e);
       }
@@ -1951,9 +1956,9 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     ];
     setPanes(emptyPanes);
     try {
-      localStorage.setItem('navfor_open_tabs', '[]');
-      localStorage.removeItem('navfor_active_tab');
-      localStorage.setItem('navfor_editor_panes', JSON.stringify(emptyPanes));
+      localStorage.setItem(openTabsStorageKey, '[]');
+      localStorage.removeItem(activeTabStorageKey);
+      localStorage.setItem(panesStorageKey, JSON.stringify(emptyPanes));
     } catch (e) {
       console.error(e);
     }

@@ -302,11 +302,24 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       return current;
     };
 
-    // Include custom folders
+    // Include custom folders (excluding trashed/archived folders)
     customFolders.forEach(folderPath => {
       if (!folderPath) return;
+      const meta = folderMetas?.[folderPath];
+      if (meta?.category === 'Trash' || meta?.category === 'Archive') return;
       const parts = folderPath.split('/').map(p => p.trim()).filter(Boolean);
       getOrCreateFolder(parts);
+    });
+
+    // Include active folders from folderMetas for this workspace
+    Object.values(folderMetas || {}).forEach((meta: FolderMeta) => {
+      if (!meta || !meta.path) return;
+      if (meta.category === 'Trash' || meta.category === 'Archive') return;
+      if (meta.section && meta.section !== activeSection) return;
+      const parts = meta.path.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+      if (parts.length > 0) {
+        getOrCreateFolder(parts);
+      }
     });
 
     // Distribute tasks
@@ -329,7 +342,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     });
 
     return root;
-  }, [tasks, customFolders, searchQuery, isFilterActiveOnly]);
+  }, [tasks, customFolders, folderMetas, activeSection, searchQuery, isFilterActiveOnly]);
 
   const rootFolderList = useMemo(() => {
     const list = Array.from(treeRoot.subfolders.values()) as FolderNode[];

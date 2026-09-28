@@ -148,6 +148,7 @@ interface ProjectTimelineViewProps {
   activeSection?: string;
   language?: string;
   folderMetas?: Record<string, FolderMeta>;
+  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   isFullscreen?: boolean;
@@ -178,6 +179,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   activeSection = 'dashboard',
   language = 'en',
   folderMetas,
+  onUpdateFolderMeta,
   onToggleFolderStar,
   onToggleFolderPin,
   isFullscreen = false,
@@ -224,6 +226,26 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
     return DEFAULT_CUSTOM_COLUMNS;
   });
+
+  // Re-sync customColumns when activeSection changes
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`navfor_custom_timeline_cols_${activeSection}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const isOldDayDefault = parsed.length === 7 && parsed[0]?.id === 'day-1' && parsed[6]?.id === 'day-7';
+          if (!isOldDayDefault) {
+            setCustomColumns(parsed);
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setCustomColumns(DEFAULT_CUSTOM_COLUMNS);
+  }, [activeSection]);
 
   const saveCustomColumns = (cols: CustomTimelineColumn[]) => {
     setCustomColumns(cols);
@@ -836,7 +858,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     // 1. Include custom empty folders (matching Explorer)
     customFolders.forEach(folderPath => {
       if (!folderPath) return;
+      const meta = folderMetas?.[folderPath];
+      if (meta?.category === 'Trash' || meta?.category === 'Archive') return;
       const parts = folderPath.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+      if (parts.length > 0) {
+        getOrCreateFolder(parts);
+      }
+    });
+
+    // 1b. Include active folders from folderMetas for this workspace
+    Object.values(folderMetas || {}).forEach((meta: FolderMeta) => {
+      if (!meta || !meta.path) return;
+      if (meta.category === 'Trash' || meta.category === 'Archive') return;
+      if (meta.section && meta.section !== activeSection) return;
+      const parts = meta.path.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       if (parts.length > 0) {
         getOrCreateFolder(parts);
       }
@@ -882,7 +917,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
 
     return result;
-  }, [activeTasks, customFolders]);
+  }, [activeTasks, customFolders, folderMetas, activeSection]);
 
   const toggleProjectCollapse = (path: string) => {
     setCollapsedProjectPaths(prev => {
@@ -3382,6 +3417,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 const fullPath = targetParentFolder ? `${targetParentFolder}/${name}` : name;
                 if (!customFolders.includes(fullPath)) {
                   saveCustomFolders([...customFolders, fullPath]);
+                }
+                if (!folderMetas?.[fullPath]?.createdAt) {
+                  onUpdateFolderMeta?.(fullPath, { createdAt: Date.now() });
                 }
                 // Auto expand parent and all its ancestors if collapsed
                 if (targetParentFolder) {
