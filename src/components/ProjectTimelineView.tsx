@@ -244,7 +244,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [editingColumnLabel, setEditingColumnLabel] = useState('');
 
   // Calendar Timeline view window state (start date, number of days visible)
-  const [windowStartDate, setWindowStartDate] = useState<Date>(() => subDays(startOfDay(new Date()), 2));
+  const [windowStartDate, setWindowStartDate] = useState<Date>(() => startOfDay(new Date()));
   const [daysCount, setDaysCount] = useState<number>(14); // 7, 14, 21, 30
   const [showUnscheduledColumn, setShowUnscheduledColumn] = useState(true);
   const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(new Set());
@@ -1660,7 +1660,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
   const handleNavigate = (direction: 'prev' | 'next' | 'today') => {
     if (direction === 'today') {
-      setWindowStartDate(subDays(startOfDay(new Date()), 2));
+      setWindowStartDate(startOfDay(new Date()));
     } else if (direction === 'prev') {
       setWindowStartDate(prev => subDays(prev, 7));
     } else {
