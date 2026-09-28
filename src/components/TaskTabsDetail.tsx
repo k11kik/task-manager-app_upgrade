@@ -1758,29 +1758,56 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     });
   }, [activeTaskId, lastOpenEvent, activePaneId]);
 
-  // Auto close detail pane if all panes have no open tabs
-  useEffect(() => {
-    const totalTabs = panes.reduce((acc, p) => acc + p.openTaskIds.length, 0);
-    if (totalTabs === 0) {
-      const emptyPanes: EditorPaneState[] = [
-        { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-        { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-        { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-        { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-      ];
-      try {
-        localStorage.setItem(openTabsStorageKey, '[]');
-        localStorage.removeItem(activeTabStorageKey);
-        localStorage.setItem(panesStorageKey, JSON.stringify(emptyPanes));
-      } catch (e) {
-        console.error(e);
-      }
-      if (onOpenTaskIdsChange) {
-        onOpenTaskIdsChange([]);
-      }
+  // Determine which panes are active in current layout
+  const visiblePaneIds = useMemo(() => {
+    switch (layout) {
+      case 'single':
+        return [0];
+      case 'split-right':
+        return [0, 1];
+      case 'split-down':
+        return [0, 2];
+      case 'grid-2x2':
+        return [0, 1, 2, 3];
+    }
+  }, [layout]);
+
+  // Close all tabs across all panes and close Task Detail
+  const handleCloseAllTabs = () => {
+    const emptyPanes: EditorPaneState[] = [
+      { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+      { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
+    ];
+    setPanes(emptyPanes);
+    try {
+      localStorage.setItem(openTabsStorageKey, '[]');
+      localStorage.removeItem(activeTabStorageKey);
+      localStorage.setItem(panesStorageKey, JSON.stringify(emptyPanes));
+    } catch (e) {
+      console.error(e);
+    }
+    if (onOpenTaskIdsChange) {
+      onOpenTaskIdsChange([]);
+    }
+    if (onCloseAllTabs) {
+      onCloseAllTabs();
+    } else {
       onClose();
     }
-  }, [panes, onClose, onOpenTaskIdsChange]);
+  };
+
+  // Auto close detail pane completely if all visible panes have no open tabs
+  useEffect(() => {
+    const totalVisibleTabs = panes.reduce((acc, p) => {
+      if (!visiblePaneIds.includes(p.id)) return acc;
+      return acc + p.openTaskIds.length;
+    }, 0);
+    if (totalVisibleTabs === 0) {
+      handleCloseAllTabs();
+    }
+  }, [panes, visiblePaneIds]);
 
   // Handle Tab Selection within a pane
   const handleSelectTabInPane = (paneId: number, taskId: string) => {
@@ -1896,6 +1923,17 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 
   // Close a single tab in a pane
   const handleCloseTabInPane = (paneId: number, taskId: string) => {
+    const remainingVisibleTabs = panes.reduce((acc, p) => {
+      if (!visiblePaneIds.includes(p.id)) return acc;
+      const nextIds = p.id === paneId ? p.openTaskIds.filter(id => id !== taskId) : p.openTaskIds;
+      return acc + nextIds.length;
+    }, 0);
+
+    if (remainingVisibleTabs === 0) {
+      handleCloseAllTabs();
+      return;
+    }
+
     const targetPane = panes.find(p => p.id === paneId);
     let nextActiveForParent: string | null | undefined = undefined;
     if (targetPane && targetPane.activeTaskId === taskId) {
@@ -1933,6 +1971,16 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 
   // Close all tabs in a pane
   const handleCloseAllTabsInPane = (paneId: number) => {
+    const remainingVisibleTabs = panes.reduce((acc, p) => {
+      if (!visiblePaneIds.includes(p.id) || p.id === paneId) return acc;
+      return acc + p.openTaskIds.length;
+    }, 0);
+
+    if (remainingVisibleTabs === 0) {
+      handleCloseAllTabs();
+      return;
+    }
+
     setPanes(prev => {
       return prev.map(p => {
         if (p.id !== paneId) return p;
@@ -1944,31 +1992,6 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
         };
       });
     });
-  };
-
-  // Close all tabs across all panes and close Task Detail
-  const handleCloseAllTabs = () => {
-    const emptyPanes: EditorPaneState[] = [
-      { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-      { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-      { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-      { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
-    ];
-    setPanes(emptyPanes);
-    try {
-      localStorage.setItem(openTabsStorageKey, '[]');
-      localStorage.removeItem(activeTabStorageKey);
-      localStorage.setItem(panesStorageKey, JSON.stringify(emptyPanes));
-    } catch (e) {
-      console.error(e);
-    }
-    if (onOpenTaskIdsChange) {
-      onOpenTaskIdsChange([]);
-    }
-    if (onCloseAllTabs) {
-      onCloseAllTabs();
-    }
-    onClose();
   };
 
   // Move tab between panes (or reorder within same pane)
@@ -2205,20 +2228,6 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
       setActivePaneId(0);
     }
   };
-
-  // Determine which panes are active in current layout
-  const visiblePaneIds = useMemo(() => {
-    switch (layout) {
-      case 'single':
-        return [0];
-      case 'split-right':
-        return [0, 1];
-      case 'split-down':
-        return [0, 2];
-      case 'grid-2x2':
-        return [0, 1, 2, 3];
-    }
-  }, [layout]);
 
   // Overall left resize handle
   const rootPaneRef = useRef<HTMLDivElement>(null);

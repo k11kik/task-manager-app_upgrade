@@ -359,7 +359,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.15";
+  const APP_VERSION = "3.1.16";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -637,7 +637,10 @@ export default function App() {
   const handleCloseTaskTab = (taskId: string) => {
     setOpenTaskIds(prev => {
       const next = prev.filter(id => id !== taskId);
-      if (activeTabTaskId === taskId) {
+      if (next.length === 0) {
+        setActiveTabTaskId(null);
+        setIsDetailPaneVisible(false);
+      } else if (activeTabTaskId === taskId) {
         const idx = prev.indexOf(taskId);
         const nextActive = next[idx] || next[idx - 1] || null;
         setActiveTabTaskId(nextActive);
@@ -6565,7 +6568,7 @@ export default function App() {
               )}
 
               {/* Collapsed Detail Pane Bar when minimized with open tabs */}
-              {!isDetailPaneVisible && !isEffectiveTimelineFullscreen && (activeTabTaskId || openTaskIds.length > 0) && (
+              {!isDetailPaneVisible && !isEffectiveTimelineFullscreen && openTaskIds.length > 0 && (
                 <div className="hidden lg:flex h-full shrink-0 flex-col items-center py-2 px-1 bg-slate-50/90 border-l border-slate-200 select-none w-10 transition-all z-10">
                   <button
                     type="button"
