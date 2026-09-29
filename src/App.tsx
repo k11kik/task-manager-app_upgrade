@@ -359,7 +359,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.17";
+  const APP_VERSION = "3.1.18";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -6600,18 +6600,67 @@ export default function App() {
         "bg-white border-t border-slate-200 px-6 py-2 items-center justify-between shrink-0",
         isEffectiveTimelineFullscreen ? "hidden" : "hidden lg:flex"
       )}>
-        <div className="flex gap-6 overflow-x-auto no-scrollbar text-[10px]">
-          <span className="font-bold text-slate-400 uppercase tracking-widest hidden sm:inline">Operational Status:</span>
+        <div className="flex items-center gap-5 overflow-x-auto no-scrollbar text-[10px]">
+          {/* Account Status */}
           <div className="flex items-center gap-2 whitespace-nowrap">
-            <div className="w-1.5 h-1.5 rounded-full bg-indigo-500"></div>
-            <span className="text-slate-600 font-medium font-mono lowercase tracking-tighter">[{viewMode}] REVIEW MODE</span>
+            <div className={cn(
+              "w-1.5 h-1.5 rounded-full shrink-0",
+              !user ? "bg-slate-400" : user.isAnonymous ? "bg-amber-500" : "bg-emerald-500"
+            )} />
+            <span className="text-slate-600 font-semibold tracking-tight">
+              {!user
+                ? L('未サインイン', 'Not Signed In', 'Non connecté')
+                : user.isAnonymous
+                  ? L('ゲストアカウント (一時クラウド保存)', 'Guest Account (Temporary Cloud)', 'Compte invité (Cloud temporaire)')
+                  : L(
+                      `アカウント連携中: ${user.email || user.displayName}`,
+                      `Account Linked: ${user.email || user.displayName}`,
+                      `Compte lié : ${user.email || user.displayName}`
+                    )}
+            </span>
           </div>
-          <div className="flex items-center gap-2 whitespace-nowrap">
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-            <span className="text-slate-600 font-medium font-mono lowercase tracking-tighter">SWEEP LOG ACTIVE</span>
-          </div>
+
+          {user && (
+            <>
+              <div className="h-3 w-px bg-slate-200 shrink-0" />
+
+              {/* Local Log Status */}
+              <button
+                type="button"
+                onClick={jumpToLocalLogSettings}
+                className="flex items-center gap-2 whitespace-nowrap hover:text-indigo-600 transition-colors cursor-pointer"
+                title={L('クリックしてローカルログ設定を確認', 'Click to open Local Log Settings', 'Cliquez pour ouvrir les paramètres du journal local')}
+              >
+                <div className={cn(
+                  "w-1.5 h-1.5 rounded-full shrink-0",
+                  isLocalDiskReady ? "bg-emerald-500" : "bg-amber-500"
+                )} />
+                <span className="text-slate-600 hover:text-indigo-600 font-semibold tracking-tight">
+                  {!isLocalLogConfigured
+                    ? L('ローカルログ: 未設定', 'Local Log: Not Configured', 'Journal local : Non configuré')
+                    : !isLocalDiskReady
+                      ? L('ローカルログ: フォルダ接続/許可が必要', 'Local Log: Folder Authorization Needed', 'Journal local : Autorisation requise')
+                      : L(
+                          `ローカルログ有効${(dirHandle?.name || settings.localBackupPath) ? ` (${dirHandle?.name || settings.localBackupPath})` : ''}`,
+                          `Local Log Active${(dirHandle?.name || settings.localBackupPath) ? ` (${dirHandle?.name || settings.localBackupPath})` : ''}`,
+                          `Journal local actif${(dirHandle?.name || settings.localBackupPath) ? ` (${dirHandle?.name || settings.localBackupPath})` : ''}`
+                        )}
+                </span>
+              </button>
+
+              <div className="h-3 w-px bg-slate-200 shrink-0" />
+
+              {/* Active Workspace Info */}
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 shrink-0" />
+                <span className="text-slate-600 font-semibold tracking-tight">
+                  {L(`ワークスペース: ${activeSection}`, `Workspace: ${activeSection}`, `Espace : ${activeSection}`)}
+                </span>
+              </div>
+            </>
+          )}
         </div>
-        <div className="text-[10px] font-mono text-slate-400 font-extrabold ml-4 uppercase">
+        <div className="text-[10px] font-mono text-slate-400 font-extrabold ml-4 uppercase shrink-0">
           {`Navigation Focus Objectives & Results V${APP_VERSION}`}
         </div>
       </footer>
