@@ -272,7 +272,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(new Set());
   const [showLanesInFullscreen, setShowLanesInFullscreen] = useState(true);
   const hideSideColumns = Boolean(isFullscreen && !showLanesInFullscreen);
-  const effectiveShowUnscheduled = showUnscheduledColumn && !isFullscreen;
+  const effectiveShowUnscheduled = showUnscheduledColumn;
 
   // Fine Grid Step in hours (1h, 2h, 4h, 6h, 12h, 24h)
   const [gridStepHours, setGridStepHours] = useState<number>(() => {
@@ -2375,7 +2375,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           {effectiveShowUnscheduled && (
             <div 
               style={{ width: `${todoColWidth}px` }}
-              className="shrink-0 px-2.5 py-2 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between relative z-10 group/todocol"
+              className={cn(
+                "shrink-0 px-2.5 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between relative z-10 group/todocol",
+                isFullscreen ? "py-1" : "py-2"
+              )}
             >
               <span className="flex items-center gap-1.5 font-bold truncate">
                 <ListTodo size={13} className="text-amber-600 shrink-0" />
@@ -3320,6 +3323,21 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             >
               <Folder size={11} />
               <span>{L('レーン', 'Lanes', 'Couloirs')}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowUnscheduledColumn(prev => !prev)}
+              className={cn(
+                "px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer",
+                showUnscheduledColumn
+                  ? "bg-amber-600 text-white"
+                  : "text-slate-300 hover:text-white hover:bg-white/15"
+              )}
+              title={L('ToDoリスト列を表示/非表示', 'Toggle ToDo List column', 'Afficher/masquer la colonne Liste de tâches')}
+            >
+              <ListTodo size={11} />
+              <span>ToDo</span>
             </button>
 
             <button
