@@ -2292,7 +2292,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         onClick={() => {
           (window as any).__navforActivePane = 'timeline';
         }}
-        className="flex-1 overflow-auto custom-scrollbar relative flex flex-col outline-none focus:ring-1 focus:ring-indigo-500/20"
+        className="flex-1 min-h-0 overflow-auto custom-scrollbar relative flex flex-col outline-none focus:ring-1 focus:ring-indigo-500/20"
       >
         {/* Table/Grid Header - Permanently sticky top & max-width bounds */}
         <div className="flex border-b border-slate-200 bg-slate-100 sticky top-0 z-30 shrink-0 select-none min-w-max w-max">
@@ -2606,7 +2606,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         </div>
 
         {/* Project Rows */}
-        <div className="flex-1 flex flex-col divide-y divide-slate-100 min-w-max">
+        <div className="flex-1 shrink-0 flex flex-col divide-y divide-slate-100 min-w-max pb-28 lg:pb-16">
           {visibleProjectTree.map(project => {
             const isCollapsed = collapsedProjectPaths.has(project.fullPath);
             const isCompactLaneCol = effectiveProjectColWidth < 120;

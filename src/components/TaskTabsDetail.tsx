@@ -54,6 +54,7 @@ export interface TaskTabsDetailProps {
   onClose: () => void;
   onMinimize?: () => void;
   onCloseAllTabs?: () => void;
+  isHidden?: boolean;
   onOpenTaskIdsChange?: (openTaskIds: string[]) => void;
   onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   onMoveTask: (taskId: string, category: Category) => void;
@@ -1558,6 +1559,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   onClose,
   onMinimize,
   onCloseAllTabs,
+  isHidden = false,
   onOpenTaskIdsChange,
   onUpdateTask,
   onMoveTask,
@@ -2326,7 +2328,10 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   return (
     <div 
       ref={rootPaneRef}
-      className="fixed inset-0 z-[150] max-lg:w-full! h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 lg:max-w-[calc(100%-220px)] flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-2xl lg:shadow-md select-text"
+      className={cn(
+        "fixed inset-0 z-[150] max-lg:w-full! h-full lg:relative lg:inset-auto lg:z-20 lg:h-full lg:min-h-0 lg:max-w-[calc(100%-220px)] flex shrink-0 bg-white lg:border-l lg:border-slate-200/90 shadow-2xl lg:shadow-md select-text",
+        isHidden && "hidden!"
+      )}
       style={{ width: `${width}px` }}
     >
       {/* Left resize handle for the entire Task Detail area */}
@@ -2407,7 +2412,16 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
             {/* 1. Minimize / Hide Detail Pane (keeps tabs intact) */}
             <button
               type="button"
-              onClick={onMinimize || onClose}
+              onClick={() => {
+                const pinnedPanes = panes.map(p => ({ ...p, previewTaskId: null }));
+                setPanes(pinnedPanes);
+                try {
+                  localStorage.setItem(panesStorageKey, JSON.stringify(pinnedPanes));
+                } catch (e) {
+                  console.error(e);
+                }
+                (onMinimize || onClose)();
+              }}
               className="p-1 hover:bg-slate-100 text-slate-400 hover:text-slate-700 rounded transition-colors"
               title={L('詳細ペインを最小化 (タブを保持)', 'Minimize detail pane (keep tabs)', 'Réduire le panneau (conserver les onglets)')}
               aria-label={L('詳細ペインを最小化', 'Minimize detail pane', 'Réduire le panneau')}

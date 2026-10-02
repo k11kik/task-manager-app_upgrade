@@ -359,7 +359,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.18";
+  const APP_VERSION = "3.1.19";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -4908,7 +4908,7 @@ export default function App() {
 
   if (authLoading || !isIdbLoaded || (user && !isSettingsLoaded)) {
     return (
-      <div className="h-screen w-full bg-[#f8fafc] text-slate-800 flex flex-col items-center justify-center font-sans">
+      <div className="h-dvh w-full bg-[#f8fafc] text-slate-800 flex flex-col items-center justify-center font-sans">
         <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4" />
         <p className="text-xs font-bold uppercase tracking-widest text-slate-500">
           {L('NavFOR 認証状態を確認中...', 'Checking NavFOR authentication...', "Vérification de l'authentification NavFOR...")}
@@ -4918,7 +4918,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-full bg-[#f8fafc] text-slate-800 flex flex-col font-sans overflow-hidden">
+    <div className="h-dvh w-full bg-[#f8fafc] text-slate-800 flex flex-col font-sans overflow-hidden">
       {/* Toast Messages */}
       <AnimatePresence>
         {message && (
@@ -5647,8 +5647,8 @@ export default function App() {
           isEffectiveTimelineFullscreen
             ? "p-0 flex flex-col lg:flex-row gap-0"
             : (viewMode === 'dashboard' || viewMode === 'archive' || viewMode === 'trash')
-              ? "p-2 md:p-3 flex flex-col lg:flex-row gap-3"
-              : "p-4 md:p-6 grid grid-cols-12 gap-6"
+              ? "p-2 pb-18 md:p-3 md:pb-19 lg:pb-3 flex flex-col lg:flex-row gap-3"
+              : "p-4 pb-20 md:p-6 md:pb-22 lg:pb-6 grid grid-cols-12 gap-6"
         )}>
         {/* Mobile Navigation (Bottom) */}
         <div className={cn(
@@ -5784,7 +5784,7 @@ export default function App() {
                 animate={{ x: 0, opacity: 1 }}
                 exit={{ x: -10, opacity: 0 }}
                 transition={{ duration: 0.2 }}
-                className="h-full min-w-0 flex-1 flex flex-col overflow-hidden"
+                className="h-full min-h-0 min-w-0 flex-1 flex flex-col overflow-hidden"
               >
                 {viewMode === 'dashboard' ? (
                   /* Project Timeline View */
@@ -6527,7 +6527,7 @@ export default function App() {
           {(viewMode === 'dashboard' || viewMode === 'archive' || viewMode === 'trash') &&
             !(viewMode === 'dashboard' && mobileView === 'summary' && typeof window !== 'undefined' && window.innerWidth < 1024) && (
             <>
-              {isDetailPaneVisible && (activeTabTaskId || openTaskIds.length > 0) && (
+              {(activeTabTaskId || openTaskIds.length > 0) && (
                 <TaskTabsDetail
                   key={activeSection}
                   tasks={sectionTasks}
@@ -6543,6 +6543,7 @@ export default function App() {
                   onClose={handleMinimizeDetailPane}
                   onMinimize={handleMinimizeDetailPane}
                   onCloseAllTabs={handleCloseAllTabs}
+                  isHidden={!isDetailPaneVisible}
                   onOpenTaskIdsChange={setOpenTaskIds}
                   onUpdateTask={updateTask}
                   onMoveTask={moveTask}
@@ -6567,7 +6568,7 @@ export default function App() {
                 />
               )}
 
-              {/* Collapsed Detail Pane Bar when minimized with open tabs */}
+              {/* Collapsed Detail Pane Bar when minimized with open tabs (PC) */}
               {!isDetailPaneVisible && !isEffectiveTimelineFullscreen && openTaskIds.length > 0 && (
                 <div className="hidden lg:flex h-full shrink-0 flex-col items-center py-2 px-1 bg-slate-50/90 border-l border-slate-200 select-none w-10 transition-all z-10">
                   <button
@@ -6587,6 +6588,54 @@ export default function App() {
                       {L('タスク詳細', 'TASK DETAIL', 'DÉTAILS')} ({openTaskIds.length})
                     </span>
                   </div>
+                </div>
+              )}
+
+              {/* Minimized Detail Pill on Mobile (keeps tabs & allows 1-tap restore or close) */}
+              {!isDetailPaneVisible && openTaskIds.length > 0 && (
+                <div
+                  className={cn(
+                    "lg:hidden fixed left-2.5 flex items-center bg-slate-900/90 backdrop-blur-md text-white rounded-xl shadow-xl border border-white/15 select-none overflow-hidden max-w-[calc(100vw-9.5rem)]",
+                    isEffectiveTimelineFullscreen ? "bottom-13 sm:bottom-2.5 z-[95]" : "bottom-18 z-[65]"
+                  )}
+                >
+                  <button
+                    type="button"
+                    onClick={handleExpandDetailPane}
+                    className="flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 hover:bg-white/10 active:bg-white/15 transition-colors text-[11px] font-bold min-w-0 cursor-pointer"
+                    title={L('最小化したタスク詳細を再表示', 'Restore minimized Task Detail', 'Restaurer les détails réduits')}
+                  >
+                    <FileText size={13} className="text-indigo-400 shrink-0" />
+                    <span className="shrink-0">{L('詳細', 'Details', 'Détails')}</span>
+                    <span className="px-1.5 py-0.2 rounded-full bg-indigo-600 text-white text-[10px] font-mono font-bold shrink-0">
+                      {openTaskIds.length}
+                    </span>
+                    <span className="text-[10px] text-slate-300 font-normal truncate max-w-[110px] sm:max-w-[160px]">
+                      {(() => {
+                        const targetId = activeTabTaskId || openTaskIds[0];
+                        if (!targetId) return '';
+                        if (targetId.startsWith('folder:')) {
+                          const fPath = targetId.slice(7);
+                          const parts = fPath.split('/');
+                          return parts[parts.length - 1] || fPath;
+                        }
+                        const found = sectionTasks.find(t => t.id === targetId);
+                        return found?.title || '';
+                      })()}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCloseAllTabs();
+                    }}
+                    className="px-2 py-1.5 text-slate-400 hover:text-red-400 hover:bg-white/10 border-l border-white/15 transition-colors shrink-0 cursor-pointer"
+                    title={L('すべてのタブを完全に閉じる', 'Close all tabs completely', 'Fermer complètement tous les onglets')}
+                    aria-label={L('すべてのタブを完全に閉じる', 'Close all tabs completely', 'Fermer complètement tous les onglets')}
+                  >
+                    <X size={13} />
+                  </button>
                 </div>
               )}
             </>
