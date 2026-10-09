@@ -36,7 +36,9 @@ import {
   Copy,
   FilePlus,
   Maximize2,
-  Minimize2
+  Minimize2,
+  Workflow,
+  Menu
 } from 'lucide-react';
 import { Task, Category, FolderMeta } from '../types';
 import { cn, tr } from '../lib/utils';
@@ -47,6 +49,16 @@ export interface CustomTimelineColumn {
   id: string;
   label: string;
 }
+
+export interface PhasePattern {
+  id: string;
+  name: string;
+  columns: CustomTimelineColumn[];
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export const DEFAULT_PATTERN_ID = 'default';
 
 export type TimelineNavItem = 
   | { type: 'folder'; path: string; name: string; level: number; projectIndex: number; colIndex: number; slotKey: string }
@@ -60,20 +72,45 @@ const DEFAULT_CUSTOM_COLUMNS: CustomTimelineColumn[] = [
   { id: 'phase-5', label: 'Phase 5' }
 ];
 
-export const getTaskCurrentColumnId = (task: Task, cols: CustomTimelineColumn[]): string | undefined => {
-  // 1. Check direct timelineColumn if it matches a column in current custom columns
-  if (task.timelineColumn && cols.some(c => c.id === task.timelineColumn)) {
+export const getTaskCurrentColumnId = (
+  task: Task, 
+  cols: CustomTimelineColumn[],
+  patternId?: string
+): string | undefined => {
+  // 1. Check pattern-specific column mapping first if patternId is given
+  if (patternId && task.timelinePresetColumns && task.timelinePresetColumns[patternId]) {
+    const colId = task.timelinePresetColumns[patternId];
+    if (cols.some(c => c.id === colId)) {
+      return colId;
+    }
+    return undefined;
+  }
+  // 2. Backward compatibility: if patternId is 'default' or not provided, check direct timelineColumn
+  if ((!patternId || patternId === DEFAULT_PATTERN_ID) && task.timelineColumn && cols.some(c => c.id === task.timelineColumn)) {
     return task.timelineColumn;
   }
-  // 2. Check legacy timelinePresetColumns for backward compatibility
-  if (task.timelinePresetColumns) {
-    for (const colId of Object.values(task.timelinePresetColumns)) {
+  // 3. Fallback check for legacy timelinePresetColumns only if patternId is not specified
+  if (!patternId && task.timelinePresetColumns) {
+    for (const [, colId] of Object.entries(task.timelinePresetColumns)) {
       if (colId && cols.some(c => c.id === colId)) {
         return colId;
       }
     }
   }
   return undefined;
+};
+
+export const getTaskCurrentStep = (
+  task: Task,
+  patternId?: string
+): number => {
+  if (patternId && task.timelinePresetSteps && task.timelinePresetSteps[patternId] !== undefined) {
+    return task.timelinePresetSteps[patternId];
+  }
+  if (!patternId || patternId === DEFAULT_PATTERN_ID) {
+    return task.timelineStep ?? 0;
+  }
+  return 0;
 };
 
 // Helper for approaching or overdue deadline alerts
@@ -125,7 +162,7 @@ interface ProjectTimelineViewProps {
   onScheduleTask?: (taskId: string, deadline?: number) => void;
   onMoveTaskFolder?: (taskId: string, newProject: string) => void;
   onMoveFolder?: (sourceFolderPath: string, targetFolderPath: string) => void;
-  onRenameFolder?: (oldFolderPath: string, newFolderPath: string) => void;
+  onRenameFolder?: (oldFolderPath: string, newFolderPath: string, newTitle?: string) => void;
   onDeleteFolder?: (folderPath: string) => void;
   onDuplicateFolder?: (folderPath: string) => void;
   onRenameTask?: (taskId: string, newTitle: string) => void;
@@ -207,58 +244,326 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  // Custom Columns State (Phases)
-  const [customColumns, setCustomColumns] = useState<CustomTimelineColumn[]>(() => {
+  // Phase Patterns State (Multiple named variations with distinct columns & task assignments)
+  const [phasePatterns, setPhasePatterns] = useState<PhasePattern[]>(() => {
     try {
-      const saved = localStorage.getItem(`navfor_custom_timeline_cols_${activeSection}`);
+      const saved = localStorage.getItem(`navfor_phase_patterns_${activeSection}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          // If previous default was Day 1-7, migrate to new default Phase 1-5
+          return parsed;
+        }
+      }
+      // Check legacy single-pattern custom columns if existing
+      const legacyColsSaved = localStorage.getItem(`navfor_custom_timeline_cols_${activeSection}`);
+      let legacyCols: CustomTimelineColumn[] | undefined;
+      if (legacyColsSaved) {
+        const parsed = JSON.parse(legacyColsSaved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
           const isOldDayDefault = parsed.length === 7 && parsed[0]?.id === 'day-1' && parsed[6]?.id === 'day-7';
           if (!isOldDayDefault) {
-            return parsed;
+            legacyCols = parsed;
           }
         }
       }
+      return [
+        {
+          id: DEFAULT_PATTERN_ID,
+          name: language === 'ja' ? 'デフォルト' : language === 'fr' ? 'Par défaut' : 'Default',
+          columns: legacyCols || DEFAULT_CUSTOM_COLUMNS,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
     } catch (e) {
       console.error(e);
+      return [
+        {
+          id: DEFAULT_PATTERN_ID,
+          name: language === 'ja' ? 'デフォルト' : language === 'fr' ? 'Par défaut' : 'Default',
+          columns: DEFAULT_CUSTOM_COLUMNS,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
     }
-    return DEFAULT_CUSTOM_COLUMNS;
   });
 
-  // Re-sync customColumns when activeSection changes
-  useEffect(() => {
+  const [activePatternId, setActivePatternId] = useState<string>(() => {
     try {
-      const saved = localStorage.getItem(`navfor_custom_timeline_cols_${activeSection}`);
+      const saved = localStorage.getItem(`navfor_active_phase_pattern_${activeSection}`);
+      if (saved) return saved;
+    } catch (e) {}
+    return DEFAULT_PATTERN_ID;
+  });
+
+  // Re-sync patterns and active pattern when activeSection changes or external update occurs
+  const syncPatterns = useCallback(() => {
+    try {
+      const saved = localStorage.getItem(`navfor_phase_patterns_${activeSection}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const isOldDayDefault = parsed.length === 7 && parsed[0]?.id === 'day-1' && parsed[6]?.id === 'day-7';
-          if (!isOldDayDefault) {
-            setCustomColumns(parsed);
-            return;
-          }
+          setPhasePatterns(parsed);
         }
+      }
+      const savedActive = localStorage.getItem(`navfor_active_phase_pattern_${activeSection}`);
+      if (savedActive) {
+        setActivePatternId(savedActive);
       }
     } catch (e) {
       console.error(e);
     }
-    setCustomColumns(DEFAULT_CUSTOM_COLUMNS);
   }, [activeSection]);
 
-  const saveCustomColumns = (cols: CustomTimelineColumn[]) => {
-    setCustomColumns(cols);
+  useEffect(() => {
+    syncPatterns();
+    window.addEventListener('navfor_phase_patterns_updated', syncPatterns);
+    return () => window.removeEventListener('navfor_phase_patterns_updated', syncPatterns);
+  }, [syncPatterns]);
+
+  // Active pattern resolution
+  const activePattern = useMemo<PhasePattern>(() => {
+    return phasePatterns.find(p => p.id === activePatternId) || phasePatterns[0] || {
+      id: DEFAULT_PATTERN_ID,
+      name: language === 'ja' ? 'デフォルト' : 'Default',
+      columns: DEFAULT_CUSTOM_COLUMNS
+    };
+  }, [phasePatterns, activePatternId, language]);
+
+  const customColumns = activePattern.columns;
+
+  const savePhasePatterns = (patterns: PhasePattern[], newActivePatternId?: string) => {
+    const targetActiveId = newActivePatternId || activePatternId;
+    setPhasePatterns(patterns);
+    if (newActivePatternId) {
+      setActivePatternId(newActivePatternId);
+    }
     try {
-      localStorage.setItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(cols));
+      localStorage.setItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(patterns));
+      localStorage.setItem(`navfor_active_phase_pattern_${activeSection}`, targetActiveId);
+      const current = patterns.find(p => p.id === targetActiveId) || patterns[0];
+      if (current) {
+        localStorage.setItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns));
+      }
+      window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
     } catch (e) {
       console.error(e);
     }
   };
 
-  // Reset custom columns/phases to default Phase 1 - 5
-  const handleResetCustomColumns = () => {
-    saveCustomColumns(DEFAULT_CUSTOM_COLUMNS);
+  const handleSelectPattern = (patternId: string) => {
+    setActivePatternId(patternId);
+    try {
+      localStorage.setItem(`navfor_active_phase_pattern_${activeSection}`, patternId);
+      const current = phasePatterns.find(p => p.id === patternId);
+      if (current) {
+        localStorage.setItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns));
+      }
+      window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const saveCustomColumns = (cols: CustomTimelineColumn[]) => {
+    const hasPattern = phasePatterns.some(p => p.id === activePattern.id);
+    let updated: PhasePattern[];
+    if (hasPattern) {
+      updated = phasePatterns.map(p => 
+        p.id === activePattern.id ? { ...p, columns: cols, updatedAt: Date.now() } : p
+      );
+    } else {
+      updated = [...phasePatterns, { ...activePattern, columns: cols, updatedAt: Date.now() }];
+    }
+    savePhasePatterns(updated);
+  };
+
+  // Reset custom columns/phases to default Phase 1, Phase 2, Phase 3...
+  const handleResetCustomColumns = (mode: 'names_only' | 'default_5' = 'names_only') => {
+    setEditingColumnId(null);
+    setEditingColumnLabel('');
+
+    if (mode === 'default_5') {
+      saveCustomColumns(DEFAULT_CUSTOM_COLUMNS);
+      return;
+    }
+
+    // Default: Reset Phase column names to Phase 1, Phase 2, Phase 3... preserving existing columns & placed tasks
+    if (!customColumns || customColumns.length === 0) {
+      saveCustomColumns(DEFAULT_CUSTOM_COLUMNS);
+    } else {
+      const updated = customColumns.map((col, idx) => ({
+        ...col,
+        label: `Phase ${idx + 1}`
+      }));
+      saveCustomColumns(updated);
+    }
+  };
+
+  // Pattern management dropdown & modal state
+  const [isPatternMenuOpen, setIsPatternMenuOpen] = useState(false);
+  const patternMenuRef = useRef<HTMLDivElement>(null);
+  const [isCreatePatternModalOpen, setIsCreatePatternModalOpen] = useState(false);
+  const [newPatternName, setNewPatternName] = useState('');
+  const [newPatternCopyCols, setNewPatternCopyCols] = useState(true);
+  const [newPatternCopyTasks, setNewPatternCopyTasks] = useState(false);
+  const [editingPatternId, setEditingPatternId] = useState<string | null>(null);
+  const [editingPatternName, setEditingPatternName] = useState('');
+  const [isRenamingActiveInToolbar, setIsRenamingActiveInToolbar] = useState(false);
+  const [toolbarPatternName, setToolbarPatternName] = useState('');
+
+  // Close pattern dropdown on outside click or escape
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (patternMenuRef.current && !patternMenuRef.current.contains(e.target as Node)) {
+        setIsPatternMenuOpen(false);
+        setEditingPatternId(null);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsPatternMenuOpen(false);
+        setEditingPatternId(null);
+      }
+    };
+    if (isPatternMenuOpen) {
+      document.addEventListener('mousedown', handleOutside);
+      document.addEventListener('keydown', handleKey);
+      return () => {
+        document.removeEventListener('mousedown', handleOutside);
+        document.removeEventListener('keydown', handleKey);
+      };
+    }
+  }, [isPatternMenuOpen]);
+
+  // Quick Menu (3-line hamburger menu for quick access to all functions)
+  const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false);
+  const [quickMenuOrigin, setQuickMenuOrigin] = useState<'toolbar' | 'floating'>('toolbar');
+  const quickMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (quickMenuRef.current && !quickMenuRef.current.contains(e.target as Node)) {
+        setIsQuickMenuOpen(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsQuickMenuOpen(false);
+      }
+    };
+    if (isQuickMenuOpen) {
+      document.addEventListener('mousedown', handleOutside);
+      document.addEventListener('keydown', handleKey);
+      return () => {
+        document.removeEventListener('mousedown', handleOutside);
+        document.removeEventListener('keydown', handleKey);
+      };
+    }
+  }, [isQuickMenuOpen]);
+
+  const handleCreatePattern = async (name: string, copyCols = true, copyTasks = false) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const newId = `pattern-${Date.now()}`;
+    const newCols: CustomTimelineColumn[] = copyCols
+      ? activePattern.columns.map(c => ({ ...c }))
+      : DEFAULT_CUSTOM_COLUMNS.map(c => ({ ...c }));
+    const newPattern: PhasePattern = {
+      id: newId,
+      name: trimmed,
+      columns: newCols,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    const nextPatterns = [...phasePatterns, newPattern];
+    savePhasePatterns(nextPatterns, newId);
+
+    // If copying task placements from current pattern
+    if (copyTasks && onUpdateTask) {
+      const scheduledTasks = activeTasks.filter(t => Boolean(getTaskCurrentColumnId(t, activePattern.columns, activePattern.id)));
+      for (const t of scheduledTasks) {
+        const colId = getTaskCurrentColumnId(t, activePattern.columns, activePattern.id);
+        const stepIdx = getTaskCurrentStep(t, activePattern.id);
+        if (colId) {
+          const nextPresetCols = { ...(t.timelinePresetColumns || {}) };
+          const nextPresetSteps = { ...(t.timelinePresetSteps || {}) };
+          nextPresetCols[newId] = colId;
+          nextPresetSteps[newId] = stepIdx;
+          onUpdateTask(t.id, {
+            timelinePresetColumns: nextPresetCols,
+            timelinePresetSteps: nextPresetSteps
+          });
+        }
+      }
+    }
+
+    setIsCreatePatternModalOpen(false);
+    setNewPatternName('');
+    setIsPatternMenuOpen(false);
+  };
+
+  const handleRenamePattern = (patternId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      setEditingPatternId(null);
+      return;
+    }
+    const updated = phasePatterns.map(p => 
+      p.id === patternId ? { ...p, name: trimmed, updatedAt: Date.now() } : p
+    );
+    savePhasePatterns(updated);
+    setEditingPatternId(null);
+    setEditingPatternName('');
+  };
+
+  const handleDuplicatePattern = async (patternId: string) => {
+    const target = phasePatterns.find(p => p.id === patternId) || activePattern;
+    const newId = `pattern-${Date.now()}`;
+    const newPattern: PhasePattern = {
+      id: newId,
+      name: `${target.name} ${L('(コピー)', '(Copy)', '(Copie)')}`,
+      columns: target.columns.map(c => ({ ...c })),
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    const nextPatterns = [...phasePatterns, newPattern];
+    savePhasePatterns(nextPatterns, newId);
+
+    // Automatically copy task placements for duplicated pattern
+    if (onUpdateTask) {
+      const scheduledTasks = activeTasks.filter(t => Boolean(getTaskCurrentColumnId(t, target.columns, target.id)));
+      for (const t of scheduledTasks) {
+        const colId = getTaskCurrentColumnId(t, target.columns, target.id);
+        const stepIdx = getTaskCurrentStep(t, target.id);
+        if (colId) {
+          const nextPresetCols = { ...(t.timelinePresetColumns || {}) };
+          const nextPresetSteps = { ...(t.timelinePresetSteps || {}) };
+          nextPresetCols[newId] = colId;
+          nextPresetSteps[newId] = stepIdx;
+          onUpdateTask(t.id, {
+            timelinePresetColumns: nextPresetCols,
+            timelinePresetSteps: nextPresetSteps
+          });
+        }
+      }
+    }
+
+    setIsPatternMenuOpen(false);
+  };
+
+  const handleDeletePattern = (patternId: string) => {
+    if (phasePatterns.length <= 1) {
+      return;
+    }
+    const target = phasePatterns.find(p => p.id === patternId);
+    if (!window.confirm(L(`フェーズパターン「${target?.name}」を削除しますか？\n（このパターンで割り当てられた列配置データも非表示になります）`, `Delete phase pattern "${target?.name}"?`, `Supprimer le modèle « ${target?.name} » ?`))) {
+      return;
+    }
+    const nextPatterns = phasePatterns.filter(p => p.id !== patternId);
+    const newActiveId = activePatternId === patternId ? nextPatterns[0].id : undefined;
+    savePhasePatterns(nextPatterns, newActiveId);
   };
 
   // Column renaming state
@@ -293,13 +598,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  // Grid ON / OFF toggle (works for both Dates and Custom/Stages modes)
+  // Grid ON / OFF toggle (works for both Dates and Custom/Stages modes) - Default is OFF
   const [isGridEnabled, setIsGridEnabled] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('navfor_timeline_grid_enabled');
-      return saved !== null ? saved === 'true' : true;
+      return saved !== null ? saved === 'true' : false;
     } catch {
-      return true;
+      return false;
     }
   });
 
@@ -425,6 +730,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
     const next = customFolders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
     saveCustomFolders(next);
+    if (selectedFolderPath === folderPath || selectedFolderPath?.startsWith(folderPath + '/')) {
+      setSelectedFolderPath(null);
+      setSelectedKey(null);
+    }
     setActiveMenu(null);
   };
 
@@ -454,7 +763,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           const parts = oldPath.split('/');
           parts[parts.length - 1] = val;
           const newPath = parts.join('/');
-          onRenameFolder(oldPath, newPath);
+          onRenameFolder(oldPath, newPath, val);
 
           // Also update customFolders
           const updatedCustom = customFolders.map(f => {
@@ -487,15 +796,21 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   // Sync selectedKey and selectedFolderPath when activeTaskId is selected from outside
   useEffect(() => {
     if (activeTaskId) {
-      setSelectedKey(`task:${activeTaskId}`);
-      setSelectedFolderPath(null);
-      const task = tasks.find(t => t.id === activeTaskId);
-      if (task?.project && collapsedProjectPaths.has(task.project)) {
-        setCollapsedProjectPaths(prev => {
-          const next = new Set(prev);
-          next.delete(task.project);
-          return next;
-        });
+      if (activeTaskId.startsWith('folder:')) {
+        const fp = activeTaskId.slice(7);
+        setSelectedKey(`folder:${fp}`);
+        setSelectedFolderPath(fp);
+      } else {
+        setSelectedKey(`task:${activeTaskId}`);
+        setSelectedFolderPath(null);
+        const task = tasks.find(t => t.id === activeTaskId);
+        if (task?.project && collapsedProjectPaths.has(task.project)) {
+          setCollapsedProjectPaths(prev => {
+            const next = new Set(prev);
+            next.delete(task.project);
+            return next;
+          });
+        }
       }
     }
   }, [activeTaskId, tasks]);
@@ -855,11 +1170,22 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       return current;
     };
 
-    // 1. Include custom empty folders (matching Explorer)
+    // Helper to check if a folder path or any of its ancestors is marked as Trash/Archive
+    const isTrashedOrArchived = (path: string): boolean => {
+      const parts = path.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+      let cur = '';
+      for (const part of parts) {
+        cur = cur ? `${cur}/${part}` : part;
+        const cat = folderMetas?.[cur]?.category;
+        if (cat === 'Trash' || cat === 'Archive') return true;
+      }
+      return false;
+    };
+
+    // 1. Include custom empty folders (matching Explorer, excluding trashed/archived)
     customFolders.forEach(folderPath => {
       if (!folderPath) return;
-      const meta = folderMetas?.[folderPath];
-      if (meta?.category === 'Trash' || meta?.category === 'Archive') return;
+      if (isTrashedOrArchived(folderPath)) return;
       const parts = folderPath.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       if (parts.length > 0) {
         getOrCreateFolder(parts);
@@ -869,9 +1195,22 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     // 1b. Include active folders from folderMetas for this workspace
     Object.values(folderMetas || {}).forEach((meta: FolderMeta) => {
       if (!meta || !meta.path) return;
-      if (meta.category === 'Trash' || meta.category === 'Archive') return;
       if (meta.section && meta.section !== activeSection) return;
+      if (meta.category === 'Trash' || meta.category === 'Archive') return;
+      if (isTrashedOrArchived(meta.path)) return;
       const parts = meta.path.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+      if (parts.length > 0) {
+        getOrCreateFolder(parts);
+      }
+    });
+
+    // 1c. Include folders from active/backlog tasks in this workspace
+    tasks.forEach(task => {
+      if (task.category === 'Trash' || task.category === 'Archive') return;
+      const proj = task.project?.trim();
+      if (!proj || proj === 'General') return;
+      if (isTrashedOrArchived(proj)) return;
+      const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       if (parts.length > 0) {
         getOrCreateFolder(parts);
       }
@@ -880,6 +1219,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     // 2. Include all active tasks (Urgent or Focus, matching Explorer)
     activeTasks.forEach(task => {
       const proj = task.project?.trim() || 'General';
+      if (isTrashedOrArchived(proj)) return;
       const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       const folder = getOrCreateFolder(parts.length > 0 ? parts : ['General']);
       folder.tasks.push(task);
@@ -889,14 +1229,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     const result: { fullPath: string; name: string; level: number; tasks: Task[] }[] = [];
 
     const traverse = (node: Node) => {
-      const sortedSubs = Array.from(node.subfolders.values()).sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
-      );
+      const sortedSubs = Array.from(node.subfolders.values()).sort((a, b) => {
+        const nameA = folderMetas?.[a.fullPath]?.title || a.name;
+        const nameB = folderMetas?.[b.fullPath]?.title || b.name;
+        return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
+      });
 
       sortedSubs.forEach(sub => {
         result.push({
           fullPath: sub.fullPath,
-          name: sub.name,
+          name: folderMetas?.[sub.fullPath]?.title || sub.name,
           level: sub.level,
           tasks: sub.tasks
         });
@@ -910,14 +1252,14 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     if (result.length === 0) {
       result.push({
         fullPath: 'General',
-        name: 'General',
+        name: folderMetas?.['General']?.title || 'General',
         level: 0,
         tasks: []
       });
     }
 
     return result;
-  }, [activeTasks, customFolders, folderMetas, activeSection]);
+  }, [activeTasks, tasks, customFolders, folderMetas, activeSection]);
 
   const toggleProjectCollapse = (path: string) => {
     setCollapsedProjectPaths(prev => {
@@ -996,8 +1338,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (aD !== bD) return aD - bD;
           return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
         } else {
-          const aCol = getTaskCurrentColumnId(a, customColumns);
-          const bCol = getTaskCurrentColumnId(b, customColumns);
+          const aCol = getTaskCurrentColumnId(a, customColumns, activePattern.id);
+          const bCol = getTaskCurrentColumnId(b, customColumns, activePattern.id);
           const aIdx = aCol ? customColumns.findIndex(c => c.id === aCol) : -1;
           const bIdx = bCol ? customColumns.findIndex(c => c.id === bCol) : -1;
           if (aIdx === -1 && bIdx === -1) {
@@ -1007,8 +1349,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (aIdx !== -1 && bIdx === -1) return -1;
           if (aIdx === -1 && bIdx !== -1) return 1;
           if (aIdx !== bIdx) return aIdx - bIdx;
-          const aStep = a.timelineStep ?? 0;
-          const bStep = b.timelineStep ?? 0;
+          const aStep = getTaskCurrentStep(a, activePattern.id);
+          const bStep = getTaskCurrentStep(b, activePattern.id);
           if (aStep !== bStep) return aStep - bStep;
           return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
         }
@@ -1020,7 +1362,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     });
 
     return map;
-  }, [projectTree, timelineMode, customColumns]);
+  }, [projectTree, timelineMode, customColumns, activePattern.id]);
 
   interface PlacedTask {
     task: Task;
@@ -1160,16 +1502,16 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   // Calculate layout of tasks for a project lane on the Custom Stages grid (Dates pattern without dates)
   const getPlacedCustomTasksForProject = (projectTasks: Task[]) => {
     // Tasks assigned to a custom column
-    const scheduled = projectTasks.filter(t => Boolean(getTaskCurrentColumnId(t, customColumns)));
+    const scheduled = projectTasks.filter(t => Boolean(getTaskCurrentColumnId(t, customColumns, activePattern.id)));
 
     // Sort by column index, then timelineStep, then order, then createdAt
     const colOrderMap = new Map<string, number>(customColumns.map((c, idx) => [c.id, idx]));
     scheduled.sort((a, b) => {
-      const colA = colOrderMap.get(getTaskCurrentColumnId(a, customColumns) || '') ?? 999;
-      const colB = colOrderMap.get(getTaskCurrentColumnId(b, customColumns) || '') ?? 999;
+      const colA = colOrderMap.get(getTaskCurrentColumnId(a, customColumns, activePattern.id) || '') ?? 999;
+      const colB = colOrderMap.get(getTaskCurrentColumnId(b, customColumns, activePattern.id) || '') ?? 999;
       if (colA !== colB) return colA - colB;
-      const stepA = a.timelineStep ?? 0;
-      const stepB = b.timelineStep ?? 0;
+      const stepA = getTaskCurrentStep(a, activePattern.id);
+      const stepB = getTaskCurrentStep(b, activePattern.id);
       if (stepA !== stepB) return stepA - stepB;
       return (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
     });
@@ -1187,11 +1529,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     });
 
     scheduled.forEach(task => {
-      const colId = getTaskCurrentColumnId(task, customColumns);
+      const colId = getTaskCurrentColumnId(task, customColumns, activePattern.id);
       const colIdx = customColumns.findIndex(c => c.id === colId);
       if (colIdx === -1) return;
 
-      const rawStep = task.timelineStep ?? 0;
+      const rawStep = getTaskCurrentStep(task, activePattern.id);
       const stepIdx = Math.max(0, Math.min(effectiveSubs - 1, rawStep));
 
       const thisColWidth = getCustomColWidth(colId!);
@@ -1252,10 +1594,17 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     const data = getDraggedTaskData(e);
     if (!data?.taskId) return;
 
+    const draggedTask = activeTasks.find(t => t.id === data.taskId);
+    const nextPresetCols = { ...(draggedTask?.timelinePresetColumns || {}) };
+    const nextPresetSteps = { ...(draggedTask?.timelinePresetSteps || {}) };
+    nextPresetCols[activePattern.id] = columnId;
+    nextPresetSteps[activePattern.id] = stepIdx;
+
     const updates: Partial<Task> = {
       project: projectPath,
-      timelineColumn: columnId,
-      timelineStep: stepIdx
+      ...(activePattern.id === DEFAULT_PATTERN_ID ? { timelineColumn: columnId, timelineStep: stepIdx } : {}),
+      timelinePresetColumns: nextPresetCols,
+      timelinePresetSteps: nextPresetSteps
     };
 
     if (onUpdateTask) {
@@ -1273,7 +1622,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
       // Unscheduled tasks (ToDo list) - Sorted: Active (A-Z), then Done (A-Z)
       const unscheduled = (showUnscheduledColumn 
-        ? projectTasks.filter(t => timelineMode === 'calendar' ? (!t.deadline && !t.startDate && (!t.recurrence || t.recurrence.type === 'none')) : !getTaskCurrentColumnId(t, customColumns))
+        ? projectTasks.filter(t => timelineMode === 'calendar' ? (!t.deadline && !t.startDate && (!t.recurrence || t.recurrence.type === 'none')) : !getTaskCurrentColumnId(t, customColumns, activePattern.id))
         : []
       ).sort((a, b) => {
         const aDone = Boolean(a.isDone);
@@ -1293,13 +1642,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           });
       } else {
         const colOrderMap = new Map<string, number>(customColumns.map((c, idx) => [c.id, idx]));
-        scheduled = projectTasks.filter(t => Boolean(getTaskCurrentColumnId(t, customColumns)))
+        scheduled = projectTasks.filter(t => Boolean(getTaskCurrentColumnId(t, customColumns, activePattern.id)))
           .sort((a, b) => {
-            const colA: number = colOrderMap.get(getTaskCurrentColumnId(a, customColumns) || '') ?? 999;
-            const colB: number = colOrderMap.get(getTaskCurrentColumnId(b, customColumns) || '') ?? 999;
+            const colA: number = colOrderMap.get(getTaskCurrentColumnId(a, customColumns, activePattern.id) || '') ?? 999;
+            const colB: number = colOrderMap.get(getTaskCurrentColumnId(b, customColumns, activePattern.id) || '') ?? 999;
             if (colA !== colB) return colA - colB;
-            const stepA = a.timelineStep ?? 0;
-            const stepB = b.timelineStep ?? 0;
+            const stepA = getTaskCurrentStep(a, activePattern.id);
+            const stepB = getTaskCurrentStep(b, activePattern.id);
             if (stepA !== stepB) return stepA - stepB;
             return (a.order ?? 0) - (b.order ?? 0) || (Number(a.createdAt) - Number(b.createdAt));
           });
@@ -1313,8 +1662,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (timelineMode === 'calendar' && t.deadline) {
             xApprox = (t.deadline - timelineStartMs) / slotDurationMs;
           } else {
-            const colIdx = customColumns.findIndex(c => c.id === getTaskCurrentColumnId(t, customColumns));
-            const stepIdx = t.timelineStep ?? 0;
+            const colIdx = customColumns.findIndex(c => c.id === getTaskCurrentColumnId(t, customColumns, activePattern.id));
+            const stepIdx = getTaskCurrentStep(t, activePattern.id);
             xApprox = colIdx >= 0 ? colIdx * 1000 + stepIdx * 100 + (t.order ?? 0) : 0;
           }
           return { task: t, xApprox };
@@ -1327,7 +1676,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         tasks: allTasksInLane
       };
     });
-  }, [visibleProjectTree, showUnscheduledColumn, timelineMode, customColumns, timelineStartMs, slotDurationMs]);
+  }, [visibleProjectTree, showUnscheduledColumn, timelineMode, customColumns, activePattern.id, timelineStartMs, slotDurationMs]);
 
   // 2D Spatial Arrow Key Navigation: moves up, down, left, right exactly as displayed on the timeline
   const navigateSpatialTask = (direction: 'up' | 'down' | 'left' | 'right') => {
@@ -1856,16 +2205,29 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           updates.timelineColumn = undefined;
         }
       } else {
+        const nextPresetCols = { ...(draggedTask?.timelinePresetColumns || {}) };
+        const nextPresetSteps = { ...(draggedTask?.timelinePresetSteps || {}) };
         if (slot.columnId) {
-          updates.timelineColumn = slot.columnId;
-          if (updates.timelineStep === undefined) {
-            updates.timelineStep = draggedTask?.timelineStep ?? 0;
+          const targetStep = draggedTask?.timelinePresetSteps?.[activePattern.id] ?? draggedTask?.timelineStep ?? 0;
+          nextPresetCols[activePattern.id] = slot.columnId;
+          nextPresetSteps[activePattern.id] = targetStep;
+          if (activePattern.id === DEFAULT_PATTERN_ID) {
+            updates.timelineColumn = slot.columnId;
+            updates.timelineStep = targetStep;
           }
+          updates.timelinePresetColumns = nextPresetCols;
+          updates.timelinePresetSteps = nextPresetSteps;
           // In custom columns: do NOT clear deadline, original deadline is preserved
         } else {
-          // In ToDo List (backlog): remove from column
-          updates.timelineColumn = undefined;
-          updates.timelineStep = undefined;
+          // In ToDo List (backlog): remove from column in current pattern
+          delete nextPresetCols[activePattern.id];
+          delete nextPresetSteps[activePattern.id];
+          updates.timelinePresetColumns = nextPresetCols;
+          updates.timelinePresetSteps = nextPresetSteps;
+          if (activePattern.id === DEFAULT_PATTERN_ID) {
+            updates.timelineColumn = undefined;
+            updates.timelineStep = undefined;
+          }
         }
       }
 
@@ -1877,7 +2239,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (!slot.date) return !t.deadline;
           return t.deadline && isSameDay(new Date(t.deadline), slot.date);
         } else {
-          const tCol = getTaskCurrentColumnId(t, customColumns);
+          const tCol = getTaskCurrentColumnId(t, customColumns, activePattern.id);
           if (!slot.columnId) return !tCol;
           return tCol === slot.columnId;
         }
@@ -1915,7 +2277,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       if (!data?.taskId || data.taskId === targetTask.id) return;
 
       const draggedTask = activeTasks.find(t => t.id === data.taskId);
-      const targetColId = timelineMode === 'custom' ? getTaskCurrentColumnId(targetTask, customColumns) : undefined;
+      const targetColId = timelineMode === 'custom' ? getTaskCurrentColumnId(targetTask, customColumns, activePattern.id) : undefined;
       const isTargetBacklog = timelineMode === 'calendar' ? !targetTask.deadline : !targetColId;
 
       const updates: Partial<Task> = {
@@ -1923,12 +2285,27 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       };
 
       if (timelineMode === 'custom') {
+        const nextPresetCols = { ...(draggedTask?.timelinePresetColumns || {}) };
+        const nextPresetSteps = { ...(draggedTask?.timelinePresetSteps || {}) };
         if (targetColId) {
-          updates.timelineColumn = targetColId;
-          updates.timelineStep = targetTask.timelineStep ?? 0;
+          const targetStep = targetTask.timelinePresetSteps?.[activePattern.id] ?? targetTask.timelineStep ?? 0;
+          nextPresetCols[activePattern.id] = targetColId;
+          nextPresetSteps[activePattern.id] = targetStep;
+          if (activePattern.id === DEFAULT_PATTERN_ID) {
+            updates.timelineColumn = targetColId;
+            updates.timelineStep = targetStep;
+          }
+          updates.timelinePresetColumns = nextPresetCols;
+          updates.timelinePresetSteps = nextPresetSteps;
         } else {
-          updates.timelineColumn = undefined;
-          updates.timelineStep = undefined;
+          delete nextPresetCols[activePattern.id];
+          delete nextPresetSteps[activePattern.id];
+          updates.timelinePresetColumns = nextPresetCols;
+          updates.timelinePresetSteps = nextPresetSteps;
+          if (activePattern.id === DEFAULT_PATTERN_ID) {
+            updates.timelineColumn = undefined;
+            updates.timelineStep = undefined;
+          }
         }
       } else {
         updates.timelineColumn = isTargetBacklog ? undefined : targetTask.timelineColumn;
@@ -1949,7 +2326,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (!targetTask.deadline) return !t.deadline;
           return t.deadline && isSameDay(new Date(t.deadline), new Date(targetTask.deadline));
         } else {
-          const tCol = getTaskCurrentColumnId(t, customColumns);
+          const tCol = getTaskCurrentColumnId(t, customColumns, activePattern.id);
           if (!targetColId) return !tCol;
           return tCol === targetColId;
         }
@@ -2003,12 +2380,21 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     setQuickAddTitle('');
 
     try {
+      const nextPresetCols: Record<string, string> = {};
+      const nextPresetSteps: Record<string, number> = {};
+      if (cell.type === 'custom' && cell.columnId) {
+        nextPresetCols[activePattern.id] = cell.columnId;
+        nextPresetSteps[activePattern.id] = cell.stepIdx ?? 0;
+      }
+
       await onAddTask({
         title,
         project: cell.project,
         deadline: cell.type === 'calendar' ? cell.dateMs : undefined,
-        timelineColumn: cell.type === 'custom' ? cell.columnId : undefined,
-        timelineStep: cell.type === 'custom' ? (cell.stepIdx ?? 0) : undefined,
+        timelineColumn: cell.type === 'custom' && activePattern.id === DEFAULT_PATTERN_ID ? cell.columnId : undefined,
+        timelineStep: cell.type === 'custom' && activePattern.id === DEFAULT_PATTERN_ID ? (cell.stepIdx ?? 0) : undefined,
+        timelinePresetColumns: cell.type === 'custom' && cell.columnId ? nextPresetCols : undefined,
+        timelinePresetSteps: cell.type === 'custom' && cell.columnId ? nextPresetSteps : undefined,
         isAllDay: true,
         order: Date.now() % 10000
       });
@@ -2016,6 +2402,515 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       isSubmittingQuickAddRef.current = false;
     }
   };
+
+  const renderPatternMenuDropdown = () => (
+    <div 
+      ref={patternMenuRef}
+      className={cn(
+        "w-72 sm:w-80 bg-white border border-slate-200 rounded-xl shadow-2xl z-[100] p-1.5 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800",
+        isFullscreen ? "fixed bottom-12 right-2.5" : "absolute left-0 top-full mt-1.5"
+      )}
+    >
+      <div className="px-2.5 py-1.5 border-b border-slate-100 flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <Workflow size={13} className="text-indigo-600" />
+          <span className="font-extrabold text-slate-800 text-[11px]">{L('Phaseパターン一覧', 'Phase Patterns', 'Modèles de phases')}</span>
+        </div>
+        <span className="text-[10px] font-mono font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+          {phasePatterns.length} {L('パターン', 'patterns', 'modèles')}
+        </span>
+      </div>
+
+      {/* Pattern Items List */}
+      <div className="py-1 max-h-60 overflow-y-auto space-y-0.5 custom-scrollbar">
+        {phasePatterns.map((p) => {
+          const isActive = p.id === activePattern.id;
+          const isEditing = editingPatternId === p.id;
+
+          if (isEditing) {
+            return (
+              <div key={p.id} className="p-1 bg-indigo-50 rounded-lg flex items-center gap-1">
+                <input
+                  autoFocus
+                  type="text"
+                  value={editingPatternName}
+                  onChange={(e) => setEditingPatternName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleRenamePattern(p.id, editingPatternName);
+                    if (e.key === 'Escape') setEditingPatternId(null);
+                  }}
+                  className="flex-1 bg-white border border-indigo-400 rounded px-2 py-0.5 text-xs font-bold text-slate-800 outline-none"
+                  placeholder={L('パターン名', 'Pattern name', 'Nom du modèle')}
+                />
+                <button
+                  type="button"
+                  onClick={() => handleRenamePattern(p.id, editingPatternName)}
+                  className="p-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 cursor-pointer"
+                  title={L('保存', 'Save', 'Enregistrer')}
+                >
+                  <Check size={12} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingPatternId(null)}
+                  className="p-1 bg-slate-200 text-slate-600 rounded hover:bg-slate-300 cursor-pointer"
+                  title={L('キャンセル', 'Cancel', 'Annuler')}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={p.id}
+              onClick={() => {
+                handleSelectPattern(p.id);
+                setIsPatternMenuOpen(false);
+              }}
+              className={cn(
+                "px-2.5 py-1.5 rounded-lg flex items-center justify-between cursor-pointer transition-colors group",
+                isActive ? "bg-indigo-50/90 text-indigo-900 font-bold" : "hover:bg-slate-50 text-slate-700"
+              )}
+            >
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <div className={cn(
+                  "w-4 h-4 rounded-full flex items-center justify-center shrink-0 text-[10px]",
+                  isActive ? "bg-indigo-600 text-white shadow-2xs" : "border border-slate-300 group-hover:border-slate-400"
+                )}>
+                  {isActive && <Check size={10} strokeWidth={3} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs flex items-center gap-1.5">
+                    <span>{p.name}</span>
+                    <span className="text-[9px] font-mono px-1 py-0.2 bg-slate-100 text-slate-500 rounded">
+                      {p.columns.length}{L('列', 'cols', 'cols')}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-normal truncate mt-0.5">
+                    {p.columns.map(c => c.label).join(' → ')}
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions on Pattern */}
+              <div 
+                className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ml-2 shrink-0"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingPatternId(p.id);
+                    setEditingPatternName(p.name);
+                  }}
+                  className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-100/50 rounded transition-colors cursor-pointer"
+                  title={L('名前を変更', 'Rename', 'Renommer')}
+                >
+                  <Edit2 size={11} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDuplicatePattern(p.id)}
+                  className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-100/50 rounded transition-colors cursor-pointer"
+                  title={L('複製（列と配置タスクをコピー）', 'Duplicate pattern', 'Dupliquer le modèle')}
+                >
+                  <Copy size={11} />
+                </button>
+                {phasePatterns.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeletePattern(p.id)}
+                    className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors cursor-pointer"
+                    title={L('削除', 'Delete', 'Supprimer')}
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Pattern Quick Tools & Create New */}
+      <div className="pt-1.5 mt-1 border-t border-slate-100 space-y-1">
+        <button
+          type="button"
+          onClick={() => {
+            setNewPatternName(`${L('パターン', 'Pattern', 'Modèle')} ${phasePatterns.length + 1}`);
+            setNewPatternCopyCols(true);
+            setNewPatternCopyTasks(false);
+            setIsCreatePatternModalOpen(true);
+            setIsPatternMenuOpen(false);
+          }}
+          className="w-full py-1.5 px-2 bg-indigo-50 hover:bg-indigo-100/80 text-indigo-700 font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 text-xs cursor-pointer"
+        >
+          <Plus size={13} />
+          <span>{L('新規パターンを追加', 'Add New Pattern', 'Nouveau modèle')}</span>
+        </button>
+
+        <div className="flex items-center gap-1 pt-0.5">
+          <button
+            type="button"
+            onClick={() => {
+              handleAddColumn();
+              setIsPatternMenuOpen(false);
+            }}
+            className="flex-1 py-1 px-2 text-[10px] bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium rounded-md flex items-center justify-center gap-1 transition-colors cursor-pointer"
+            title={L(`「${activePattern.name}」に列を追加`, `Add column to "${activePattern.name}"`, `Ajouter une colonne`)}
+          >
+            <Plus size={11} className="text-slate-500" />
+            <span>{L('列を追加', 'Add Col', 'Ajouter col')}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              handleResetCustomColumns('names_only');
+              setIsPatternMenuOpen(false);
+            }}
+            className="flex-1 py-1 px-2 text-[10px] bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium rounded-md flex items-center justify-center gap-1 transition-colors cursor-pointer"
+            title={L(`「${activePattern.name}」のPhase列名をPhase 1, 2, 3...に再設定`, `Reset column names to Phase 1, 2, 3...`, `Réinitialiser les phases`)}
+          >
+            <RefreshCw size={11} className="text-slate-500" />
+            <span>{L('Reset Phases', 'Reset Phases', 'Réinit. phases')}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderQuickMenuDropdown = (origin: 'toolbar' | 'floating') => (
+    <div
+      ref={quickMenuRef}
+      className={cn(
+        "w-64 sm:w-72 bg-white border border-slate-200 rounded-xl shadow-2xl z-[100] p-1.5 text-xs text-slate-800 select-none animate-in fade-in zoom-in-95 duration-100 max-h-[82vh] overflow-y-auto custom-scrollbar",
+        origin === 'floating'
+          ? "fixed bottom-12 right-2.5"
+          : "absolute right-0 top-full mt-1.5"
+      )}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-slate-100 font-bold text-slate-700">
+        <span className="flex items-center gap-1.5 text-xs">
+          <Menu size={13} className="text-indigo-600" />
+          <span>{L('タイムライン メニュー', 'Timeline Menu', 'Menu chronologie')}</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => setIsQuickMenuOpen(false)}
+          className="p-1 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100 transition-colors cursor-pointer"
+        >
+          <X size={12} />
+        </button>
+      </div>
+
+      {/* Mode Switcher */}
+      <div className="px-2 pt-2 pb-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+        {L('表示モード', 'View Mode', 'Mode d\'affichage')}
+      </div>
+      <div className="space-y-0.5">
+        <button
+          type="button"
+          onClick={() => {
+            handleSetTimelineMode('calendar');
+            setIsQuickMenuOpen(false);
+          }}
+          className={cn(
+            "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer",
+            timelineMode === 'calendar' ? "bg-indigo-50 text-indigo-700 font-bold" : "hover:bg-slate-100 text-slate-700"
+          )}
+        >
+          <span className="flex items-center gap-2">
+            <CalendarIcon size={13} className="text-indigo-600 shrink-0" />
+            <span>{L('日付基準（カレンダー）', 'Calendar Dates', 'Dates du calendrier')}</span>
+          </span>
+          {timelineMode === 'calendar' && <Check size={13} className="text-indigo-600 shrink-0" />}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            handleSetTimelineMode('custom');
+            setIsQuickMenuOpen(false);
+          }}
+          className={cn(
+            "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer",
+            timelineMode === 'custom' ? "bg-indigo-50 text-indigo-700 font-bold" : "hover:bg-slate-100 text-slate-700"
+          )}
+        >
+          <span className="flex items-center gap-2">
+            <SlidersHorizontal size={13} className="text-indigo-600 shrink-0" />
+            <span>{L('カスタム期間・Phase', 'Custom Stages (Phase)', 'Étapes personnalisées')}</span>
+          </span>
+          {timelineMode === 'custom' && <Check size={13} className="text-indigo-600 shrink-0" />}
+        </button>
+      </div>
+
+      {/* Mode-Specific Sub-Controls */}
+      {timelineMode === 'calendar' ? (
+        <div className="mt-1 px-2 py-1.5 bg-slate-50 rounded-lg space-y-1.5 border border-slate-100">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-slate-500 font-semibold">{L('日付移動', 'Navigate', 'Naviguer')}:</span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => handleNavigate('prev')}
+                className="px-1.5 py-0.5 text-[10px] bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-700 font-medium"
+                title={L('1週間前へ', 'Previous week', 'Semaine précédente')}
+              >
+                ◀ {L('前週', 'Prev', 'Préc.')}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleNavigate('today')}
+                className="px-1.5 py-0.5 text-[10px] font-bold bg-indigo-50 border border-indigo-200 rounded text-indigo-600 hover:bg-indigo-100"
+              >
+                {L('今日', 'Today', 'Auj.')}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleNavigate('next')}
+                className="px-1.5 py-0.5 text-[10px] bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-700 font-medium"
+                title={L('1週間後へ', 'Next week', 'Semaine suivante')}
+              >
+                {L('翌週', 'Next', 'Suiv.')} ▶
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-slate-500 font-semibold">{L('表示日数', 'Days range', 'Jours')}:</span>
+            <div className="flex items-center gap-1">
+              {[7, 14, 21].map(d => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setDaysCount(d)}
+                  className={cn(
+                    "px-1.5 py-0.5 text-[10px] rounded border transition-all",
+                    daysCount === d ? "bg-indigo-600 text-white border-indigo-600 font-bold" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-100"
+                  )}
+                >
+                  {d}{L('日', 'd', 'j')}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-1 px-2 py-1.5 bg-slate-50 rounded-lg space-y-1.5 border border-slate-100">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-slate-500 font-semibold truncate max-w-[100px]">{L('パターン', 'Pattern', 'Modèle')}:</span>
+            <span className="font-bold text-indigo-700 truncate max-w-[130px]">{activePattern.name}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={handleAddColumn}
+              className="flex-1 py-1 px-1.5 text-[10px] bg-white border border-indigo-200 rounded text-indigo-700 hover:bg-indigo-50 font-bold flex items-center justify-center gap-1"
+            >
+              <Plus size={11} />
+              <span>{L('列を追加', 'Add Col', 'Ajouter')}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleResetCustomColumns('names_only')}
+              className="flex-1 py-1 px-1.5 text-[10px] bg-white border border-slate-200 rounded text-slate-700 hover:bg-slate-100 font-bold flex items-center justify-center gap-1"
+              title={L(`「${activePattern.name}」のPhase列名をデフォルト（Phase 1, 2, 3...）に再設定`, `Reset column names to Phase 1, 2, 3...`, `Réinitialiser les phases`)}
+            >
+              <RefreshCw size={11} />
+              <span>{L('Reset Phases', 'Reset Phases', 'Réinit. phases')}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="h-px bg-slate-100 my-1" />
+
+      {/* Basic Functions */}
+      <div className="px-2 pt-1 pb-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+        {L('基本機能', 'Basic Functions', 'Fonctions de base')}
+      </div>
+      <div className="space-y-0.5">
+        {/* Collapse / Expand All */}
+        <button
+          type="button"
+          onClick={() => {
+            handleToggleCollapseAllProjects();
+            setIsQuickMenuOpen(false);
+          }}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
+        >
+          <span className="flex items-center gap-2">
+            {isAllProjectsCollapsed ? (
+              <ChevronsUpDown size={13} className="text-amber-600 shrink-0" />
+            ) : (
+              <ChevronsDownUp size={13} className="text-slate-500 shrink-0" />
+            )}
+            <span>{isAllProjectsCollapsed ? L('全フォルダ展開', 'Expand All Folders', 'Développer tout') : L('全フォルダ折畳', 'Collapse All Folders', 'Tout réduire')}</span>
+          </span>
+        </button>
+
+        {/* Reset Column Widths */}
+        <button
+          type="button"
+          onClick={() => {
+            handleResetColumnWidths();
+            setIsQuickMenuOpen(false);
+          }}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
+        >
+          <span className="flex items-center gap-2">
+            <ArrowLeftRight size={13} className="text-slate-500 shrink-0" />
+            <span>{L('列幅リセット', 'Reset Column Widths', 'Réinitialiser largeurs')}</span>
+          </span>
+        </button>
+
+        {/* Grid ON / OFF */}
+        <div>
+          <button
+            type="button"
+            onClick={() => {
+              handleToggleGrid(!isGridEnabled);
+            }}
+            className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
+          >
+            <span className="flex items-center gap-2">
+              <LayoutGrid size={13} className={isGridEnabled ? "text-indigo-600" : "text-slate-400"} />
+              <span>{L('グリッド線', 'Grid lines', 'Grille')}</span>
+            </span>
+            <span className={cn(
+              "text-[9px] px-1.5 py-0.5 rounded font-mono font-bold uppercase",
+              isGridEnabled ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
+            )}>
+              {isGridEnabled ? 'ON' : 'OFF'}
+            </span>
+          </button>
+          {isGridEnabled && (
+            <div className="px-2.5 py-1 bg-slate-50 rounded-md flex items-center justify-between text-[10px] text-slate-600 mt-0.5">
+              <span className="font-semibold text-slate-400">{L('刻み', 'Steps', 'Pas')}:</span>
+              {timelineMode === 'calendar' ? (
+                <div className="flex items-center gap-1">
+                  {[1, 2, 4, 6, 12, 24].map(h => (
+                    <button
+                      key={h}
+                      type="button"
+                      onClick={() => handleSetGridStepHours(h)}
+                      className={cn(
+                        "px-1 py-0.5 rounded transition-all",
+                        gridStepHours === h ? "bg-indigo-600 text-white font-bold" : "hover:text-slate-900 bg-white border border-slate-200"
+                      )}
+                    >
+                      {h}h
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex items-center gap-1">
+                  {[2, 3, 4, 5].map(s => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => handleSetStageSubdivisions(s)}
+                      className={cn(
+                        "px-1.5 py-0.5 rounded transition-all",
+                        stageSubdivisions === s ? "bg-indigo-600 text-white font-bold" : "hover:text-slate-900 bg-white border border-slate-200"
+                      )}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ToDo List Column Toggle */}
+        <button
+          type="button"
+          onClick={() => {
+            setShowUnscheduledColumn(prev => !prev);
+            setIsQuickMenuOpen(false);
+          }}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
+        >
+          <span className="flex items-center gap-2">
+            <ListTodo size={13} className={showUnscheduledColumn ? "text-amber-600" : "text-slate-400"} />
+            <span>{L('ToDo リスト列', 'ToDo List column', 'Colonne ToDo')}</span>
+          </span>
+          <span className={cn(
+            "text-[9px] px-1.5 py-0.5 rounded font-mono font-bold uppercase",
+            showUnscheduledColumn ? "bg-amber-600 text-white" : "bg-slate-100 text-slate-500"
+          )}>
+            {showUnscheduledColumn ? 'ON' : 'OFF'}
+          </span>
+        </button>
+
+        {/* Lanes Column Toggle */}
+        <button
+          type="button"
+          onClick={() => {
+            setShowLanesInFullscreen(prev => !prev);
+            setIsQuickMenuOpen(false);
+          }}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
+        >
+          <span className="flex items-center gap-2">
+            <Folder size={13} className="text-indigo-600 shrink-0" />
+            <span>{L('プロジェクトレーン', 'Project Lanes', 'Couloirs de projets')}</span>
+          </span>
+          <span className={cn(
+            "text-[9px] px-1.5 py-0.5 rounded font-mono font-bold uppercase",
+            (!isFullscreen || showLanesInFullscreen) ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
+          )}>
+            {(!isFullscreen || showLanesInFullscreen) ? 'ON' : 'OFF'}
+          </span>
+        </button>
+
+        {/* Add Project Folder */}
+        <button
+          type="button"
+          onClick={() => {
+            setTargetParentFolder(null);
+            setNewFolderName('');
+            setIsCreateFolderOpen(true);
+            setIsQuickMenuOpen(false);
+          }}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
+        >
+          <span className="flex items-center gap-2">
+            <FolderPlus size={13} className="text-indigo-600 shrink-0" />
+            <span>{L('フォルダ追加', 'Add Folder', 'Ajouter un dossier')}</span>
+          </span>
+        </button>
+      </div>
+
+      {/* Fullscreen Toggle in Menu */}
+      {onToggleFullscreen && (
+        <>
+          <div className="h-px bg-slate-100 my-1" />
+          <button
+            type="button"
+            onClick={() => {
+              onToggleFullscreen();
+              setIsQuickMenuOpen(false);
+            }}
+            className={cn(
+              "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg font-bold transition-colors text-left cursor-pointer",
+              isFullscreen ? "bg-indigo-600 text-white hover:bg-indigo-500" : "bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+            )}
+          >
+            <span className="flex items-center gap-2">
+              {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+              <span>{isFullscreen ? L('全画面を終了 (通常表示に戻す)', 'Exit Full View', 'Quitter plein écran') : L('全画面で表示 (Full View)', 'Enter Full View', 'Plein écran')}</span>
+            </span>
+          </button>
+        </>
+      )}
+    </div>
+  );
 
   return (
     <div 
@@ -2031,19 +2926,19 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         isFullscreen ? "border-0 rounded-none" : "border border-slate-200/90 rounded-xl shadow-2xs"
       )}
     >
-      {/* Timeline Top Control Toolbar (Hidden in Fullscreen Mode) */}
+      {/* Timeline Top Control Toolbar (Normal View only - Hidden in Full View to maximize screen space for Timeline) */}
       {!isFullscreen && (
-      <div className="relative z-40 flex items-center justify-between px-2 sm:px-3 py-1.5 sm:py-2 border-b border-slate-200 bg-slate-50/90 shrink-0 select-none flex-wrap gap-1.5 sm:gap-2 max-w-full">
-        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap min-w-0 max-w-full">
-          <button
-            type="button"
-            onClick={() => onToggleFullscreen?.()}
-            className="flex items-center gap-1.5 text-xs font-bold text-slate-800 hover:text-indigo-600 transition-colors cursor-pointer"
-            title={L('タップしてタイムラインを全画面表示', 'Tap to enter Fullscreen Timeline', 'Appuyez pour passer en plein écran')}
-          >
-            <CalendarDays size={16} className="text-indigo-600 shrink-0" />
-            <span>{L('プロジェクト タイムライン', 'Project Timeline', 'Chronologie des projets')}</span>
-          </button>
+        <div className="relative z-40 flex items-center justify-between px-2 sm:px-3 border-b shrink-0 select-none flex-wrap gap-1.5 sm:gap-2 max-w-full py-1.5 sm:py-2 bg-slate-50/90 border-slate-200">
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap min-w-0 max-w-full">
+            <button
+              type="button"
+              onClick={() => onToggleFullscreen?.()}
+              className="flex items-center gap-1.5 text-xs font-bold text-slate-800 hover:text-indigo-600 transition-colors cursor-pointer"
+              title={L('クリックしてタイムラインを全画面表示 (Full view)', 'Click to enter Fullscreen Timeline (Full view)', 'Appuyez pour passer en plein écran')}
+            >
+              <CalendarDays size={16} className="text-indigo-600 shrink-0" />
+              <span>{L('プロジェクト タイムライン', 'Project Timeline', 'Chronologie des projets')}</span>
+            </button>
 
           <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block" />
 
@@ -2102,13 +2997,90 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               </button>
             </div>
           ) : (
-            /* Custom Columns Controls (Add Column & Reset) */
+            /* Custom Columns Controls (Phase Pattern Selector, Add Column & Reset) */
             <div className="flex items-center gap-1.5 flex-wrap">
+              {/* Phase Pattern Switcher & Manager */}
+              <div className="relative inline-flex items-center" ref={patternMenuRef}>
+                {isRenamingActiveInToolbar ? (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleRenamePattern(activePattern.id, toolbarPatternName);
+                      setIsRenamingActiveInToolbar(false);
+                    }}
+                    className="flex items-center gap-1 bg-white border border-indigo-500 rounded-lg p-0.5 shadow-xs"
+                  >
+                    <input
+                      autoFocus
+                      type="text"
+                      value={toolbarPatternName}
+                      onChange={(e) => setToolbarPatternName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setIsRenamingActiveInToolbar(false);
+                      }}
+                      onBlur={() => {
+                        handleRenamePattern(activePattern.id, toolbarPatternName);
+                        setIsRenamingActiveInToolbar(false);
+                      }}
+                      className="px-2 py-0.5 text-[10px] sm:text-[11px] font-bold text-slate-800 outline-none w-28 sm:w-36"
+                      placeholder={L('パターン名', 'Pattern name', 'Nom du modèle')}
+                    />
+                    <button
+                      type="submit"
+                      className="p-1 text-emerald-600 hover:bg-emerald-50 rounded cursor-pointer"
+                      title={L('保存', 'Save', 'Enregistrer')}
+                    >
+                      <Check size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsRenamingActiveInToolbar(false)}
+                      className="p-1 text-slate-400 hover:bg-slate-100 rounded cursor-pointer"
+                      title={L('キャンセル', 'Cancel', 'Annuler')}
+                    >
+                      <X size={12} />
+                    </button>
+                  </form>
+                ) : (
+                  <div className="flex items-center bg-indigo-50 border border-indigo-200/90 rounded-lg p-0.5 shadow-2xs">
+                    <button
+                      type="button"
+                      onClick={() => setIsPatternMenuOpen(prev => !prev)}
+                      className="px-2 py-1 text-[10px] sm:text-[11px] font-bold text-indigo-900 hover:bg-indigo-100/70 rounded-md transition-colors flex items-center gap-1 sm:gap-1.5 cursor-pointer select-none"
+                      title={L('Phaseパターンを切り替え・管理', 'Switch & manage phase patterns', 'Gérer les modèles de phases')}
+                    >
+                      <Workflow size={13} className="text-indigo-600 shrink-0" />
+                      <span className="text-slate-500 font-medium text-[10px] hidden md:inline">{L('パターン:', 'Pattern:', 'Modèle :')}</span>
+                      <span className="font-extrabold text-indigo-700 max-w-[120px] sm:max-w-[160px] truncate">{activePattern.name}</span>
+                      <span className="text-[9px] sm:text-[10px] px-1.5 py-0.2 bg-indigo-200/70 text-indigo-800 rounded font-mono font-bold leading-tight">
+                        {customColumns.length}{L('列', 'cols', 'cols')}
+                      </span>
+                      <ChevronDown size={11} className={cn("text-indigo-500 transition-transform duration-150", isPatternMenuOpen && "rotate-180")} />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsRenamingActiveInToolbar(true);
+                        setToolbarPatternName(activePattern.name);
+                      }}
+                      className="p-1 text-indigo-400 hover:text-indigo-700 hover:bg-indigo-100/60 rounded transition-colors cursor-pointer"
+                      title={L('パターン名を変更', 'Rename pattern', 'Renommer le modèle')}
+                    >
+                      <Edit2 size={11} />
+                    </button>
+                  </div>
+                )}
+
+                {/* Dropdown Menu */}
+                {isPatternMenuOpen && renderPatternMenuDropdown()}
+              </div>
+
               {/* Add Column Button */}
               <button
                 onClick={handleAddColumn}
-                className="px-2 py-1 text-[10px] sm:text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
-                title={L("Phase列を追加", "Add Phase Column", "Ajouter une colonne de phase")}
+                className="px-2 py-1 text-[10px] sm:text-[11px] font-bold bg-white text-indigo-700 border border-indigo-200 hover:bg-indigo-50 rounded-lg transition-colors flex items-center gap-1 shadow-2xs cursor-pointer"
+                title={L(`「${activePattern.name}」に新しいPhase列を追加`, `Add Phase column to "${activePattern.name}"`, `Ajouter une colonne à « ${activePattern.name} »`)}
               >
                 <Plus size={13} />
                 <span>{L("列を追加", "Add Column", "Ajouter colonne")}</span>
@@ -2116,12 +3088,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
               {/* Reset Custom Phases (Names & Count) Button */}
               <button
-                onClick={handleResetCustomColumns}
-                className="px-2 py-1 text-[10px] sm:text-[11px] font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
-                title={L("列名・列数を初期値（Phase 1〜5）にリセット", "Reset phases configuration (names and count) to default (Phase 1-5)", "Réinitialiser la configuration des phases (Phase 1 à 5)")}
+                type="button"
+                onClick={() => handleResetCustomColumns('names_only')}
+                className="px-2 py-1 text-[10px] sm:text-[11px] font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:text-indigo-600 rounded-lg transition-colors flex items-center gap-1 shadow-2xs cursor-pointer"
+                title={L(`「${activePattern.name}」のPhase列名をデフォルト（Phase 1, 2, 3...）に再設定`, `Reset Phase column names of "${activePattern.name}" to default (Phase 1, 2, 3...)`, `Réinitialiser les noms des phases`)}
               >
                 <RefreshCw size={12} className="text-slate-500" />
-                <span>{L("列構成リセット", "Reset Phases", "Réinitialiser phases")}</span>
+                <span>{L("Reset Phases", "Reset Phases", "Réinitialiser phases")}</span>
               </button>
             </div>
           )}
@@ -2281,6 +3254,73 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               ))}
             </div>
           )}
+
+          {/* Project Lanes Column Toggle (when in Fullscreen mode) */}
+          {isFullscreen && (
+            <button
+              type="button"
+              onClick={() => setShowLanesInFullscreen(prev => !prev)}
+              className={cn(
+                "px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-semibold rounded-lg border transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs cursor-pointer",
+                showLanesInFullscreen
+                  ? "bg-indigo-50 text-indigo-700 border-indigo-200 font-bold"
+                  : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
+              )}
+              title={L('全画面のままプロジェクトレーン列を表示/非表示', 'Toggle Project Lanes in Fullscreen', 'Afficher/masquer les couloirs de projets')}
+            >
+              <Folder size={12} className={showLanesInFullscreen ? "text-indigo-600" : "text-slate-400"} />
+              <span className="hidden sm:inline">{L('レーン', 'Lanes', 'Couloirs')}</span>
+              <span className={cn(
+                "text-[9px] px-1 py-0.5 rounded font-mono font-bold uppercase",
+                showLanesInFullscreen ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
+              )}>
+                {showLanesInFullscreen ? 'ON' : 'OFF'}
+              </span>
+            </button>
+          )}
+
+          {/* 3-Horizontal-Lines Menu Button (All Functions & Settings) */}
+          <div className="relative inline-flex items-center">
+            <button
+              type="button"
+              onClick={() => {
+                setQuickMenuOrigin('toolbar');
+                setIsQuickMenuOpen(prev => !prev);
+              }}
+              className={cn(
+                "px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-lg border transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs cursor-pointer",
+                isQuickMenuOpen && quickMenuOrigin === 'toolbar'
+                  ? "bg-indigo-50 text-indigo-700 border-indigo-300 ring-1 ring-indigo-300"
+                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+              )}
+              title={L('メニュー（全機能の操作・設定）', 'Menu (All functions & settings)', 'Menu (toutes les fonctions)')}
+            >
+              <Menu size={13} className="text-indigo-600 shrink-0" />
+              <span className="hidden sm:inline">{L('メニュー', 'Menu', 'Menu')}</span>
+            </button>
+            {isQuickMenuOpen && quickMenuOrigin === 'toolbar' && renderQuickMenuDropdown('toolbar')}
+          </div>
+
+          {/* Full View / Exit Full View Button */}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              onClick={onToggleFullscreen}
+              className={cn(
+                "px-2.5 sm:px-3 py-1 text-[10px] sm:text-[11px] font-bold rounded-lg border transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs cursor-pointer",
+                isFullscreen
+                  ? "bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-600"
+                  : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200"
+              )}
+              title={isFullscreen
+                ? L('通常表示に戻す', 'Exit Full View', 'Quitter plein écran')
+                : L('タイムラインを全画面で表示 (Full view)', 'Enter Fullscreen Timeline (Full view)', 'Afficher la chronologie en plein écran')
+              }
+            >
+              {isFullscreen ? <Minimize2 size={12} className="shrink-0" /> : <Maximize2 size={12} className="shrink-0" />}
+              <span>{isFullscreen ? L('全画面終了', 'Exit Full View', 'Quitter') : L('Full view', 'Full view', 'Plein écran')}</span>
+            </button>
+          )}
         </div>
       </div>
       )}
@@ -2374,9 +3414,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           {/* ToDo List Column Header */}
           {effectiveShowUnscheduled && (
             <div 
-              style={{ width: `${todoColWidth}px` }}
+              style={{ 
+                width: `${todoColWidth}px`,
+                left: hideSideColumns ? 0 : `${effectiveProjectColWidth}px`
+              }}
               className={cn(
-                "shrink-0 px-2.5 border-r border-slate-200 bg-amber-50/50 text-[11px] font-bold text-amber-800 flex items-center justify-between relative z-10 group/todocol",
+                "shrink-0 px-2.5 border-r border-slate-200 bg-[#fffdf5] text-[11px] font-bold text-amber-800 flex items-center justify-between sticky z-40 group/todocol shadow-2xs",
                 isFullscreen ? "py-1" : "py-2"
               )}
             >
@@ -2424,21 +3467,15 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   <div
                     key={date.toISOString()}
                     style={{ width: `${dayWidth}px` }}
-                    onClick={() => onToggleFullscreen?.()}
-                    title={
-                      isFullscreen
-                        ? L('タップして全体画面に戻る', 'Tap to return to Full View', 'Appuyez pour revenir à la vue complète')
-                        : L('タップしてタイムラインを全画面表示', 'Tap to toggle Fullscreen Timeline', 'Appuyez pour passer en plein écran')
-                    }
                     className={cn(
-                      "shrink-0 border-r border-slate-300 select-none transition-colors flex flex-col justify-between cursor-pointer hover:brightness-95",
+                      "shrink-0 border-r border-slate-300 select-none transition-colors flex flex-col justify-center",
                       today && "bg-indigo-50/80 font-bold",
                       !today && isWeekend && "bg-slate-50 text-slate-500",
                       !today && !isWeekend && "bg-slate-100 text-slate-700"
                     )}
                   >
                     <div className={cn(
-                      "px-2 flex items-center justify-between border-b border-slate-200/70",
+                      "px-2 flex items-center justify-between",
                       isFullscreen ? "py-0.5" : "py-1"
                     )}>
                       <span className={cn(
@@ -2490,15 +3527,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   <div
                     key={col.id}
                     style={{ width: `${colWidth}px` }}
-                    onClick={() => {
-                      if (!isEditing && (isFullscreen || (typeof window !== 'undefined' && window.innerWidth < 1024))) {
-                        onToggleFullscreen?.();
-                      }
-                    }}
-                    className={cn(
-                      "shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative select-none",
-                      !isEditing && "cursor-pointer"
-                    )}
+                    className="shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative select-none"
                   >
                     <div className={cn(
                       "px-2 flex items-center justify-between",
@@ -2625,7 +3654,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             // Sorted: Active (A-Z), then Done (A-Z) as requested
             const unscheduledTasks = projectTasks.filter(t => {
               if (timelineMode === 'calendar') return !t.deadline && !t.startDate && (!t.recurrence || t.recurrence.type === 'none');
-              return !getTaskCurrentColumnId(t, customColumns);
+              return !getTaskCurrentColumnId(t, customColumns, activePattern.id);
             }).sort((a, b) => {
               const aDone = Boolean(a.isDone);
               const bDone = Boolean(b.isDone);
@@ -2941,10 +3970,14 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                           columnId: null 
                         } as any)}
                         className={cn(
-                          "shrink-0 p-1.5 border-r border-slate-200/80 bg-amber-50/20 flex flex-col gap-1 min-h-[56px] transition-colors relative self-stretch",
-                          dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === 'backlog' && "bg-amber-100/70 border-2 border-dashed border-amber-500"
+                          "shrink-0 p-1.5 border-r border-slate-200/80 bg-[#fffdf7] flex flex-col gap-1 min-h-[56px] transition-colors sticky z-10 self-stretch",
+                          dragOverCell?.project === project.fullPath && dragOverCell?.slotKey === 'backlog' && "bg-amber-100/70 ring-2 ring-amber-500 ring-inset"
                         )}
-                        style={{ width: `${todoColWidth}px`, minHeight: `${laneHeight}px` }}
+                        style={{ 
+                          width: `${todoColWidth}px`, 
+                          minHeight: `${laneHeight}px`,
+                          left: hideSideColumns ? 0 : `${effectiveProjectColWidth}px`
+                        }}
                       >
                         {/* Task items in unscheduled */}
                         {unscheduledTasks.map((task) => renderTaskChip(task))}
@@ -3282,6 +4315,26 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       {onToggleFullscreen && (
         isFullscreen ? (
           <div className="fixed bottom-2.5 right-2.5 z-[95] flex items-center gap-1 bg-slate-900/85 backdrop-blur-md text-white px-2 py-1 rounded-xl shadow-xl border border-white/15 select-none">
+            {/* 3-Horizontal-Lines Menu Button in Floating Bar */}
+            <div className="relative inline-flex items-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setQuickMenuOrigin('floating');
+                  setIsQuickMenuOpen(prev => !prev);
+                }}
+                className={cn(
+                  "px-2 py-1.5 rounded-lg text-slate-200 hover:text-white hover:bg-white/15 transition-colors cursor-pointer flex items-center gap-1.5",
+                  isQuickMenuOpen && quickMenuOrigin === 'floating' && "bg-white/20 text-white"
+                )}
+                title={L('メニュー（全機能の操作・設定）', 'Menu (All functions & settings)', 'Menu')}
+              >
+                <Menu size={13} />
+                <span className="text-[10px] font-bold">{L('メニュー', 'Menu', 'Menu')}</span>
+              </button>
+              {isFullscreen && isQuickMenuOpen && quickMenuOrigin === 'floating' && renderQuickMenuDropdown('floating')}
+            </div>
+
             {timelineMode === 'calendar' && (
               <div className="flex items-center gap-0.5 pr-1 border-r border-white/20">
                 <button
@@ -3307,6 +4360,41 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 >
                   <ChevronRight size={13} />
                 </button>
+              </div>
+            )}
+
+            {timelineMode === 'custom' && (
+              <div className="relative inline-flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setIsPatternMenuOpen(prev => !prev)}
+                  className="px-2 py-1 rounded-lg text-[10px] font-bold bg-indigo-600/90 hover:bg-indigo-600 text-white flex items-center gap-1 transition-colors cursor-pointer"
+                  title={L('Phaseパターン切り替え・管理', 'Switch & manage phase patterns', 'Gérer les modèles')}
+                >
+                  <Workflow size={11} />
+                  <span className="max-w-[100px] truncate">{activePattern.name}</span>
+                  <ChevronDown size={10} className={cn("transition-transform duration-150", isPatternMenuOpen && "rotate-180")} />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleAddColumn}
+                  className="p-1 hover:bg-white/15 rounded text-slate-200 hover:text-white transition-colors cursor-pointer ml-0.5"
+                  title={L(`「${activePattern.name}」にPhase列を追加`, `Add Phase column to "${activePattern.name}"`, `Ajouter une colonne`)}
+                >
+                  <Plus size={12} />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleResetCustomColumns('names_only')}
+                  className="p-1 hover:bg-white/15 rounded text-slate-200 hover:text-white transition-colors cursor-pointer"
+                  title={L(`「${activePattern.name}」のPhase列名をデフォルト（Phase 1, 2, 3...）に再設定`, `Reset Phase column names to default (Phase 1, 2, 3...)`, `Réinitialiser les phases`)}
+                >
+                  <RefreshCw size={11} />
+                </button>
+
+                {isFullscreen && isPatternMenuOpen && renderPatternMenuDropdown()}
               </div>
             )}
 
@@ -3344,10 +4432,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               type="button"
               onClick={onToggleFullscreen}
               className="px-2.5 py-1 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-[11px] font-bold flex items-center gap-1 shadow-xs transition-colors cursor-pointer"
-              title={L('全体画面に戻す (上部バー・ツールバーを表示)', 'Switch to Overall View (show all bars)', 'Revenir à la vue complète')}
+              title={L('全画面を終了して通常表示に戻す', 'Exit Full View', 'Quitter la vue plein écran')}
             >
               <Minimize2 size={12} />
-              <span>{L('全体画面', 'Full View', 'Vue complète')}</span>
+              <span>{L('全画面終了', 'Exit Full View', 'Quitter')}</span>
             </button>
           </div>
         ) : (
@@ -3355,10 +4443,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             type="button"
             onClick={onToggleFullscreen}
             className="lg:hidden fixed bottom-18 right-2.5 z-[65] flex items-center gap-1.5 bg-slate-900/85 hover:bg-indigo-600 backdrop-blur-md text-white px-3 py-1.5 rounded-xl shadow-lg border border-white/15 text-[11px] font-bold transition-all cursor-pointer select-none"
-            title={L('タイムラインを全画面で表示', 'Fullscreen Timeline', 'Chronologie plein écran')}
+            title={L('タイムラインを全画面で表示 (Full view)', 'Fullscreen Timeline (Full view)', 'Chronologie plein écran')}
           >
             <Maximize2 size={13} />
-            <span>{L('全画面', 'Fullscreen', 'Plein écran')}</span>
+            <span>{L('Full view', 'Full view', 'Plein écran')}</span>
           </button>
         )
       )}
@@ -3433,21 +4521,37 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 const name = newFolderName.trim();
                 if (!name) return;
                 const fullPath = targetParentFolder ? `${targetParentFolder}/${name}` : name;
-                if (!customFolders.includes(fullPath)) {
-                  saveCustomFolders([...customFolders, fullPath]);
-                }
-                if (!folderMetas?.[fullPath]?.createdAt) {
-                  onUpdateFolderMeta?.(fullPath, { createdAt: Date.now() });
-                }
+                const nextCustom = customFolders.includes(fullPath)
+                  ? customFolders
+                  : [...customFolders, fullPath];
+                saveCustomFolders(nextCustom);
+
+                // Set folder metadata to Focus (reviving if it was in Trash)
+                onUpdateFolderMeta?.(fullPath, {
+                  category: 'Focus',
+                  createdAt: Date.now(),
+                  updatedAt: Date.now()
+                });
+
+                // Auto revive parent and all its ancestors if any were in Trash
+                const parts = fullPath.split('/').filter(Boolean);
+                let cur = '';
+                parts.forEach(p => {
+                  cur = cur ? `${cur}/${p}` : p;
+                  if (folderMetas?.[cur]?.category === 'Trash' || folderMetas?.[cur]?.category === 'Archive') {
+                    onUpdateFolderMeta?.(cur, { category: 'Focus', updatedAt: Date.now() });
+                  }
+                });
+
                 // Auto expand parent and all its ancestors if collapsed
                 if (targetParentFolder) {
                   setCollapsedProjectPaths(prev => {
                     const next = new Set(prev);
-                    const parts = targetParentFolder.split('/');
-                    let cur = '';
-                    parts.forEach(p => {
-                      cur = cur ? `${cur}/${p}` : p;
-                      next.delete(cur);
+                    const pParts = targetParentFolder.split('/');
+                    let curP = '';
+                    pParts.forEach(p => {
+                      curP = curP ? `${curP}/${p}` : p;
+                      next.delete(curP);
                     });
                     return next;
                   });
@@ -3692,6 +4796,155 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               );
             })()
           )}
+        </div>
+      )}
+
+      {/* Create New Phase Pattern Modal */}
+      {isCreatePatternModalOpen && (
+        <div 
+          className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setIsCreatePatternModalOpen(false)}
+        >
+          <div 
+            className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-indigo-50 rounded-xl text-indigo-600">
+                  <Workflow size={20} />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-800 text-sm">
+                    {L('新規Phaseパターンの作成', 'Create New Phase Pattern', 'Créer un nouveau modèle de phase')}
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {L('独立した列構成とタスク配置を持つ新しいパターンを作成します', 'Create a new pattern with independent columns and task placements', 'Créer un modèle avec des colonnes et des tâches distinctes')}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCreatePatternModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Pattern Name Input */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                {L('パターンタイトル (名前)', 'Pattern Title (Name)', 'Titre du modèle (Nom)')}
+              </label>
+              <input
+                autoFocus
+                type="text"
+                value={newPatternName}
+                onChange={(e) => setNewPatternName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (newPatternName.trim()) {
+                      handleCreatePattern(newPatternName, newPatternCopyCols, newPatternCopyTasks);
+                    }
+                  }
+                  if (e.key === 'Escape') setIsCreatePatternModalOpen(false);
+                }}
+                placeholder={L('例: 開発パイプライン, 採用プロセス, イベント企画', 'e.g. Development Pipeline, Hiring Process', 'ex. Pipeline de développement')}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 font-medium text-slate-800"
+              />
+            </div>
+
+            {/* Column Options */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                {L('列の構成 (Columns)', 'Column Structure', 'Structure des colonnes')}
+              </label>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setNewPatternCopyCols(true)}
+                  className={cn(
+                    "p-2.5 rounded-xl border text-left transition-all cursor-pointer",
+                    newPatternCopyCols
+                      ? "border-indigo-500 bg-indigo-50/70 text-indigo-900 font-bold ring-1 ring-indigo-500"
+                      : "border-slate-200 hover:bg-slate-50 text-slate-600"
+                  )}
+                >
+                  <div className="text-[11px] font-bold">{L('現在の列構成を引き継ぐ', 'Copy Current Columns', 'Copier colonnes actuelles')}</div>
+                  <div className="text-[10px] text-slate-400 font-normal truncate mt-0.5">
+                    {activePattern.name} ({activePattern.columns.length}{L('列', 'cols', 'cols')})
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setNewPatternCopyCols(false)}
+                  className={cn(
+                    "p-2.5 rounded-xl border text-left transition-all cursor-pointer",
+                    !newPatternCopyCols
+                      ? "border-indigo-500 bg-indigo-50/70 text-indigo-900 font-bold ring-1 ring-indigo-500"
+                      : "border-slate-200 hover:bg-slate-50 text-slate-600"
+                  )}
+                >
+                  <div className="text-[11px] font-bold">{L('初期値（Phase 1〜5）', 'Default (Phase 1-5)', 'Par défaut (Phase 1-5)')}</div>
+                  <div className="text-[10px] text-slate-400 font-normal mt-0.5">
+                    {L('Phase 1〜Phase 5 の5列', '5 default phase columns', '5 colonnes de phases par défaut')}
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Task Placement Options */}
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/80 space-y-1.5">
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={newPatternCopyTasks}
+                  onChange={(e) => setNewPatternCopyTasks(e.target.checked)}
+                  className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4 cursor-pointer"
+                />
+                <span className="text-xs font-bold text-slate-700">
+                  {L('現在のパターンのタスク配置も引き継ぐ', 'Copy current task assignments to this pattern', 'Copier les assignations de tâches vers ce modèle')}
+                </span>
+              </label>
+              <p className="text-[10px] text-slate-500 pl-6 leading-relaxed">
+                {newPatternCopyTasks 
+                  ? L('現在配置されているタスクの列・ステップをそのまま新しいパターンにもコピーします', 'Copies current column placements so you can tweak them without starting over', 'Copie les positions actuelles pour vous permettre de les ajuster')
+                  : L('チェックを外すと、タスクはすべて未配置（ToDoリスト）からスタートし、まっさらな状態で配置できます', 'Starts with all tasks unscheduled in ToDo list for a clean slate', 'Démarre avec toutes les tâches non planifiées')
+                }
+              </p>
+            </div>
+
+            {/* Dialog Footer Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setIsCreatePatternModalOpen(false)}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+              >
+                {L('キャンセル', 'Cancel', 'Annuler')}
+              </button>
+              <button
+                type="button"
+                disabled={!newPatternName.trim()}
+                onClick={() => {
+                  if (newPatternName.trim()) {
+                    handleCreatePattern(newPatternName, newPatternCopyCols, newPatternCopyTasks);
+                  }
+                }}
+                className={cn(
+                  "px-4 py-1.5 text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer",
+                  newPatternName.trim()
+                    ? "bg-indigo-600 hover:bg-indigo-700 text-white"
+                    : "bg-slate-200 text-slate-400 cursor-not-allowed"
+                )}
+              >
+                {L('パターンを作成', 'Create Pattern', 'Créer le modèle')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

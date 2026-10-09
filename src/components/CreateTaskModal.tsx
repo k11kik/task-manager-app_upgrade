@@ -178,6 +178,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
         if (Array.isArray(parsed)) {
           parsed.forEach(p => {
             if (typeof p === 'string' && p.trim()) {
+              if (folderMetas?.[p]?.category === 'Trash' || folderMetas?.[p]?.category === 'Archive') return;
               addPathAndAncestors(p);
             }
           });
@@ -186,9 +187,9 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
     } catch {}
 
     // 3. From folderMetas in activeSection
-    Object.values(folderMetas || {}).forEach(meta => {
+    Object.values(folderMetas || {}).forEach((meta: any) => {
       if (!meta || !meta.path) return;
-      if (meta.category === 'Trash') return;
+      if (meta.category === 'Trash' || meta.category === 'Archive') return;
       if (meta.section && meta.section !== activeSection) return;
       addPathAndAncestors(meta.path);
     });

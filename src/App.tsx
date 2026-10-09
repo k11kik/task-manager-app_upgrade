@@ -359,7 +359,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.19";
+  const APP_VERSION = "3.1.20";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -702,6 +702,7 @@ export default function App() {
     timelineColumn?: string;
     timelineStep?: number;
     timelinePresetColumns?: Record<string, string>;
+    timelinePresetSteps?: Record<string, number>;
     order?: number;
   }) => {
     if (!user) {
@@ -746,7 +747,9 @@ export default function App() {
 
     // Initialize folderMetas for any newly created folder path segments
     for (const sp of segmentPaths) {
-      if (!folderMetas[sp]?.createdAt) {
+      if (folderMetas[sp]?.category === 'Trash' || folderMetas[sp]?.category === 'Archive') {
+        updateFolderMeta(sp, { category: 'Focus', updatedAt: now });
+      } else if (!folderMetas[sp]?.createdAt) {
         updateFolderMeta(sp, { createdAt: now });
       }
     }
@@ -773,6 +776,7 @@ export default function App() {
       ...(taskData.timelineColumn ? { timelineColumn: taskData.timelineColumn } : {}),
       ...(taskData.timelineStep !== undefined ? { timelineStep: taskData.timelineStep } : {}),
       ...(taskData.timelinePresetColumns ? { timelinePresetColumns: taskData.timelinePresetColumns } : {}),
+      ...(taskData.timelinePresetSteps ? { timelinePresetSteps: taskData.timelinePresetSteps } : {}),
       ...(taskData.order !== undefined ? { order: taskData.order } : {})
     };
 
@@ -806,7 +810,8 @@ export default function App() {
       isAllDay: task.isAllDay,
       timelineColumn: task.timelineColumn,
       timelineStep: task.timelineStep,
-      timelinePresetColumns: task.timelinePresetColumns
+      timelinePresetColumns: task.timelinePresetColumns,
+      timelinePresetSteps: task.timelinePresetSteps
     });
   };
 
@@ -851,6 +856,7 @@ export default function App() {
             ...(t.timelineColumn !== undefined ? { timelineColumn: t.timelineColumn } : {}),
             ...(t.timelineStep !== undefined ? { timelineStep: t.timelineStep } : {}),
             ...(t.timelinePresetColumns !== undefined ? { timelinePresetColumns: t.timelinePresetColumns } : {}),
+            ...(t.timelinePresetSteps !== undefined ? { timelinePresetSteps: t.timelinePresetSteps } : {}),
             ...(t.order !== undefined ? { order: t.order } : {}),
             ...(t.recurrence !== undefined ? { recurrence: sanitizeForFirestore(t.recurrence) } : {})
           };
@@ -2368,6 +2374,59 @@ export default function App() {
     return ['All', ...p];
   }, [sectionTasks]);
 
+  // Ensure all projects from tasks are registered in customFolders so folders persist even when tasks are moved to trash, archived, or auto-deleted
+  useEffect(() => {
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      const existing: string[] = saved ? JSON.parse(saved) : [];
+      const set = new Set(existing);
+      let changed = false;
+
+      // Clean up any currently trashed/archived folders from set
+      Array.from(set).forEach(f => {
+        const parts = f.split(/[\/\\]/).map(s => s.trim()).filter(Boolean);
+        let cur = '';
+        for (const p of parts) {
+          cur = cur ? `${cur}/${p}` : p;
+          if (folderMetas[cur]?.category === 'Trash' || folderMetas[cur]?.category === 'Archive') {
+            set.delete(f);
+            changed = true;
+            break;
+          }
+        }
+      });
+
+      sectionTasks.forEach(t => {
+        const proj = t.project?.trim();
+        if (!proj || proj === 'General') return;
+        const parts = proj.split(/[\/\\]/).map(s => s.trim()).filter(Boolean);
+        let cur = '';
+        for (const p of parts) {
+          cur = cur ? `${cur}/${p}` : p;
+          // If the folder was explicitly trashed or archived by the user, do not add it back
+          if (folderMetas[cur]?.category === 'Trash' || folderMetas[cur]?.category === 'Archive') {
+            return;
+          }
+        }
+        // If the folder is not trashed/archived, register all segments so the folder persists even if tasks are later auto-moved to trash!
+        let curPath = '';
+        for (const p of parts) {
+          curPath = curPath ? `${curPath}/${p}` : p;
+          if (!set.has(curPath)) {
+            set.add(curPath);
+            changed = true;
+          }
+        }
+      });
+
+      if (changed) {
+        localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+        window.dispatchEvent(new Event('navfor_folders_updated'));
+      }
+    } catch {}
+  }, [sectionTasks, activeSection, folderMetas]);
+
   const stats = useMemo(() => {
     // Current workspace filter
     const isInActiveSection = (t: Task) => getTaskSection(t) === activeSection;
@@ -3100,7 +3159,7 @@ export default function App() {
       });
 
       const oldSecFolders = allFolderMetas[oldName] || {};
-      Object.entries(oldSecFolders).forEach(([p, meta]) => {
+      (Object.entries(oldSecFolders) as [string, FolderMeta][]).forEach(([p, meta]) => {
         const oldDocId = getFolderDocId(user.uid, oldName, p);
         const newDocId = getFolderDocId(user.uid, trimmedNew, p);
         batch.set(doc(db, 'folders', newDocId), {
@@ -3328,6 +3387,14 @@ export default function App() {
       }
     }));
 
+    try {
+      localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify({
+        ...allFolderMetasRef.current,
+        [activeSection]: nextSecMap
+      }));
+    } catch {}
+    window.dispatchEvent(new Event('navfor_folders_updated'));
+
     if (user) {
       try {
         const folderDocId = getFolderDocId(user.uid, activeSection, path);
@@ -3373,6 +3440,31 @@ export default function App() {
     const affectedTasks = sectionTasks.filter(t => isInsideFolder(t.project));
     const now = Date.now();
 
+    // 1. Optimistically and synchronously update folderMetas
+    const currentMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
+    const nextMetas: Record<string, FolderMeta> = { ...currentMetas };
+    if (!nextMetas[folderPath]) {
+      nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Archive', updatedAt: now };
+    }
+    Object.keys(nextMetas).forEach(p => {
+      if (isInsideFolder(p)) {
+        nextMetas[p] = { ...nextMetas[p], section: activeSection, category: 'Archive', updatedAt: now };
+      }
+    });
+    folderMetasRef.current = nextMetas;
+    allFolderMetasRef.current = {
+      ...allFolderMetasRef.current,
+      [activeSection]: nextMetas
+    };
+    setAllFolderMetas(prev => ({
+      ...prev,
+      [activeSection]: nextMetas
+    }));
+    syncLocalFolderMetas(nextMetas, activeSection);
+
+    // 2. Optimistically update local tasks
+    syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Archive', updatedAt: now } : t));
+
     if (user) {
       try {
         const batch = writeBatch(db);
@@ -3380,12 +3472,7 @@ export default function App() {
           batch.update(doc(db, 'tasks', t.id), { category: 'Archive', updatedAt: now });
         });
 
-        // Update folder meta and all subfolder metas in activeSection
-        const currentMetas: Record<string, FolderMeta> = { ...folderMetas };
-        if (!currentMetas[folderPath]) {
-          currentMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Archive' };
-        }
-        (Object.entries(currentMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
+        (Object.entries(nextMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
           if (isInsideFolder(p)) {
             const folderDocId = getFolderDocId(user.uid, activeSection, p);
             batch.set(doc(db, 'folders', folderDocId), {
@@ -3402,19 +3489,30 @@ export default function App() {
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
       }
-    } else {
-      syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Archive', updatedAt: now } : t));
-      const nextMetas = { ...folderMetas };
-      if (!nextMetas[folderPath]) {
-        nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Archive' };
-      }
-      Object.keys(nextMetas).forEach(p => {
-        if (isInsideFolder(p)) {
-          nextMetas[p] = { ...nextMetas[p], section: activeSection, category: 'Archive', updatedAt: now };
-        }
-      });
-      syncLocalFolderMetas(nextMetas, activeSection);
     }
+
+    // Close any tabs related to this folder or tasks inside it
+    const isTabInFolder = (tabId: string) => {
+      if (tabId === `folder:${folderPath}` || tabId.startsWith(`folder:${folderPath}/`)) return true;
+      const t = sectionTasks.find(task => task.id === tabId);
+      return t ? isInsideFolder(t.project) : false;
+    };
+    setOpenTaskIds(prev => prev.filter(id => !isTabInFolder(id)));
+    if (activeTabTaskId && isTabInFolder(activeTabTaskId)) {
+      setActiveTabTaskId(null);
+    }
+
+    // Clean up custom folders in localStorage
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const folders: string[] = JSON.parse(saved);
+        const updated = folders.filter(f => !isInsideFolder(f));
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+        window.dispatchEvent(new Event('navfor_folders_updated'));
+      }
+    } catch {}
 
     setMessage({
       text: L(
@@ -3434,6 +3532,31 @@ export default function App() {
     const affectedTasks = sectionTasks.filter(t => isInsideFolder(t.project));
     const now = Date.now();
 
+    // 1. Optimistically and synchronously update folderMetas
+    const currentMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
+    const nextMetas: Record<string, FolderMeta> = { ...currentMetas };
+    if (!nextMetas[folderPath]) {
+      nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Trash', updatedAt: now };
+    }
+    Object.keys(nextMetas).forEach(p => {
+      if (isInsideFolder(p)) {
+        nextMetas[p] = { ...nextMetas[p], section: activeSection, category: 'Trash', updatedAt: now };
+      }
+    });
+    folderMetasRef.current = nextMetas;
+    allFolderMetasRef.current = {
+      ...allFolderMetasRef.current,
+      [activeSection]: nextMetas
+    };
+    setAllFolderMetas(prev => ({
+      ...prev,
+      [activeSection]: nextMetas
+    }));
+    syncLocalFolderMetas(nextMetas, activeSection);
+
+    // 2. Optimistically update local tasks
+    syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Trash', updatedAt: now } : t));
+
     if (user) {
       try {
         const batch = writeBatch(db);
@@ -3441,12 +3564,7 @@ export default function App() {
           batch.update(doc(db, 'tasks', t.id), { category: 'Trash', updatedAt: now });
         });
 
-        // Update folder meta and subfolder metas in activeSection
-        const currentMetas: Record<string, FolderMeta> = { ...folderMetas };
-        if (!currentMetas[folderPath]) {
-          currentMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Trash' };
-        }
-        (Object.entries(currentMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
+        (Object.entries(nextMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
           if (isInsideFolder(p)) {
             const folderDocId = getFolderDocId(user.uid, activeSection, p);
             batch.set(doc(db, 'folders', folderDocId), {
@@ -3463,18 +3581,6 @@ export default function App() {
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
       }
-    } else {
-      syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Trash', updatedAt: now } : t));
-      const nextMetas = { ...folderMetas };
-      if (!nextMetas[folderPath]) {
-        nextMetas[folderPath] = { path: folderPath, section: activeSection, category: 'Trash' };
-      }
-      Object.keys(nextMetas).forEach(p => {
-        if (isInsideFolder(p)) {
-          nextMetas[p] = { ...nextMetas[p], section: activeSection, category: 'Trash', updatedAt: now };
-        }
-      });
-      syncLocalFolderMetas(nextMetas, activeSection);
     }
 
     // Close any tabs related to this folder or tasks inside it
@@ -3494,7 +3600,7 @@ export default function App() {
       const saved = localStorage.getItem(storageKey);
       if (saved) {
         const folders: string[] = JSON.parse(saved);
-        const updated = folders.filter(f => f !== folderPath && !f.startsWith(folderPath + '/'));
+        const updated = folders.filter(f => !isInsideFolder(f));
         localStorage.setItem(storageKey, JSON.stringify(updated));
         window.dispatchEvent(new Event('navfor_folders_updated'));
       }
@@ -3510,99 +3616,226 @@ export default function App() {
     });
   };
 
-  const handleRenameFolder = async (oldFolderPath: string, newFolderPath: string) => {
-    if (!oldFolderPath || !newFolderPath || oldFolderPath === newFolderPath) return;
+  const handleRenameFolder = async (oldFolderPath: string, newFolderPath: string, newTitle?: string) => {
+    if (!oldFolderPath || !newFolderPath) return;
+    const resolvedNewTitle = (newTitle || '').trim() || (newFolderPath.split('/').pop() || newFolderPath);
+    if (oldFolderPath === newFolderPath && !newTitle) return;
     pushToHistory();
 
-    const affectedTasks = sectionTasks.filter(t => 
-      t.project === oldFolderPath || t.project.startsWith(oldFolderPath + '/')
-    );
+    const now = Date.now();
 
+    // 1. Optimistically and synchronously update tasks state and ref
+    let affectedTasks: Task[] = [];
+    let updatedTasksList = tasks;
+    if (oldFolderPath !== newFolderPath) {
+      affectedTasks = sectionTasks.filter(t => 
+        t.project === oldFolderPath || t.project.startsWith(oldFolderPath + '/')
+      );
+
+      updatedTasksList = tasks.map(t => {
+        if (getTaskSection(t) !== activeSection) return t;
+        if (t.project === oldFolderPath) {
+          return { ...t, project: newFolderPath, updatedAt: now };
+        }
+        if (t.project.startsWith(oldFolderPath + '/')) {
+          return { ...t, project: newFolderPath + t.project.slice(oldFolderPath.length), updatedAt: now };
+        }
+        return t;
+      });
+
+      setTasks(updatedTasksList);
+      tasksRef.current = updatedTasksList;
+    }
+
+    // 2. Optimistically and synchronously update folderMetas map for activeSection
+    const currentMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
+    const nextMetas = { ...currentMetas };
+    const oldKeysRemoved: string[] = [];
+    Object.keys(nextMetas).forEach(k => {
+      if (k === oldFolderPath || k.startsWith(oldFolderPath + '/')) {
+        const newKey = k === oldFolderPath ? newFolderPath : newFolderPath + k.slice(oldFolderPath.length);
+        const folderTitle = k === oldFolderPath
+          ? resolvedNewTitle
+          : (nextMetas[k]?.title || newKey.split('/').pop() || newKey);
+        nextMetas[newKey] = {
+          ...nextMetas[k],
+          path: newKey,
+          section: activeSection,
+          title: folderTitle,
+          updatedAt: now
+        };
+        if (newKey !== k) {
+          delete nextMetas[k];
+          oldKeysRemoved.push(k);
+        }
+      }
+    });
+
+    if (!nextMetas[newFolderPath]) {
+      nextMetas[newFolderPath] = {
+        path: newFolderPath,
+        section: activeSection,
+        title: resolvedNewTitle,
+        category: 'Focus',
+        createdAt: now,
+        updatedAt: now
+      };
+    } else {
+      nextMetas[newFolderPath] = {
+        ...nextMetas[newFolderPath],
+        title: resolvedNewTitle,
+        path: newFolderPath,
+        updatedAt: now
+      };
+    }
+
+    allFolderMetasRef.current = {
+      ...allFolderMetasRef.current,
+      [activeSection]: nextMetas
+    };
+    folderMetasRef.current = nextMetas;
+    setAllFolderMetas(prev => ({
+      ...prev,
+      [activeSection]: nextMetas
+    }));
+
+    try {
+      localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify({
+        ...allFolderMetasRef.current,
+        [activeSection]: nextMetas
+      }));
+    } catch {}
+
+    // 3. Optimistically and synchronously update customFolders in localStorage
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      const folders: string[] = saved ? JSON.parse(saved) : [];
+      const updated = folders.map(f => {
+        if (f === oldFolderPath) return newFolderPath;
+        if (f.startsWith(oldFolderPath + '/')) return newFolderPath + f.slice(oldFolderPath.length);
+        return f;
+      });
+      if (!updated.includes(newFolderPath)) {
+        updated.push(newFolderPath);
+      }
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+    } catch {}
+
+    // 4. Optimistically and synchronously update tabs, panes, and collapsed states
+    if (oldFolderPath !== newFolderPath) {
+      setOpenTaskIds(prev => {
+        const updated = prev.map(id => {
+          if (id === `folder:${oldFolderPath}`) return `folder:${newFolderPath}`;
+          if (id.startsWith(`folder:${oldFolderPath}/`)) return `folder:${newFolderPath}${id.slice(`folder:${oldFolderPath}`.length)}`;
+          return id;
+        });
+        try {
+          localStorage.setItem(`navfor_open_tabs_${activeSection}`, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+
+      setActiveTabTaskId(prev => {
+        let updated = prev;
+        if (prev === `folder:${oldFolderPath}`) {
+          updated = `folder:${newFolderPath}`;
+        } else if (prev && prev.startsWith(`folder:${oldFolderPath}/`)) {
+          updated = `folder:${newFolderPath}${prev.slice(`folder:${oldFolderPath}`.length)}`;
+        }
+        if (updated) {
+          try {
+            localStorage.setItem(`navfor_active_tab_${activeSection}`, updated);
+          } catch {}
+        }
+        return updated;
+      });
+
+      try {
+        const panesKey = `navfor_editor_panes_${activeSection}`;
+        const savedPanes = localStorage.getItem(panesKey);
+        if (savedPanes) {
+          const parsedPanes = JSON.parse(savedPanes);
+          if (Array.isArray(parsedPanes)) {
+            const nextPanes = parsedPanes.map((p: any) => ({
+              ...p,
+              openTaskIds: (p.openTaskIds || []).map((id: string) => {
+                if (id === `folder:${oldFolderPath}`) return `folder:${newFolderPath}`;
+                if (id.startsWith(`folder:${oldFolderPath}/`)) return `folder:${newFolderPath}${id.slice(`folder:${oldFolderPath}`.length)}`;
+                return id;
+              }),
+              activeTaskId: p.activeTaskId === `folder:${oldFolderPath}`
+                ? `folder:${newFolderPath}`
+                : (p.activeTaskId && p.activeTaskId.startsWith(`folder:${oldFolderPath}/`))
+                  ? `folder:${newFolderPath}${p.activeTaskId.slice(`folder:${oldFolderPath}`.length)}`
+                  : p.activeTaskId,
+              previewTaskId: p.previewTaskId === `folder:${oldFolderPath}`
+                ? `folder:${newFolderPath}`
+                : (p.previewTaskId && p.previewTaskId.startsWith(`folder:${oldFolderPath}/`))
+                  ? `folder:${newFolderPath}${p.previewTaskId.slice(`folder:${oldFolderPath}`.length)}`
+                  : p.previewTaskId
+            }));
+            localStorage.setItem(panesKey, JSON.stringify(nextPanes));
+          }
+        }
+      } catch {}
+
+      try {
+        const collapsedKey = `navfor_collapsed_${activeSection}`;
+        const savedCollapsed = localStorage.getItem(collapsedKey);
+        if (savedCollapsed) {
+          const parsed: string[] = JSON.parse(savedCollapsed);
+          const updatedCollapsed = parsed.map(p => {
+            if (p === oldFolderPath) return newFolderPath;
+            if (p.startsWith(oldFolderPath + '/')) return newFolderPath + p.slice(oldFolderPath.length);
+            return p;
+          });
+          localStorage.setItem(collapsedKey, JSON.stringify(updatedCollapsed));
+        }
+      } catch {}
+    }
+
+    // 5. Instantly and synchronously dispatch navfor_folders_updated so Timeline re-renders immediately without any ghost folder
+    window.dispatchEvent(new Event('navfor_folders_updated'));
+
+    // 6. Background async Firestore commit
     if (user) {
       try {
         const batch = writeBatch(db);
-        affectedTasks.forEach(t => {
-          const updatedProject = t.project === oldFolderPath 
-            ? newFolderPath 
-            : newFolderPath + t.project.slice(oldFolderPath.length);
-          batch.update(doc(db, 'tasks', t.id), { project: updatedProject, updatedAt: Date.now() });
+        if (oldFolderPath !== newFolderPath && affectedTasks.length > 0) {
+          affectedTasks.forEach(t => {
+            const updatedProject = t.project === oldFolderPath 
+              ? newFolderPath 
+              : newFolderPath + t.project.slice(oldFolderPath.length);
+            batch.update(doc(db, 'tasks', t.id), { project: updatedProject, updatedAt: now });
+          });
+        }
+        oldKeysRemoved.forEach(oldK => {
+          const oldDocId = getFolderDocId(user.uid, activeSection, oldK);
+          batch.delete(doc(db, 'folders', oldDocId));
+        });
+        (Object.entries(nextMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
+          if (p === newFolderPath || p.startsWith(newFolderPath + '/')) {
+            const folderDocId = getFolderDocId(user.uid, activeSection, p);
+            batch.set(doc(db, 'folders', folderDocId), {
+              ...meta,
+              path: p,
+              section: activeSection,
+              title: meta.title,
+              userId: user.uid,
+              updatedAt: now
+            }, { merge: true });
+          }
         });
         await batch.commit();
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `folders/${oldFolderPath}`);
       }
     } else {
-      syncLocalTasks(tasks.map(t => {
-        if (getTaskSection(t) !== activeSection) return t;
-        if (t.project === oldFolderPath) {
-          return { ...t, project: newFolderPath, updatedAt: Date.now() };
-        }
-        if (t.project.startsWith(oldFolderPath + '/')) {
-          return { ...t, project: newFolderPath + t.project.slice(oldFolderPath.length), updatedAt: Date.now() };
-        }
-        return t;
-      }));
-    }
-
-    // Update folderMetas map for activeSection
-    const nextMetas = { ...folderMetas };
-    const oldKeysRemoved: string[] = [];
-    let metasChanged = false;
-    Object.keys(nextMetas).forEach(k => {
-      if (k === oldFolderPath || k.startsWith(oldFolderPath + '/')) {
-        const newKey = k === oldFolderPath ? newFolderPath : newFolderPath + k.slice(oldFolderPath.length);
-        nextMetas[newKey] = { ...nextMetas[k], path: newKey, section: activeSection, updatedAt: Date.now() };
-        delete nextMetas[k];
-        oldKeysRemoved.push(k);
-        metasChanged = true;
+      if (oldFolderPath !== newFolderPath) {
+        syncLocalTasks(updatedTasksList);
       }
-    });
-    if (metasChanged) {
-      setAllFolderMetas(prev => ({
-        ...prev,
-        [activeSection]: nextMetas
-      }));
-      if (user) {
-        // Also update / migrate folder docs in Firestore and delete old folder docs
-        try {
-          const batch = writeBatch(db);
-          oldKeysRemoved.forEach(oldK => {
-            const oldDocId = getFolderDocId(user.uid, activeSection, oldK);
-            batch.delete(doc(db, 'folders', oldDocId));
-          });
-          (Object.entries(nextMetas) as [string, FolderMeta][]).forEach(([p, meta]) => {
-            if (p === newFolderPath || p.startsWith(newFolderPath + '/')) {
-              const folderDocId = getFolderDocId(user.uid, activeSection, p);
-              batch.set(doc(db, 'folders', folderDocId), {
-                ...meta,
-                path: p,
-                section: activeSection,
-                userId: user.uid,
-                updatedAt: Date.now()
-              }, { merge: true });
-            }
-          });
-          await batch.commit();
-        } catch (e) {
-          console.error('Failed to update folder doc in firestore', e);
-        }
-      } else {
-        syncLocalFolderMetas(nextMetas, activeSection);
-      }
-    }
-
-    // Update any open tab IDs that reference this folder
-    setOpenTaskIds(prev => prev.map(id => {
-      if (id === `folder:${oldFolderPath}`) return `folder:${newFolderPath}`;
-      if (id.startsWith(`folder:${oldFolderPath}/`)) return `folder:${newFolderPath}${id.slice(`folder:${oldFolderPath}`.length)}`;
-      return id;
-    }));
-    if (activeTabTaskId) {
-      if (activeTabTaskId === `folder:${oldFolderPath}`) {
-        setActiveTabTaskId(`folder:${newFolderPath}`);
-      } else if (activeTabTaskId.startsWith(`folder:${oldFolderPath}/`)) {
-        setActiveTabTaskId(`folder:${newFolderPath}${activeTabTaskId.slice(`folder:${oldFolderPath}`.length)}`);
-      }
+      syncLocalFolderMetas(nextMetas, activeSection);
     }
   };
 
@@ -6553,6 +6786,7 @@ export default function App() {
                   onTogglePin={togglePin}
                   onDuplicateTask={handleDuplicateTask}
                   folderMetas={folderMetas}
+                  onRenameFolder={handleRenameFolder}
                   onUpdateFolderMeta={updateFolderMeta}
                   onArchiveFolder={handleArchiveFolder}
                   onTrashFolder={handleTrashFolder}

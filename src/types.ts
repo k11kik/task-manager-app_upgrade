@@ -30,6 +30,7 @@ export interface Task {
   timelineColumn?: string; // custom abstract timeline column/stage
   timelineStep?: number; // custom step/slot index within phase/stage for grid positioning
   timelinePresetColumns?: Record<string, string>; // presetKey -> columnId mapping
+  timelinePresetSteps?: Record<string, number>; // presetKey -> step index mapping
 }
 
 export interface TaskHistory {

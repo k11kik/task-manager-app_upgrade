@@ -50,7 +50,7 @@ interface TaskExplorerTreeProps {
   onMoveTask: (taskId: string, category: Category) => void;
   onMoveTaskFolder: (taskId: string, newProject: string) => void;
   onMoveFolder?: (sourceFolderPath: string, targetFolderPath: string) => void;
-  onRenameFolder?: (oldFolderPath: string, newFolderPath: string) => void;
+  onRenameFolder?: (oldFolderPath: string, newFolderPath: string, newTitle?: string) => void;
   onDeleteFolder?: (folderPath: string) => void;
   onDuplicateFolder?: (folderPath: string) => void;
   onRenameTask?: (taskId: string, newTitle: string) => void;
@@ -302,11 +302,22 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       return current;
     };
 
+    // Helper to check if a folder path or any of its ancestors is marked as Trash/Archive
+    const isTrashedOrArchived = (path: string): boolean => {
+      const parts = path.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+      let cur = '';
+      for (const part of parts) {
+        cur = cur ? `${cur}/${part}` : part;
+        const cat = folderMetas?.[cur]?.category;
+        if (cat === 'Trash' || cat === 'Archive') return true;
+      }
+      return false;
+    };
+
     // Include custom folders (excluding trashed/archived folders)
     customFolders.forEach(folderPath => {
       if (!folderPath) return;
-      const meta = folderMetas?.[folderPath];
-      if (meta?.category === 'Trash' || meta?.category === 'Archive') return;
+      if (isTrashedOrArchived(folderPath)) return;
       const parts = folderPath.split('/').map(p => p.trim()).filter(Boolean);
       getOrCreateFolder(parts);
     });
@@ -315,8 +326,21 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     Object.values(folderMetas || {}).forEach((meta: FolderMeta) => {
       if (!meta || !meta.path) return;
       if (meta.category === 'Trash' || meta.category === 'Archive') return;
+      if (isTrashedOrArchived(meta.path)) return;
       if (meta.section && meta.section !== activeSection) return;
       const parts = meta.path.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+      if (parts.length > 0) {
+        getOrCreateFolder(parts);
+      }
+    });
+
+    // Include all folders from active/backlog tasks in this workspace
+    tasks.forEach(task => {
+      if (task.category === 'Trash' || task.category === 'Archive') return;
+      const proj = task.project?.trim();
+      if (!proj || proj === 'General') return;
+      if (isTrashedOrArchived(proj)) return;
+      const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       if (parts.length > 0) {
         getOrCreateFolder(parts);
       }
@@ -909,17 +933,31 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     try {
       if (type === 'folder') {
         const newFolderPath = path ? `${path}/${value}` : value;
-        if (!customFolders.includes(newFolderPath)) {
-          const next = [...customFolders, newFolderPath];
-          saveCustomFolders(next);
-        }
-        if (!folderMetas?.[newFolderPath]?.createdAt) {
-          onUpdateFolderMeta?.(newFolderPath, { createdAt: Date.now() });
-        }
+        const next = customFolders.includes(newFolderPath)
+          ? customFolders
+          : [...customFolders, newFolderPath];
+        saveCustomFolders(next);
+
+        onUpdateFolderMeta?.(newFolderPath, {
+          category: 'Focus',
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        });
+
+        // Ensure any parent segments are active as well
+        const segments = newFolderPath.split('/').filter(Boolean);
+        let acc = '';
+        segments.forEach(seg => {
+          acc = acc ? `${acc}/${seg}` : seg;
+          if (folderMetas?.[acc]?.category === 'Trash' || folderMetas?.[acc]?.category === 'Archive') {
+            onUpdateFolderMeta?.(acc, { category: 'Focus', updatedAt: Date.now() });
+          }
+        });
+
         if (path && collapsedFolders.has(path)) {
-          const next = new Set<string>(collapsedFolders);
-          next.delete(path);
-          saveCollapsed(next);
+          const nextSet = new Set<string>(collapsedFolders);
+          nextSet.delete(path);
+          saveCollapsed(nextSet);
         }
         setSelectedKey(`folder:${newFolderPath}`);
       } else {
@@ -973,7 +1011,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           const parts = oldPath.split('/');
           parts[parts.length - 1] = val;
           const newPath = parts.join('/');
-          onRenameFolder(oldPath, newPath);
+          onRenameFolder(oldPath, newPath, val);
           // Also update customFolders
           const updatedCustom = customFolders.map(f => {
             if (f === oldPath) return newPath;
@@ -1288,11 +1326,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
             <span 
               onDoubleClick={(e) => {
                 e.stopPropagation();
-                startRenaming('folder', node.fullPath, node.name);
+                startRenaming('folder', node.fullPath, folderMeta?.title || node.name);
               }}
               className="truncate flex-1 font-mono tracking-tight text-[11.5px]"
             >
-              {node.name}
+              {folderMeta?.title || node.name}
             </span>
           )}
 

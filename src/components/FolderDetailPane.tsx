@@ -29,6 +29,7 @@ export interface FolderDetailPaneProps {
   folderMeta: FolderMeta;
   folderMetas: Record<string, FolderMeta>;
   tasks: Task[];
+  onRenameFolder?: (oldFolderPath: string, newFolderPath: string, newTitle?: string) => void;
   onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onArchiveFolder?: (folderPath: string) => void;
   onTrashFolder?: (folderPath: string) => void;
@@ -51,6 +52,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
   folderMeta,
   folderMetas,
   tasks,
+  onRenameFolder,
   onUpdateFolderMeta,
   onArchiveFolder,
   onTrashFolder,
@@ -107,6 +109,8 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
   const dirtyNotesRef = useRef<{ folderPath: string; tabId: string; value: string } | null>(null);
   const onUpdateFolderMetaRef = useRef(onUpdateFolderMeta);
   onUpdateFolderMetaRef.current = onUpdateFolderMeta;
+  const onRenameFolderRef = useRef(onRenameFolder);
+  onRenameFolderRef.current = onRenameFolder;
   const onPinTabRef = useRef(onPinTab);
   onPinTabRef.current = onPinTab;
 
@@ -120,7 +124,18 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
         if (trimmed && trimmed !== lastSavedTitleRef.current) {
           lastSavedTitleRef.current = trimmed;
           onPinTabRef.current(tId);
-          onUpdateFolderMetaRef.current?.(fp, { title: trimmed });
+          const safeName = trimmed.replace(/[\/\\]/g, '-').trim();
+          const parts = fp.split('/');
+          parts[parts.length - 1] = safeName || trimmed;
+          const newFp = parts.join('/');
+          if (onRenameFolderRef.current && newFp !== fp) {
+            onRenameFolderRef.current(fp, newFp, trimmed);
+          } else {
+            if (onRenameFolderRef.current) {
+              onRenameFolderRef.current(fp, fp, trimmed);
+            }
+            onUpdateFolderMetaRef.current?.(fp, { title: trimmed });
+          }
         }
       }
       if (dirtyNotesRef.current) {
@@ -203,7 +218,20 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
     if (!trimmed || trimmed === lastSavedTitleRef.current) return;
     lastSavedTitleRef.current = trimmed;
     onPinTab(tabId);
-    onUpdateFolderMeta?.(folderPath, { title: trimmed });
+
+    const safeName = trimmed.replace(/[\/\\]/g, '-').trim();
+    const parts = folderPath.split('/');
+    parts[parts.length - 1] = safeName || trimmed;
+    const newFolderPath = parts.join('/');
+
+    if (onRenameFolder && newFolderPath !== folderPath) {
+      onRenameFolder(folderPath, newFolderPath, trimmed);
+    } else {
+      if (onRenameFolder) {
+        onRenameFolder(folderPath, folderPath, trimmed);
+      }
+      onUpdateFolderMeta?.(folderPath, { title: trimmed });
+    }
     triggerSaveNotice();
   };
 

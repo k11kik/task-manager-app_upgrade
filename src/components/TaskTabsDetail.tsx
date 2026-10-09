@@ -64,6 +64,7 @@ export interface TaskTabsDetailProps {
   onTogglePin: (taskId: string) => void;
   onDuplicateTask?: (task: Task) => void;
   folderMetas?: Record<string, FolderMeta>;
+  onRenameFolder?: (oldFolderPath: string, newFolderPath: string, newTitle?: string) => void;
   onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onArchiveFolder?: (folderPath: string) => void;
   onTrashFolder?: (folderPath: string) => void;
@@ -109,6 +110,7 @@ interface SinglePaneProps {
   onTogglePin: (taskId: string) => void;
   onDuplicateTask?: (task: Task) => void;
   folderMetas?: Record<string, FolderMeta>;
+  onRenameFolder?: (oldFolderPath: string, newFolderPath: string, newTitle?: string) => void;
   onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onArchiveFolder?: (folderPath: string) => void;
   onTrashFolder?: (folderPath: string) => void;
@@ -149,6 +151,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   onTogglePin,
   onDuplicateTask,
   folderMetas,
+  onRenameFolder,
   onUpdateFolderMeta,
   onArchiveFolder,
   onTrashFolder,
@@ -832,6 +835,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
           folderMeta={activeFolderMeta}
           folderMetas={folderMetas || {}}
           tasks={tasks}
+          onRenameFolder={onRenameFolder}
           onUpdateFolderMeta={onUpdateFolderMeta}
           onArchiveFolder={onArchiveFolder}
           onTrashFolder={onTrashFolder}
@@ -1569,6 +1573,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   onTogglePin,
   onDuplicateTask,
   folderMetas,
+  onRenameFolder,
   onUpdateFolderMeta,
   onArchiveFolder,
   onTrashFolder,
@@ -2315,8 +2320,64 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
+  const handleRenameFolderFromDetail = (oldFolderPath: string, newFolderPath: string, newTitle?: string) => {
+    const oldTabId = `folder:${oldFolderPath}`;
+    const newTabId = `folder:${newFolderPath}`;
+
+    setPanes(prevPanes => {
+      const nextPanes = prevPanes.map(p => {
+        const nextOpen = p.openTaskIds.map(id => {
+          if (id === oldTabId) return newTabId;
+          if (id.startsWith(oldTabId + '/')) return newTabId + id.slice(oldTabId.length);
+          return id;
+        });
+        let nextActive = p.activeTaskId;
+        if (nextActive === oldTabId) nextActive = newTabId;
+        else if (nextActive && nextActive.startsWith(oldTabId + '/')) nextActive = newTabId + nextActive.slice(oldTabId.length);
+
+        let nextPreview = p.previewTaskId;
+        if (nextPreview === oldTabId) nextPreview = newTabId;
+        else if (nextPreview && nextPreview.startsWith(oldTabId + '/')) nextPreview = newTabId + nextPreview.slice(oldTabId.length);
+
+        return {
+          ...p,
+          openTaskIds: nextOpen,
+          activeTaskId: nextActive,
+          previewTaskId: nextPreview
+        };
+      });
+
+      const allOpen = Array.from(new Set(nextPanes.flatMap(p => p.openTaskIds)));
+      try {
+        localStorage.setItem(panesStorageKey, JSON.stringify(nextPanes));
+        localStorage.setItem(openTabsStorageKey, JSON.stringify(allOpen));
+        const activePane = nextPanes.find(p => p.id === activePaneId) || nextPanes[0];
+        if (activePane?.activeTaskId) {
+          localStorage.setItem(activeTabStorageKey, activePane.activeTaskId);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+
+      if (onOpenTaskIdsChange) {
+        onOpenTaskIdsChange(allOpen);
+      }
+
+      return nextPanes;
+    });
+
+    if (onSelectTask) {
+      onSelectTask(newTabId, true);
+    }
+
+    if (onRenameFolder) {
+      onRenameFolder(oldFolderPath, newFolderPath, newTitle);
+    }
+  };
+
   const commonFolderProps = {
     folderMetas,
+    onRenameFolder: handleRenameFolderFromDetail,
     onUpdateFolderMeta,
     onArchiveFolder,
     onTrashFolder,
