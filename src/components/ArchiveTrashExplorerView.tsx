@@ -34,6 +34,7 @@ interface ArchiveTrashExplorerViewProps {
   mode: 'archive' | 'trash';
   tasks: Task[];
   onRestore: (taskId: string, targetCategory?: Category) => void;
+  onRestoreFolder?: (folderPath: string) => void;
   onPermanentDelete: (taskId: string) => void;
   onMoveToTrash?: (taskId: string) => void;
   onSelectTask: (taskId: string, isPermanent?: boolean) => void;
@@ -53,6 +54,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
   mode,
   tasks,
   onRestore,
+  onRestoreFolder,
   onPermanentDelete,
   onMoveToTrash,
   onSelectTask,
@@ -315,7 +317,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
           {/* Restore Button */}
           <button
             type="button"
-            onClick={() => onRestore(task.id, isTrash ? 'Backlog' as any : 'Focus')}
+            onClick={() => onRestore(task.id, 'Focus')}
             className="p-1 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded transition-colors"
             title={isTrash ? L("ToDoリストへ復元", "Restore to ToDo List", "Restaurer vers la liste ToDo") : L("アクティブタスクへ復元", "Restore to Active Tasks", "Restaurer vers les tâches actives")}
           >
@@ -413,7 +415,21 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+            {onRestoreFolder && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRestoreFolder(node.fullPath);
+                }}
+                className="px-2 py-0.5 rounded-md bg-white hover:bg-indigo-50 text-indigo-700 hover:text-indigo-800 border border-slate-200/90 hover:border-indigo-300 text-[10px] font-bold flex items-center gap-1 shadow-2xs transition-all"
+                title={L("フォルダと内包タスクをToDoへ復元", "Restore folder and all tasks to ToDo", "Restaurer le dossier et les tâches vers ToDo")}
+              >
+                <RotateCcw size={11} />
+                <span>{L("ToDoへ復元", "Restore", "Restaurer")}</span>
+              </button>
+            )}
+            <span className="text-[10px] text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hidden sm:inline">
               {isCollapsed ? L("クリックで展開", "Click to expand", "Cliquer pour développer") : L("クリックで折畳", "Click to collapse", "Cliquer pour réduire")}
             </span>
           </div>

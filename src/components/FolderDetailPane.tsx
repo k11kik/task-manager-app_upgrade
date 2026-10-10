@@ -17,7 +17,8 @@ import {
   X, 
   CheckCircle2, 
   FileText,
-  AlertCircle
+  AlertCircle,
+  RotateCcw
 } from 'lucide-react';
 import { Task, RecurrenceType, TaskRecurrence, FolderMeta } from '../types';
 import { cn, tr } from '../lib/utils';
@@ -33,6 +34,7 @@ export interface FolderDetailPaneProps {
   onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onArchiveFolder?: (folderPath: string) => void;
   onTrashFolder?: (folderPath: string) => void;
+  onRestoreFolder?: (folderPath: string) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   onSelectTab: (id: string) => void;
@@ -56,6 +58,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
   onUpdateFolderMeta,
   onArchiveFolder,
   onTrashFolder,
+  onRestoreFolder,
   onToggleFolderStar,
   onToggleFolderPin,
   onSelectTab,
@@ -475,8 +478,37 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
           </div>
         </div>
 
-        {/* Badges (Star / Pin) - Notice NO ToDo/Focus buttons per user request */}
+        {/* Badges (Star / Pin / Trash / Archive / Restore) */}
         <div className="flex flex-wrap items-center gap-1.5 pt-0.5 border-b border-slate-100 pb-2.5">
+          {/* Archive / Trash Status & Restore Badge */}
+          {(folderMeta?.category === 'Archive' || folderMeta?.category === 'Trash') && (
+            <div className="flex items-center gap-1">
+              <span className={cn(
+                "px-2 py-0.5 rounded-md text-[11px] font-bold flex items-center gap-1 border",
+                folderMeta.category === 'Trash'
+                  ? "bg-red-50 text-red-700 border-red-200"
+                  : "bg-slate-100 text-slate-700 border-slate-200"
+              )}>
+                {folderMeta.category === 'Trash' ? <Trash2 size={11} /> : <Archive size={11} />}
+                <span>{folderMeta.category === 'Trash' ? L('ゴミ箱内', 'In Trash', 'Corbeille') : L('アーカイブ済', 'Archived', 'Archivé')}</span>
+              </span>
+              {onRestoreFolder && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onPinTab(tabId);
+                    onRestoreFolder(folderPath);
+                  }}
+                  className="px-2 py-0.5 rounded-md bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-bold flex items-center gap-1 transition-colors"
+                  title={L('フォルダと中身をToDoへ復元', 'Restore to ToDo', 'Restaurer vers ToDo')}
+                >
+                  <RotateCcw size={11} />
+                  <span>{L('ToDoへ復元', 'Restore', 'Restaurer')}</span>
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Star Button */}
           <button
             type="button"
@@ -882,33 +914,50 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
           )}
         </div>
 
-        {/* Bottom Actions: Archive Folder and Trash Folder */}
+        {/* Bottom Actions: Archive Folder / Trash Folder or Restore Folder */}
         <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
-          <button
-            type="button"
-            onClick={() => {
-              onPinTab(tabId);
-              onArchiveFolder?.(folderPath);
-            }}
-            className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
-            title={L('このフォルダと中身のタスク全体をアーカイブします', 'Archive folder and all contents', 'Archiver le dossier et tout son contenu')}
-          >
-            <Archive size={11} />
-            <span>{L('フォルダをアーカイブ', 'Archive Folder', 'Archiver le dossier')}</span>
-          </button>
+          {(folderMeta?.category === 'Archive' || folderMeta?.category === 'Trash') ? (
+            <button
+              type="button"
+              onClick={() => {
+                onPinTab(tabId);
+                onRestoreFolder?.(folderPath);
+              }}
+              className="px-2.5 py-1 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors flex items-center gap-1.5 text-[11px] font-semibold"
+              title={L('このフォルダと中身のタスク全体をToDoへ復元します', 'Restore folder and all contents to ToDo', 'Restaurer le dossier et tout son contenu vers ToDo')}
+            >
+              <RotateCcw size={12} />
+              <span>{L('フォルダと中身をToDoへ復元', 'Restore Folder & Tasks to ToDo', 'Restaurer le dossier et les tâches')}</span>
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  onPinTab(tabId);
+                  onArchiveFolder?.(folderPath);
+                }}
+                className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
+                title={L('このフォルダと中身のタスク全体をアーカイブします', 'Archive folder and all contents', 'Archiver le dossier et tout son contenu')}
+              >
+                <Archive size={11} />
+                <span>{L('フォルダをアーカイブ', 'Archive Folder', 'Archiver le dossier')}</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              onTrashFolder?.(folderPath);
-              onCloseTab(tabId);
-            }}
-            className="px-2 py-1 text-red-600 hover:bg-red-50 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
-            title={L('このフォルダと中身のタスク全体をゴミ箱へ移動します', 'Move folder and all contents to trash', 'Mettre le dossier et tout son contenu à la corbeille')}
-          >
-            <Trash2 size={11} />
-            <span>{L('フォルダをゴミ箱へ', 'Trash Folder', 'Mettre le dossier à la corbeille')}</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onTrashFolder?.(folderPath);
+                  onCloseTab(tabId);
+                }}
+                className="px-2 py-1 text-red-600 hover:bg-red-50 rounded-md transition-colors flex items-center gap-1 text-[11px] font-medium"
+                title={L('このフォルダと中身のタスク全体をゴミ箱へ移動します', 'Move folder and all contents to trash', 'Mettre le dossier et tout son contenu à la corbeille')}
+              >
+                <Trash2 size={11} />
+                <span>{L('フォルダをゴミ箱へ', 'Trash Folder', 'Mettre le dossier à la corbeille')}</span>
+              </button>
+            </>
+          )}
         </div>
 
         {/* Folder Timestamps (Folder Created & Latest Child File Updated) at the very bottom */}

@@ -68,6 +68,7 @@ export interface TaskTabsDetailProps {
   onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onArchiveFolder?: (folderPath: string) => void;
   onTrashFolder?: (folderPath: string) => void;
+  onRestoreFolder?: (folderPath: string) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   onShowMessage?: (msg: { text: string; type: 'error' | 'info' }) => void;
@@ -114,6 +115,7 @@ interface SinglePaneProps {
   onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
   onArchiveFolder?: (folderPath: string) => void;
   onTrashFolder?: (folderPath: string) => void;
+  onRestoreFolder?: (folderPath: string) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   onShowMessage?: (msg: { text: string; type: 'error' | 'info' }) => void;
@@ -155,6 +157,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   onUpdateFolderMeta,
   onArchiveFolder,
   onTrashFolder,
+  onRestoreFolder,
   onToggleFolderStar,
   onToggleFolderPin,
   onShowMessage,
@@ -839,6 +842,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
           onUpdateFolderMeta={onUpdateFolderMeta}
           onArchiveFolder={onArchiveFolder}
           onTrashFolder={onTrashFolder}
+          onRestoreFolder={onRestoreFolder}
           onToggleFolderStar={onToggleFolderStar}
           onToggleFolderPin={onToggleFolderPin}
           onSelectTab={onSelectTab}
@@ -1577,6 +1581,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   onUpdateFolderMeta,
   onArchiveFolder,
   onTrashFolder,
+  onRestoreFolder,
   onToggleFolderStar,
   onToggleFolderPin,
   onShowMessage,
@@ -2381,6 +2386,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     onUpdateFolderMeta,
     onArchiveFolder,
     onTrashFolder,
+    onRestoreFolder,
     onToggleFolderStar,
     onToggleFolderPin,
     onShowMessage,

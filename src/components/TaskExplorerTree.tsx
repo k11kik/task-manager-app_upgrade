@@ -334,12 +334,11 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
       }
     });
 
-    // Include all folders from active/backlog tasks in this workspace
+    // Include all folders from active tasks in this workspace
     tasks.forEach(task => {
       if (task.category === 'Trash' || task.category === 'Archive') return;
       const proj = task.project?.trim();
       if (!proj || proj === 'General') return;
-      if (isTrashedOrArchived(proj)) return;
       const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       if (parts.length > 0) {
         getOrCreateFolder(parts);
@@ -347,7 +346,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     });
 
     // Distribute tasks
-    const activeTasks = tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus');
+    const activeTasks = tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus' || (t.category as string) === 'Backlog');
 
     activeTasks.forEach(task => {
       if (isFilterActiveOnly && task.isDone) return;

@@ -58,6 +58,14 @@ export interface PhasePattern {
   updatedAt?: number;
 }
 
+export type TimeFilterUnit = 'week' | 'month' | 'year';
+
+export interface TimelineTimeFilter {
+  enabled: boolean;
+  amount: number;
+  unit: TimeFilterUnit;
+}
+
 export const DEFAULT_PATTERN_ID = 'default';
 
 export type TimelineNavItem = 
@@ -441,6 +449,92 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false);
   const [quickMenuOrigin, setQuickMenuOrigin] = useState<'toolbar' | 'floating'>('toolbar');
   const quickMenuRef = useRef<HTMLDivElement>(null);
+
+  // Time Filter State (filter tasks by updatedAt)
+  const [timeFilter, setTimeFilter] = useState<TimelineTimeFilter>(() => {
+    try {
+      const saved = localStorage.getItem(`navfor_timeline_time_filter_${activeSection}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed === 'object' && parsed !== null) {
+          return {
+            enabled: Boolean(parsed.enabled),
+            amount: Number(parsed.amount) > 0 ? Number(parsed.amount) : 2,
+            unit: ['week', 'month', 'year'].includes(parsed.unit) ? parsed.unit : 'week'
+          };
+        }
+      }
+    } catch (e) {}
+    return { enabled: false, amount: 2, unit: 'week' };
+  });
+
+  const [isTimeFilterOpen, setIsTimeFilterOpen] = useState(false);
+  const timeFilterMenuRef = useRef<HTMLDivElement>(null);
+  const [customAmountInput, setCustomAmountInput] = useState<number>(timeFilter.amount || 2);
+  const [customUnitInput, setCustomUnitInput] = useState<TimeFilterUnit>(timeFilter.unit || 'week');
+
+  useEffect(() => {
+    setCustomAmountInput(timeFilter.amount || 2);
+    setCustomUnitInput(timeFilter.unit || 'week');
+  }, [timeFilter.amount, timeFilter.unit, isTimeFilterOpen]);
+
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (timeFilterMenuRef.current && !timeFilterMenuRef.current.contains(e.target as Node)) {
+        setIsTimeFilterOpen(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsTimeFilterOpen(false);
+      }
+    };
+    if (isTimeFilterOpen) {
+      document.addEventListener('mousedown', handleOutside);
+      document.addEventListener('keydown', handleKey);
+      return () => {
+        document.removeEventListener('mousedown', handleOutside);
+        document.removeEventListener('keydown', handleKey);
+      };
+    }
+  }, [isTimeFilterOpen]);
+
+  const handleUpdateTimeFilter = (updates: Partial<TimelineTimeFilter>) => {
+    setTimeFilter(prev => {
+      const next = { ...prev, ...updates };
+      try {
+        localStorage.setItem(`navfor_timeline_time_filter_${activeSection}`, JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+  };
+
+  const getTimeFilterLabel = (filter: TimelineTimeFilter): string => {
+    if (!filter.enabled) {
+      return L('すべて', 'All', 'Tous');
+    }
+    if (filter.unit === 'week') {
+      return L(`${filter.amount}週間以上前`, `${filter.amount}w+ ago`, `+ de ${filter.amount} sem.`);
+    }
+    if (filter.unit === 'month') {
+      return L(`${filter.amount}ヶ月以上前`, `${filter.amount}mo+ ago`, `+ de ${filter.amount} mois`);
+    }
+    return L(`${filter.amount}年以上前`, `${filter.amount}y+ ago`, `+ de ${filter.amount} an(s)`);
+  };
+
+  const timeFilterCutoffMs = useMemo(() => {
+    if (!timeFilter.enabled) return null;
+    const now = new Date();
+    const amount = Math.max(1, timeFilter.amount);
+    if (timeFilter.unit === 'week') {
+      now.setDate(now.getDate() - amount * 7);
+    } else if (timeFilter.unit === 'month') {
+      now.setMonth(now.getMonth() - amount);
+    } else if (timeFilter.unit === 'year') {
+      now.setFullYear(now.getFullYear() - amount);
+    }
+    return now.getTime();
+  }, [timeFilter.enabled, timeFilter.amount, timeFilter.unit]);
 
   useEffect(() => {
     const handleOutside = (e: MouseEvent) => {
@@ -1128,10 +1222,19 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     return (diffMs / slotDurationMs) * slotWidth;
   }, [timelineStartMs, totalSlots, slotDurationMs, slotWidth]);
 
-  // Active tasks for this section (Urgent + Focus)
-  const activeTasks = useMemo(() => {
-    return tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus');
+  // All active tasks for this section (Urgent + Focus + Restored Backlog)
+  const allActiveTasks = useMemo(() => {
+    return tasks.filter(t => t.category === 'Urgent' || t.category === 'Focus' || (t.category as string) === 'Backlog');
   }, [tasks]);
+
+  // Active tasks filtered by updated date (if time filter is enabled, show tasks older than specified period)
+  const activeTasks = useMemo(() => {
+    if (!timeFilterCutoffMs) return allActiveTasks;
+    return allActiveTasks.filter(t => {
+      const taskTime = t.updatedAt || t.createdAt || 0;
+      return taskTime <= timeFilterCutoffMs;
+    });
+  }, [allActiveTasks, timeFilterCutoffMs]);
 
   // Group tasks by project matching TaskExplorerTree hierarchy and ordering
   const projectTree = useMemo(() => {
@@ -1172,6 +1275,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
     // Helper to check if a folder path or any of its ancestors is marked as Trash/Archive
     const isTrashedOrArchived = (path: string): boolean => {
+      // If any active task belongs to this folder or its subfolders, it is NOT trashed or archived
+      const hasActive = activeTasks.some(t => t.project === path || t.project?.startsWith(path + '/'));
+      if (hasActive) return false;
+
       const parts = path.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       let cur = '';
       for (const part of parts) {
@@ -1192,7 +1299,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       }
     });
 
-    // 1b. Include active folders from folderMetas for this workspace
+    // 1b. Include active folders from folderMetas for this workspace (excluding trashed/archived)
     Object.values(folderMetas || {}).forEach((meta: FolderMeta) => {
       if (!meta || !meta.path) return;
       if (meta.section && meta.section !== activeSection) return;
@@ -1204,22 +1311,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       }
     });
 
-    // 1c. Include folders from active/backlog tasks in this workspace
-    tasks.forEach(task => {
+    // 1c. Include folders from active tasks in this workspace
+    activeTasks.forEach(task => {
       if (task.category === 'Trash' || task.category === 'Archive') return;
       const proj = task.project?.trim();
       if (!proj || proj === 'General') return;
-      if (isTrashedOrArchived(proj)) return;
       const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       if (parts.length > 0) {
         getOrCreateFolder(parts);
       }
     });
 
-    // 2. Include all active tasks (Urgent or Focus, matching Explorer)
+    // 2. Include all active tasks (Urgent, Focus, or Restored)
     activeTasks.forEach(task => {
       const proj = task.project?.trim() || 'General';
-      if (isTrashedOrArchived(proj)) return;
       const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
       const folder = getOrCreateFolder(parts.length > 0 ? parts : ['General']);
       folder.tasks.push(task);
@@ -2733,6 +2838,27 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         {L('基本機能', 'Basic Functions', 'Fonctions de base')}
       </div>
       <div className="space-y-0.5">
+        {/* Time Filter in Quick Menu */}
+        <button
+          type="button"
+          onClick={() => {
+            setIsQuickMenuOpen(false);
+            setIsTimeFilterOpen(true);
+          }}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
+        >
+          <span className="flex items-center gap-2">
+            <Clock size={13} className={timeFilter.enabled ? "text-indigo-600" : "text-slate-400"} />
+            <span>{L('更新日時フィルター', 'Time Filter (Updated)', 'Filtre de date')}</span>
+          </span>
+          <span className={cn(
+            "text-[9px] px-1.5 py-0.5 rounded font-mono font-bold",
+            timeFilter.enabled ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
+          )}>
+            {timeFilter.enabled ? getTimeFilterLabel(timeFilter) : L('すべて', 'All', 'Tous')}
+          </span>
+        </button>
+
         {/* Collapse / Expand All */}
         <button
           type="button"
@@ -2909,6 +3035,203 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           </button>
         </>
       )}
+    </div>
+  );
+
+  const renderTimeFilterDropdown = () => (
+    <div
+      ref={timeFilterMenuRef}
+      className={cn(
+        "w-72 sm:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-3 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800",
+        isFullscreen ? "fixed bottom-14 right-2.5" : "absolute right-0 top-full mt-1.5"
+      )}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between pb-2 border-b border-slate-100 mb-2.5">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Clock size={14} className="text-indigo-600 shrink-0" />
+          <span className="font-extrabold text-slate-800 text-[11px] truncate">
+            {L('更新日時フィルター', 'Time Filter (Updated)', 'Filtre de mise à jour')}
+          </span>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <span className={cn(
+            "text-[10px] font-mono px-1.5 py-0.5 rounded-full font-bold",
+            timeFilter.enabled ? "bg-indigo-50 text-indigo-700 border border-indigo-200" : "bg-slate-100 text-slate-500"
+          )}>
+            {activeTasks.length}/{allActiveTasks.length} {L('件', 'items', 'tâches')}
+          </span>
+          {timeFilter.enabled && (
+            <button
+              type="button"
+              onClick={() => {
+                handleUpdateTimeFilter({ enabled: false });
+                setIsTimeFilterOpen(false);
+              }}
+              className="text-[10px] font-bold text-red-600 hover:text-red-700 hover:bg-red-50 px-1.5 py-0.5 rounded transition-colors cursor-pointer"
+              title={L('フィルターを解除してすべて表示', 'Clear filter', 'Effacer le filtre')}
+            >
+              {L('解除', 'Clear', 'Effacer')}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Quick Presets */}
+      <div className="mb-3">
+        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+          <span>{L('クイック指定', 'Quick Presets', 'Sélection rapide')}</span>
+          <span className="text-[9px] text-slate-400 font-normal">{L('ワンクリックで絞り込み', 'One click', '1 clic')}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              handleUpdateTimeFilter({ enabled: false });
+              setIsTimeFilterOpen(false);
+            }}
+            className={cn(
+              "py-1 px-1.5 rounded-lg text-[10px] font-bold transition-all border text-center cursor-pointer",
+              !timeFilter.enabled
+                ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
+            )}
+          >
+            {L('すべて表示', 'Show All', 'Tout afficher')}
+          </button>
+          {[
+            { label: L('1週間以上前', '1w+ ago', '1+ sem.'), amount: 1, unit: 'week' as TimeFilterUnit },
+            { label: L('2週間以上前', '2w+ ago', '2+ sem.'), amount: 2, unit: 'week' as TimeFilterUnit },
+            { label: L('1ヶ月以上前', '1mo+ ago', '1+ mois'), amount: 1, unit: 'month' as TimeFilterUnit },
+            { label: L('3ヶ月以上前', '3mo+ ago', '3+ mois'), amount: 3, unit: 'month' as TimeFilterUnit },
+            { label: L('6ヶ月以上前', '6mo+ ago', '6+ mois'), amount: 6, unit: 'month' as TimeFilterUnit },
+            { label: L('1年以上前', '1y+ ago', '1+ an'), amount: 1, unit: 'year' as TimeFilterUnit },
+          ].map(preset => {
+            const isSelected = timeFilter.enabled && timeFilter.amount === preset.amount && timeFilter.unit === preset.unit;
+            return (
+              <button
+                key={`${preset.amount}-${preset.unit}`}
+                type="button"
+                onClick={() => {
+                  handleUpdateTimeFilter({ enabled: true, amount: preset.amount, unit: preset.unit });
+                  setIsTimeFilterOpen(false);
+                }}
+                className={cn(
+                  "py-1 px-1.5 rounded-lg text-[10px] font-bold transition-all border text-center cursor-pointer",
+                  isSelected
+                    ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                    : "bg-white hover:bg-indigo-50/60 text-slate-700 border-slate-200"
+                )}
+              >
+                {preset.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Custom Number & Unit Selector */}
+      <div className="pt-2 border-t border-slate-100">
+        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+          {L('数値を指定して絞り込み', 'Custom Time Period', 'Période personnalisée')}
+        </div>
+        <div className="p-2 bg-slate-50/80 rounded-xl border border-slate-200/80 space-y-2">
+          {/* Stepper & Number Input */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold text-slate-600">{L('期間の数値', 'Number', 'Nombre')}:</span>
+            <div className="flex items-center bg-white border border-slate-300 rounded-lg p-0.5 shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setCustomAmountInput(prev => Math.max(1, prev - 1))}
+                className="w-6 h-6 flex items-center justify-center rounded text-slate-600 hover:bg-slate-100 font-bold text-xs cursor-pointer"
+                title="-1"
+              >
+                -
+              </button>
+              <input
+                type="number"
+                min="1"
+                max="99"
+                value={customAmountInput}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  if (!isNaN(val) && val > 0) setCustomAmountInput(Math.min(99, val));
+                }}
+                className="w-10 text-center font-mono font-bold text-xs text-slate-800 outline-none p-0 border-0"
+              />
+              <button
+                type="button"
+                onClick={() => setCustomAmountInput(prev => Math.min(99, prev + 1))}
+                className="w-6 h-6 flex items-center justify-center rounded text-slate-600 hover:bg-slate-100 font-bold text-xs cursor-pointer"
+                title="+1"
+              >
+                +
+              </button>
+            </div>
+          </div>
+
+          {/* Unit Tabs */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold text-slate-600">{L('単位', 'Unit', 'Unité')}:</span>
+            <div className="grid grid-cols-3 gap-1 bg-slate-200/60 p-0.5 rounded-lg flex-1 max-w-[170px]">
+              {[
+                { id: 'week' as TimeFilterUnit, ja: '週間', en: 'Weeks', fr: 'Sem.' },
+                { id: 'month' as TimeFilterUnit, ja: 'ヶ月', en: 'Months', fr: 'Mois' },
+                { id: 'year' as TimeFilterUnit, ja: '年', en: 'Years', fr: 'Ans' },
+              ].map(u => (
+                <button
+                  key={u.id}
+                  type="button"
+                  onClick={() => setCustomUnitInput(u.id)}
+                  className={cn(
+                    "py-1 text-[10px] font-bold rounded-md transition-all text-center cursor-pointer",
+                    customUnitInput === u.id
+                      ? "bg-white text-indigo-700 shadow-2xs font-extrabold"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  {tr(language, u.ja, u.en, u.fr)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Apply button */}
+          <button
+            type="button"
+            onClick={() => {
+              handleUpdateTimeFilter({
+                enabled: true,
+                amount: Math.max(1, customAmountInput),
+                unit: customUnitInput
+              });
+              setIsTimeFilterOpen(false);
+            }}
+            className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer mt-1"
+          >
+            <Check size={12} />
+            <span>
+              {L(
+                `過去 ${customAmountInput} ${customUnitInput === 'week' ? '週間' : customUnitInput === 'month' ? 'ヶ月' : '年'} 以上前に更新されたタスクを表示`,
+                `Show tasks older than ${customAmountInput} ${customUnitInput === 'week' ? 'weeks' : customUnitInput === 'month' ? 'months' : 'years'}`,
+                `Afficher les tâches antérieures à ${customAmountInput} ${customUnitInput}`
+              )}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* Explanatory description footer */}
+      <div className="mt-2 text-[9px] text-slate-400 leading-normal flex items-start gap-1">
+        <Clock size={10} className="shrink-0 mt-0.5 text-slate-400" />
+        <span>
+          {L(
+            '指定された期間よりも古い（指定期間以上更新されていない）タスクをタイムライン上に表示します。',
+            'Shows tasks older than the specified period (not updated since then).',
+            'Affiche les tâches antérieures à la période spécifiée (non mises à jour depuis).'
+          )}
+        </span>
+      </div>
     </div>
   );
 
@@ -3279,6 +3602,40 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </button>
           )}
 
+          {/* Time Filter Button in Toolbar */}
+          <div className="relative inline-flex items-center" ref={timeFilterMenuRef}>
+            <button
+              type="button"
+              onClick={() => setIsTimeFilterOpen(prev => !prev)}
+              className={cn(
+                "px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-lg border transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs cursor-pointer",
+                timeFilter.enabled
+                  ? "bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700 shadow-xs"
+                  : isTimeFilterOpen
+                    ? "bg-indigo-50 text-indigo-700 border-indigo-300 ring-1 ring-indigo-300"
+                    : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+              )}
+              title={L('タスクの更新日時でタイムライン表示を絞り込み', 'Filter timeline tasks by updated date', 'Filtrer les tâches par date de mise à jour')}
+            >
+              <Clock size={12} className={timeFilter.enabled ? "text-white" : "text-indigo-600"} />
+              <span className="hidden sm:inline">
+                {timeFilter.enabled 
+                  ? `${L('更新', 'Updated', 'Modifié')}: ${getTimeFilterLabel(timeFilter)}`
+                  : L('更新日時', 'Time Filter', 'Filtre date')}
+              </span>
+              <span className="sm:hidden">
+                {timeFilter.enabled ? getTimeFilterLabel(timeFilter) : L('更新', 'Time', 'Date')}
+              </span>
+              {timeFilter.enabled && (
+                <span className="px-1 py-0.2 bg-white/20 text-white rounded text-[9px] font-mono">
+                  {activeTasks.length}/{allActiveTasks.length}
+                </span>
+              )}
+              <ChevronDown size={10} className={cn("transition-transform", isTimeFilterOpen && "rotate-180")} />
+            </button>
+            {!isFullscreen && isTimeFilterOpen && renderTimeFilterDropdown()}
+          </div>
+
           {/* 3-Horizontal-Lines Menu Button (All Functions & Settings) */}
           <div className="relative inline-flex items-center">
             <button
@@ -3633,6 +3990,77 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </div>
           )}
         </div>
+
+        {/* Time Filter Active Notice */}
+        {timeFilter.enabled && (
+          <div className="px-3 py-1.5 bg-indigo-50/90 border-b border-indigo-200/70 flex items-center justify-between text-xs text-indigo-950 shrink-0 sticky top-0 z-30 select-none">
+            <div className="flex items-center gap-2 min-w-0">
+              <Clock size={13} className="text-indigo-600 shrink-0" />
+              <span className="font-bold truncate text-[11px]">
+                {L(
+                  `更新日時フィルター適用中: ${getTimeFilterLabel(timeFilter)} (${activeTasks.length} / ${allActiveTasks.length} 件を表示中)`,
+                  `Time filter active: ${getTimeFilterLabel(timeFilter)} (showing ${activeTasks.length} of ${allActiveTasks.length} tasks)`,
+                  `Filtre de date actif: ${getTimeFilterLabel(timeFilter)} (${activeTasks.length} / ${allActiveTasks.length} tâches)`
+                )}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsTimeFilterOpen(true)}
+                className="text-[10px] text-indigo-700 hover:text-indigo-900 font-bold underline cursor-pointer"
+              >
+                {L('条件変更', 'Change', 'Modifier')}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleUpdateTimeFilter({ enabled: false })}
+                className="px-2 py-0.5 rounded bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10px] font-bold transition-colors cursor-pointer shadow-2xs"
+              >
+                {L('すべて表示 (解除)', 'Clear', 'Effacer')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Empty matching notice when timeFilter is active and 0 tasks match */}
+        {timeFilter.enabled && activeTasks.length === 0 && (
+          <div className="p-6 m-4 bg-indigo-50/50 border border-indigo-200/80 rounded-2xl flex flex-col items-center justify-center text-center gap-2 max-w-md mx-auto">
+            <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center">
+              <Clock size={20} />
+            </div>
+            <h4 className="text-xs font-bold text-slate-800">
+              {L(
+                `指定期間（${getTimeFilterLabel(timeFilter)}）より古いタスクはありません`,
+                `No tasks older than ${getTimeFilterLabel(timeFilter)}`,
+                `Aucune tâche antérieure à ${getTimeFilterLabel(timeFilter)}`
+              )}
+            </h4>
+            <p className="text-[11px] text-slate-500">
+              {L(
+                `全 ${allActiveTasks.length} 件のタスクはすべて指定期間よりも新しく更新されています。条件を変更するか解除してください。`,
+                `All ${allActiveTasks.length} tasks were updated more recently than this timeframe. Adjust the range or clear the filter.`,
+                `Toutes les ${allActiveTasks.length} tâches ont été mises à jour plus récemment.`
+              )}
+            </p>
+            <div className="flex items-center gap-2 mt-1">
+              <button
+                type="button"
+                onClick={() => setIsTimeFilterOpen(true)}
+                className="px-3 py-1 bg-white hover:bg-slate-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold shadow-2xs cursor-pointer"
+              >
+                {L('期間を変更する', 'Change Period', 'Modifier')}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleUpdateTimeFilter({ enabled: false })}
+                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-xs cursor-pointer"
+              >
+                {L('フィルターを解除してすべて表示', 'Show All Tasks', 'Tout afficher')}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Project Rows */}
         <div className="flex-1 shrink-0 flex flex-col divide-y divide-slate-100 min-w-max pb-28 lg:pb-16">
@@ -4333,6 +4761,32 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 <span className="text-[10px] font-bold">{L('メニュー', 'Menu', 'Menu')}</span>
               </button>
               {isFullscreen && isQuickMenuOpen && quickMenuOrigin === 'floating' && renderQuickMenuDropdown('floating')}
+            </div>
+
+            {/* Time Filter in Floating Bar */}
+            <div className="relative inline-flex items-center">
+              <button
+                type="button"
+                onClick={() => setIsTimeFilterOpen(prev => !prev)}
+                className={cn(
+                  "px-2 py-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-bold",
+                  timeFilter.enabled
+                    ? "bg-indigo-600 text-white shadow-xs"
+                    : isTimeFilterOpen
+                      ? "bg-white/20 text-white"
+                      : "text-slate-200 hover:text-white hover:bg-white/15"
+                )}
+                title={L('更新日時フィルター設定', 'Time Filter settings', 'Filtre de date')}
+              >
+                <Clock size={12} className={timeFilter.enabled ? "text-indigo-200" : "text-slate-300"} />
+                <span>{timeFilter.enabled ? getTimeFilterLabel(timeFilter) : L('期間', 'Time', 'Date')}</span>
+                {timeFilter.enabled && (
+                  <span className="text-[9px] bg-white/25 px-1 py-0.2 rounded font-mono">
+                    {activeTasks.length}/{allActiveTasks.length}
+                  </span>
+                )}
+              </button>
+              {isFullscreen && isTimeFilterOpen && renderTimeFilterDropdown()}
             </div>
 
             {timelineMode === 'calendar' && (

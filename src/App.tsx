@@ -359,7 +359,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.20";
+  const APP_VERSION = "3.1.21";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -1036,9 +1036,19 @@ export default function App() {
   }, [viewMode, mobileView]);
   
   // Undo/Redo state
-  const [history, setHistory] = useState<{tasks: Task[], settings: any}[]>([]);
-  const [redoStack, setRedoStack] = useState<{tasks: Task[], settings: any}[]>([]);
+  interface HistorySnapshot {
+    tasks: Task[];
+    settings: any;
+    allFolderMetas: Record<string, Record<string, FolderMeta>>;
+    customFolders: Record<string, string[]>;
+    timestamp: number;
+  }
+  const [history, setHistory] = useState<HistorySnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<HistorySnapshot[]>([]);
+  const historyRef = useRef<HistorySnapshot[]>([]);
+  const redoStackRef = useRef<HistorySnapshot[]>([]);
   const [isUndoing, setIsUndoing] = useState(false);
+  const isUndoingRef = useRef(false);
 
   const [isNewTaskMemoExpanded, setIsNewTaskMemoExpanded] = useState(false);
   const [isMemoModalOpen, setIsMemoModalOpen] = useState(false);
@@ -2376,6 +2386,7 @@ export default function App() {
 
   // Ensure all projects from tasks are registered in customFolders so folders persist even when tasks are moved to trash, archived, or auto-deleted
   useEffect(() => {
+    if (isUndoing || isUndoingRef.current) return;
     try {
       const storageKey = `navfor_folders_${activeSection}`;
       const saved = localStorage.getItem(storageKey);
@@ -2383,16 +2394,22 @@ export default function App() {
       const set = new Set(existing);
       let changed = false;
 
-      // Clean up any currently trashed/archived folders from set
+      // Clean up any currently trashed/archived folders from set (unless they contain active tasks)
       Array.from(set).forEach(f => {
         const parts = f.split(/[\/\\]/).map(s => s.trim()).filter(Boolean);
         let cur = '';
         for (const p of parts) {
           cur = cur ? `${cur}/${p}` : p;
           if (folderMetas[cur]?.category === 'Trash' || folderMetas[cur]?.category === 'Archive') {
-            set.delete(f);
-            changed = true;
-            break;
+            const hasActiveTasks = sectionTasks.some(t => 
+              (t.category === 'Urgent' || t.category === 'Focus' || (t.category as string) === 'Backlog') &&
+              (t.project === f || t.project?.startsWith(f + '/'))
+            );
+            if (!hasActiveTasks) {
+              set.delete(f);
+              changed = true;
+              break;
+            }
           }
         }
       });
@@ -2400,16 +2417,8 @@ export default function App() {
       sectionTasks.forEach(t => {
         const proj = t.project?.trim();
         if (!proj || proj === 'General') return;
+        if (t.category === 'Trash' || t.category === 'Archive') return;
         const parts = proj.split(/[\/\\]/).map(s => s.trim()).filter(Boolean);
-        let cur = '';
-        for (const p of parts) {
-          cur = cur ? `${cur}/${p}` : p;
-          // If the folder was explicitly trashed or archived by the user, do not add it back
-          if (folderMetas[cur]?.category === 'Trash' || folderMetas[cur]?.category === 'Archive') {
-            return;
-          }
-        }
-        // If the folder is not trashed/archived, register all segments so the folder persists even if tasks are later auto-moved to trash!
         let curPath = '';
         for (const p of parts) {
           curPath = curPath ? `${curPath}/${p}` : p;
@@ -2542,13 +2551,57 @@ export default function App() {
     };
   }, [tasks, settings, activeSection]);
 
-  const pushToHistory = () => {
-    if (isUndoing) return;
-    // Deep clone tasks and settings, but wrap in try-catch to ensure consistency
+  const getCustomFoldersSnapshot = (): Record<string, string[]> => {
+    const result: Record<string, string[]> = {};
+    const sections = new Set<string>(settings?.sections || ['General']);
+    sections.add(activeSection);
     try {
-      const tasksSnapshot = JSON.parse(JSON.stringify(tasks));
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('navfor_folders_')) {
+          sections.add(key.replace('navfor_folders_', ''));
+        }
+      }
+    } catch {}
+
+    sections.forEach((sec: string) => {
+      try {
+        const saved = localStorage.getItem(`navfor_folders_${sec}`);
+        result[sec] = saved ? JSON.parse(saved) : [];
+      } catch {
+        result[sec] = [];
+      }
+    });
+    return result;
+  };
+
+  const pushToHistory = () => {
+    if (isUndoing || isUndoingRef.current) return;
+    try {
+      const tasksSnapshot: Task[] = JSON.parse(JSON.stringify(tasksRef.current || tasks));
       const settingsSnapshot = JSON.parse(JSON.stringify(settings));
-      setHistory(prev => [{ tasks: tasksSnapshot, settings: settingsSnapshot }, ...prev].slice(0, 50));
+      const allFolderMetasSnapshot = JSON.parse(JSON.stringify(allFolderMetasRef.current || allFolderMetas || {}));
+      const customFoldersSnapshot = getCustomFoldersSnapshot();
+
+      // Deduplication: prevent pushing duplicate identical snapshots that cause "2-click undo" feeling
+      if (history.length > 0) {
+        const top = history[0];
+        const isTasksEqual = JSON.stringify(top.tasks) === JSON.stringify(tasksSnapshot);
+        const isSettingsEqual = JSON.stringify(top.settings) === JSON.stringify(settingsSnapshot);
+        const isMetasEqual = JSON.stringify(top.allFolderMetas || {}) === JSON.stringify(allFolderMetasSnapshot);
+        const isFoldersEqual = JSON.stringify(top.customFolders || {}) === JSON.stringify(customFoldersSnapshot);
+        if (isTasksEqual && isSettingsEqual && isMetasEqual && isFoldersEqual) {
+          return;
+        }
+      }
+
+      setHistory(prev => [{
+        tasks: tasksSnapshot,
+        settings: settingsSnapshot,
+        allFolderMetas: allFolderMetasSnapshot,
+        customFolders: customFoldersSnapshot,
+        timestamp: Date.now()
+      }, ...prev].slice(0, 50));
       setRedoStack([]);
     } catch (e) {
       console.warn("History push failed", e);
@@ -2556,114 +2609,300 @@ export default function App() {
   };
 
   const undo = async () => {
-    if (history.length === 0 || !user || isUndoing) return;
+    if (history.length === 0 || isUndoing || isUndoingRef.current) return;
+    isUndoingRef.current = true;
     setIsUndoing(true);
     
     try {
       const prevState = history[0];
       const newHistory = history.slice(1);
       
-      const currentTasksSnapshot = JSON.parse(JSON.stringify(tasks));
+      const currentTasksSnapshot = JSON.parse(JSON.stringify(tasksRef.current || tasks));
       const currentSettingsSnapshot = JSON.parse(JSON.stringify(settings));
-      setRedoStack(prev => [{ tasks: currentTasksSnapshot, settings: currentSettingsSnapshot }, ...prev]);
-      
-      // Handle large batches by splitting
-      const chunk = <T,>(arr: T[], size: number) => {
-        const chunks = [];
-        for (let i = 0; i < arr.length; i += size) {
-          chunks.push(arr.slice(i, i + size));
-        }
-        return chunks;
-      };
+      const currentMetasSnapshot = JSON.parse(JSON.stringify(allFolderMetasRef.current || allFolderMetas || {}));
+      const currentFoldersSnapshot = getCustomFoldersSnapshot();
 
-      // 1. Delete tasks that exist now but not in previous state
-      const prevIds = new Set(prevState.tasks.map((t: any) => t.id));
-      const tasksToDelete = tasks.filter(t => !prevIds.has(t.id));
-      const deleteChunks = chunk(tasksToDelete, 400);
-      for (const c of deleteChunks) {
-        const b = writeBatch(db);
-        c.forEach(t => b.delete(doc(db, 'tasks', t.id)));
-        await b.commit();
-      }
+      setRedoStack(prev => [{
+        tasks: currentTasksSnapshot,
+        settings: currentSettingsSnapshot,
+        allFolderMetas: currentMetasSnapshot,
+        customFolders: currentFoldersSnapshot,
+        timestamp: Date.now()
+      }, ...prev].slice(0, 50));
       
-      // 2. Restore previous state tasks
-      const restoreChunks = chunk(prevState.tasks, 400);
-      for (const c of restoreChunks) {
-        const b = writeBatch(db);
-        c.forEach((t: any) => {
-          const { id, ...data } = t;
-          b.set(doc(db, 'tasks', id), data);
-        });
-        await b.commit();
-      }
-      
-      // 3. Restore settings
-      await setDoc(doc(db, 'settings', user.uid), {
-        userId: user.uid,
-        ...prevState.settings
+      // 1. Optimistic & synchronous update of local state (instantly reflected on screen in 1 click!)
+      // Tasks
+      setTasks(prevState.tasks);
+      tasksRef.current = prevState.tasks;
+      syncLocalTasks(prevState.tasks);
+
+      // Folder Metas (all sections and active section)
+      const restoredMetas = prevState.allFolderMetas || {};
+      allFolderMetasRef.current = restoredMetas;
+      setAllFolderMetas(restoredMetas);
+      const activeMetas = restoredMetas[activeSection] || {};
+      folderMetasRef.current = activeMetas;
+      syncLocalFolderMetas(activeMetas, activeSection);
+      try {
+        localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify(restoredMetas));
+      } catch {}
+
+      // Custom Folders (empty and populated folders for all sections)
+      const restoredFolders = prevState.customFolders || {};
+      Object.entries(restoredFolders).forEach(([sec, fList]) => {
+        try {
+          localStorage.setItem(`navfor_folders_${sec}`, JSON.stringify(fList));
+        } catch {}
       });
+      // Synchronously notify Timeline and Explorer so empty/restored folders reappear immediately!
+      window.dispatchEvent(new Event('navfor_folders_updated'));
+
+      // Settings
+      if (prevState.settings) {
+        setSettings(prevState.settings);
+        try {
+          localStorage.setItem('navfor_local_settings', JSON.stringify(prevState.settings));
+        } catch {}
+      }
+
+      // 2. Async sync with Firestore if authenticated
+      if (user) {
+        const chunk = <T,>(arr: T[], size: number) => {
+          const chunks = [];
+          for (let i = 0; i < arr.length; i += size) {
+            chunks.push(arr.slice(i, i + size));
+          }
+          return chunks;
+        };
+
+        // Firestore Tasks
+        const prevIds = new Set(prevState.tasks.map((t: any) => t.id));
+        const tasksToDelete = (tasksRef.current || tasks).filter(t => !prevIds.has(t.id));
+        const deleteChunks = chunk(tasksToDelete, 400);
+        for (const c of deleteChunks) {
+          const b = writeBatch(db);
+          c.forEach(t => b.delete(doc(db, 'tasks', t.id)));
+          await b.commit();
+        }
+        
+        const restoreChunks = chunk(prevState.tasks, 400);
+        for (const c of restoreChunks) {
+          const b = writeBatch(db);
+          c.forEach((t: any) => {
+            const { id, ...data } = t;
+            b.set(doc(db, 'tasks', id), data);
+          });
+          await b.commit();
+        }
+
+        // Folder documents in Firestore
+        const folderBatch = writeBatch(db);
+        let folderBatchOps = 0;
+        for (const [sec, secMap] of Object.entries(restoredMetas)) {
+          for (const [p, meta] of Object.entries(secMap as Record<string, FolderMeta>)) {
+            const docId = getFolderDocId(user.uid, sec, p);
+            folderBatch.set(doc(db, 'folders', docId), {
+              ...meta,
+              path: p,
+              section: sec,
+              category: meta.category || 'Focus',
+              userId: user.uid,
+              updatedAt: meta.updatedAt || Date.now()
+            }, { merge: true });
+            folderBatchOps++;
+          }
+        }
+        // Delete folder docs that existed currently but not in prevState
+        for (const [sec, secMap] of Object.entries(currentMetasSnapshot)) {
+          const prevSecMap = (restoredMetas as any)[sec] || {};
+          for (const p of Object.keys(secMap as Record<string, FolderMeta>)) {
+            if (!prevSecMap[p]) {
+              const docId = getFolderDocId(user.uid, sec, p);
+              folderBatch.delete(doc(db, 'folders', docId));
+              folderBatchOps++;
+            }
+          }
+        }
+        if (folderBatchOps > 0) {
+          await folderBatch.commit().catch(e => console.warn("Undo folder batch error:", e));
+        }
+
+        // Settings in Firestore
+        if (prevState.settings) {
+          await setDoc(doc(db, 'settings', user.uid), {
+            userId: user.uid,
+            ...prevState.settings
+          }).catch(e => console.warn("Undo settings error:", e));
+        }
+      }
       
       setHistory(newHistory);
+      setMessage({
+        text: L('直前の操作を取り消しました（元に戻しました）', 'Undid previous action', 'Action précédente annulée'),
+        type: 'info'
+      });
     } catch (err) {
       console.error("Undo failed details:", err);
       setMessage({ text: `Undo failed: ${err instanceof Error ? err.message : 'Unknown error'}`, type: 'error' });
     } finally {
-      setTimeout(() => setIsUndoing(false), 500);
+      setIsUndoing(false);
+      isUndoingRef.current = false;
     }
   };
 
   const redo = async () => {
-    if (redoStack.length === 0 || !user || isUndoing) return;
+    if (redoStack.length === 0 || isUndoing || isUndoingRef.current) return;
+    isUndoingRef.current = true;
     setIsUndoing(true);
     
     try {
       const nextState = redoStack[0];
       const newRedoStack = redoStack.slice(1);
       
-      const currentTasksSnapshot = JSON.parse(JSON.stringify(tasks));
+      const currentTasksSnapshot = JSON.parse(JSON.stringify(tasksRef.current || tasks));
       const currentSettingsSnapshot = JSON.parse(JSON.stringify(settings));
-      setHistory(prev => [{ tasks: currentTasksSnapshot, settings: currentSettingsSnapshot }, ...prev]);
-      
-      const chunk = <T,>(arr: T[], size: number) => {
-        const chunks = [];
-        for (let i = 0; i < arr.length; i += size) {
-          chunks.push(arr.slice(i, i + size));
-        }
-        return chunks;
-      };
+      const currentMetasSnapshot = JSON.parse(JSON.stringify(allFolderMetasRef.current || allFolderMetas || {}));
+      const currentFoldersSnapshot = getCustomFoldersSnapshot();
 
-      const nextIds = new Set(nextState.tasks.map((t: any) => t.id));
-      const tasksToDelete = tasks.filter(t => !nextIds.has(t.id));
-      const deleteChunks = chunk(tasksToDelete, 400);
-      for (const c of deleteChunks) {
-        const b = writeBatch(db);
-        c.forEach(t => b.delete(doc(db, 'tasks', t.id)));
-        await b.commit();
-      }
+      setHistory(prev => [{
+        tasks: currentTasksSnapshot,
+        settings: currentSettingsSnapshot,
+        allFolderMetas: currentMetasSnapshot,
+        customFolders: currentFoldersSnapshot,
+        timestamp: Date.now()
+      }, ...prev].slice(0, 50));
       
-      const restoreChunks = chunk(nextState.tasks, 400);
-      for (const c of restoreChunks) {
-        const b = writeBatch(db);
-        c.forEach((t: any) => {
-          const { id, ...data } = t;
-          b.set(doc(db, 'tasks', id), data);
-        });
-        await b.commit();
-      }
-      
-      await setDoc(doc(db, 'settings', user.uid), {
-        userId: user.uid,
-        ...nextState.settings
+      // 1. Optimistic & synchronous update of local state (instantly reflected on screen in 1 click!)
+      setTasks(nextState.tasks);
+      tasksRef.current = nextState.tasks;
+      syncLocalTasks(nextState.tasks);
+
+      const restoredMetas = nextState.allFolderMetas || {};
+      allFolderMetasRef.current = restoredMetas;
+      setAllFolderMetas(restoredMetas);
+      const activeMetas = restoredMetas[activeSection] || {};
+      folderMetasRef.current = activeMetas;
+      syncLocalFolderMetas(activeMetas, activeSection);
+      try {
+        localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify(restoredMetas));
+      } catch {}
+
+      const restoredFolders = nextState.customFolders || {};
+      Object.entries(restoredFolders).forEach(([sec, fList]) => {
+        try {
+          localStorage.setItem(`navfor_folders_${sec}`, JSON.stringify(fList));
+        } catch {}
       });
+      window.dispatchEvent(new Event('navfor_folders_updated'));
+
+      if (nextState.settings) {
+        setSettings(nextState.settings);
+        try {
+          localStorage.setItem('navfor_local_settings', JSON.stringify(nextState.settings));
+        } catch {}
+      }
+
+      // 2. Async sync with Firestore if authenticated
+      if (user) {
+        const chunk = <T,>(arr: T[], size: number) => {
+          const chunks = [];
+          for (let i = 0; i < arr.length; i += size) {
+            chunks.push(arr.slice(i, i + size));
+          }
+          return chunks;
+        };
+
+        const nextIds = new Set(nextState.tasks.map((t: any) => t.id));
+        const tasksToDelete = (tasksRef.current || tasks).filter(t => !nextIds.has(t.id));
+        const deleteChunks = chunk(tasksToDelete, 400);
+        for (const c of deleteChunks) {
+          const b = writeBatch(db);
+          c.forEach(t => b.delete(doc(db, 'tasks', t.id)));
+          await b.commit();
+        }
+        
+        const restoreChunks = chunk(nextState.tasks, 400);
+        for (const c of restoreChunks) {
+          const b = writeBatch(db);
+          c.forEach((t: any) => {
+            const { id, ...data } = t;
+            b.set(doc(db, 'tasks', id), data);
+          });
+          await b.commit();
+        }
+
+        const folderBatch = writeBatch(db);
+        let folderBatchOps = 0;
+        for (const [sec, secMap] of Object.entries(restoredMetas)) {
+          for (const [p, meta] of Object.entries(secMap as Record<string, FolderMeta>)) {
+            const docId = getFolderDocId(user.uid, sec, p);
+            folderBatch.set(doc(db, 'folders', docId), {
+              ...meta,
+              path: p,
+              section: sec,
+              category: meta.category || 'Focus',
+              userId: user.uid,
+              updatedAt: meta.updatedAt || Date.now()
+            }, { merge: true });
+            folderBatchOps++;
+          }
+        }
+        for (const [sec, secMap] of Object.entries(currentMetasSnapshot)) {
+          const prevSecMap = (restoredMetas as any)[sec] || {};
+          for (const p of Object.keys(secMap as Record<string, FolderMeta>)) {
+            if (!prevSecMap[p]) {
+              const docId = getFolderDocId(user.uid, sec, p);
+              folderBatch.delete(doc(db, 'folders', docId));
+              folderBatchOps++;
+            }
+          }
+        }
+        if (folderBatchOps > 0) {
+          await folderBatch.commit().catch(e => console.warn("Redo folder batch error:", e));
+        }
+
+        if (nextState.settings) {
+          await setDoc(doc(db, 'settings', user.uid), {
+            userId: user.uid,
+            ...nextState.settings
+          }).catch(e => console.warn("Redo settings error:", e));
+        }
+      }
       
       setRedoStack(newRedoStack);
+      setMessage({
+        text: L('やり直しました（進めました）', 'Redid action', 'Action rétablie'),
+        type: 'info'
+      });
     } catch (err) {
       console.error("Redo failed details:", err);
       setMessage({ text: 'Redo failed', type: 'error' });
     } finally {
-      setTimeout(() => setIsUndoing(false), 500);
+      setIsUndoing(false);
+      isUndoingRef.current = false;
     }
   };
+
+  // Global Undo / Redo keyboard shortcuts (Ctrl+Z / Cmd+Z, Ctrl+Y / Cmd+Shift+Z)
+  useEffect(() => {
+    const handleUndoRedoKeys = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (e.key === 'z' && !e.shiftKey) {
+          e.preventDefault();
+          undo();
+        } else if ((e.key === 'z' && e.shiftKey) || e.key === 'y') {
+          e.preventDefault();
+          redo();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleUndoRedoKeys);
+    return () => window.removeEventListener('keydown', handleUndoRedoKeys);
+  }, [history, redoStack, isUndoing]);
 
   const dateLocale = useMemo(() => {
     if (settings.language === 'ja') return ja;
@@ -2886,7 +3125,6 @@ export default function App() {
   };
 
   const moveTask = async (id: string, newCategory: Category) => {
-    if (!user) return;
     if (newCategory === 'Urgent') {
       const isAlreadyUrgent = sectionTasks.find(t => t.id === id)?.category === 'Urgent';
       if (!isAlreadyUrgent) {
@@ -2902,17 +3140,104 @@ export default function App() {
       }
     }
     pushToHistory();
+    const now = Date.now();
+
+    // Auto-revive folder and ancestors if task is being restored/moved to active (Focus or Urgent)
+    const targetTask = tasks.find(t => t.id === id);
+    if (targetTask && (newCategory === 'Focus' || newCategory === 'Urgent')) {
+      const proj = targetTask.project?.trim();
+      if (proj && proj !== 'General') {
+        const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+        let cur = '';
+        const currentMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
+        const nextMetas: Record<string, FolderMeta> = { ...currentMetas };
+        let anyFolderRevived = false;
+
+        parts.forEach(p => {
+          cur = cur ? `${cur}/${p}` : p;
+          if (nextMetas[cur]?.category === 'Trash' || nextMetas[cur]?.category === 'Archive') {
+            nextMetas[cur] = {
+              ...(nextMetas[cur] || { path: cur, section: activeSection, createdAt: now }),
+              category: 'Focus',
+              updatedAt: now
+            };
+            anyFolderRevived = true;
+          }
+        });
+
+        if (anyFolderRevived) {
+          folderMetasRef.current = nextMetas;
+          allFolderMetasRef.current = {
+            ...allFolderMetasRef.current,
+            [activeSection]: nextMetas
+          };
+          setAllFolderMetas(prev => ({
+            ...prev,
+            [activeSection]: nextMetas
+          }));
+          syncLocalFolderMetas(nextMetas, activeSection);
+        }
+
+        try {
+          const storageKey = `navfor_folders_${activeSection}`;
+          const saved = localStorage.getItem(storageKey);
+          const existing: string[] = saved ? JSON.parse(saved) : [];
+          const set = new Set(existing);
+          let curPath = '';
+          let added = false;
+          for (const p of parts) {
+            curPath = curPath ? `${curPath}/${p}` : p;
+            if (!set.has(curPath)) {
+              set.add(curPath);
+              added = true;
+            }
+          }
+          if (added || anyFolderRevived) {
+            localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+            window.dispatchEvent(new Event('navfor_folders_updated'));
+          }
+        } catch {}
+
+        if (user && anyFolderRevived) {
+          try {
+            const batch = writeBatch(db);
+            let curPath = '';
+            for (const p of parts) {
+              curPath = curPath ? `${curPath}/${p}` : p;
+              if (nextMetas[curPath]?.category === 'Focus') {
+                const folderDocId = getFolderDocId(user.uid, activeSection, curPath);
+                batch.set(doc(db, 'folders', folderDocId), {
+                  ...nextMetas[curPath],
+                  path: curPath,
+                  section: activeSection,
+                  category: 'Focus',
+                  userId: user.uid,
+                  updatedAt: now
+                }, { merge: true });
+              }
+            }
+            batch.commit().catch(e => console.error("Error committing revived folders:", e));
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+    }
+
+    const updatedTasks = (tasksRef.current || tasks).map(t => t.id === id ? { ...t, category: newCategory, updatedAt: now } : t);
+    tasksRef.current = updatedTasks;
+    setTasks(updatedTasks);
+    syncLocalTasks(updatedTasks);
+
     if (user) {
       try {
         await updateDoc(doc(db, 'tasks', id), { 
           category: newCategory, 
-          updatedAt: Date.now() 
+          updatedAt: now 
         });
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
       }
-    } else {
-      syncLocalTasks(tasks.map(t => t.id === id ? { ...t, category: newCategory, updatedAt: Date.now() } : t));
     }
   };
 
@@ -3014,35 +3339,41 @@ export default function App() {
   };
 
   const deleteTask = async (id: string) => {
-    if (!user) return;
-    const task = tasks.find(t => t.id === id);
+    const task = (tasksRef.current || tasks).find(t => t.id === id);
     if (!task) return;
 
     pushToHistory();
+    const now = Date.now();
     if (task.category === 'Trash') {
       // If already in trash, perm delete
+      const nextTasks = (tasksRef.current || tasks).filter(t => t.id !== id);
+      tasksRef.current = nextTasks;
+      setTasks(nextTasks);
+      syncLocalTasks(nextTasks);
+
       if (user) {
         try {
           await deleteDoc(doc(db, 'tasks', id));
         } catch (err) {
           handleFirestoreError(err, OperationType.DELETE, `tasks/${id}`);
         }
-      } else {
-        syncLocalTasks(tasks.filter(t => t.id !== id));
       }
     } else {
       // Move to trash
+      const nextTasks = (tasksRef.current || tasks).map(t => t.id === id ? { ...t, category: 'Trash' as Category, updatedAt: now } : t);
+      tasksRef.current = nextTasks;
+      setTasks(nextTasks);
+      syncLocalTasks(nextTasks);
+
       if (user) {
         try {
           await updateDoc(doc(db, 'tasks', id), { 
             category: 'Trash', 
-            updatedAt: Date.now() 
+            updatedAt: now 
           });
         } catch (err) {
           handleFirestoreError(err, OperationType.UPDATE, `tasks/${id}`);
         }
-      } else {
-        syncLocalTasks(tasks.map(t => t.id === id ? { ...t, category: 'Trash', updatedAt: Date.now() } : t));
       }
     }
   };
@@ -3344,6 +3675,7 @@ export default function App() {
 
   const updateFolderMeta = async (path: string, updates: Partial<FolderMeta>) => {
     if (!path) return;
+    pushToHistory();
     const now = Date.now();
     const currentSecMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
     const current = currentSecMetas[path] || { path, section: activeSection, category: 'Focus' };
@@ -3611,6 +3943,123 @@ export default function App() {
         `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をゴミ箱へ移動しました。`,
         `Moved folder "${folderPath}" and ${affectedTasks.length} tasks to trash.`,
         `Dossier « ${folderPath} » et ${affectedTasks.length} tâches déplacés vers la corbeille.`
+      ),
+      type: 'info'
+    });
+  };
+
+  const handleRestoreFolder = async (folderPath: string) => {
+    if (!folderPath) return;
+    pushToHistory();
+
+    const isInsideFolder = (p: string) => p === folderPath || p.startsWith(folderPath + '/');
+    const affectedTasks = sectionTasks.filter(t => isInsideFolder(t.project));
+    const now = Date.now();
+
+    // 1. Synchronously update folderMetas: set folderPath, all ancestors and descendants to 'Focus'
+    const currentMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
+    const nextMetas: Record<string, FolderMeta> = { ...currentMetas };
+
+    // Revive ancestors and target folder
+    const parts = folderPath.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+    let cur = '';
+    parts.forEach(p => {
+      cur = cur ? `${cur}/${p}` : p;
+      nextMetas[cur] = {
+        ...(nextMetas[cur] || { path: cur, section: activeSection, createdAt: now }),
+        category: 'Focus',
+        updatedAt: now
+      };
+    });
+
+    // Revive descendants
+    Object.keys(nextMetas).forEach(p => {
+      if (isInsideFolder(p)) {
+        nextMetas[p] = {
+          ...nextMetas[p],
+          category: 'Focus',
+          updatedAt: now
+        };
+      }
+    });
+
+    folderMetasRef.current = nextMetas;
+    allFolderMetasRef.current = {
+      ...allFolderMetasRef.current,
+      [activeSection]: nextMetas
+    };
+    setAllFolderMetas(prev => ({
+      ...prev,
+      [activeSection]: nextMetas
+    }));
+    syncLocalFolderMetas(nextMetas, activeSection);
+
+    // 2. Synchronously update affected tasks to 'Focus' (ToDo)
+    syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Focus', updatedAt: now } : t));
+
+    // 3. Register folder and descendants in localStorage customFolders
+    try {
+      const storageKey = `navfor_folders_${activeSection}`;
+      const saved = localStorage.getItem(storageKey);
+      const existing: string[] = saved ? JSON.parse(saved) : [];
+      const set = new Set(existing);
+      let curPath = '';
+      for (const p of parts) {
+        curPath = curPath ? `${curPath}/${p}` : p;
+        set.add(curPath);
+      }
+      Object.keys(nextMetas).forEach(p => {
+        if (isInsideFolder(p)) {
+          set.add(p);
+        }
+      });
+      localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+      window.dispatchEvent(new Event('navfor_folders_updated'));
+    } catch {}
+
+    // 4. Firestore batch commit if user is logged in
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        affectedTasks.forEach(t => {
+          batch.update(doc(db, 'tasks', t.id), { category: 'Focus', updatedAt: now });
+        });
+
+        const pathsToCommit = new Set<string>();
+        let curA = '';
+        parts.forEach(p => {
+          curA = curA ? `${curA}/${p}` : p;
+          pathsToCommit.add(curA);
+        });
+        Object.keys(nextMetas).forEach(p => {
+          if (isInsideFolder(p)) pathsToCommit.add(p);
+        });
+
+        pathsToCommit.forEach(p => {
+          const meta = nextMetas[p];
+          if (meta) {
+            const folderDocId = getFolderDocId(user.uid, activeSection, p);
+            batch.set(doc(db, 'folders', folderDocId), {
+              ...meta,
+              path: p,
+              section: activeSection,
+              category: 'Focus',
+              userId: user.uid,
+              updatedAt: now
+            }, { merge: true });
+          }
+        });
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `folders/${folderPath}`);
+      }
+    }
+
+    setMessage({
+      text: L(
+        `フォルダ「${folderPath}」および内包タスク(${affectedTasks.length}件)をToDoへ復元しました。`,
+        `Restored folder "${folderPath}" and ${affectedTasks.length} tasks to ToDo.`,
+        `Dossier « ${folderPath} » et ${affectedTasks.length} tâches restaurés dans ToDo.`
       ),
       type: 'info'
     });
@@ -6071,6 +6520,7 @@ export default function App() {
                       activeTaskId={activeTabTaskId}
                       openTaskIds={openTaskIds}
                       onRestore={(taskId, cat) => moveTask(taskId, cat || 'Focus')}
+                      onRestoreFolder={handleRestoreFolder}
                       onPermanentDelete={(taskId) => deleteTask(taskId)}
                       onMoveToTrash={(taskId) => moveTask(taskId, 'Trash')}
                       onSelectTask={handleOpenTaskInTab}
@@ -6090,7 +6540,8 @@ export default function App() {
                       tasks={filteredTasks.filter(t => t.category === 'Trash')}
                       activeTaskId={activeTabTaskId}
                       openTaskIds={openTaskIds}
-                      onRestore={(taskId, cat) => moveTask(taskId, cat || 'Backlog')}
+                      onRestore={(taskId, cat) => moveTask(taskId, cat || 'Focus')}
+                      onRestoreFolder={handleRestoreFolder}
                       onPermanentDelete={(taskId) => deleteTask(taskId)}
                       onSelectTask={handleOpenTaskInTab}
                       trashCleanupThresholdDays={settings.trashCleanupThresholdDays}
@@ -6790,6 +7241,7 @@ export default function App() {
                   onUpdateFolderMeta={updateFolderMeta}
                   onArchiveFolder={handleArchiveFolder}
                   onTrashFolder={handleTrashFolder}
+                  onRestoreFolder={handleRestoreFolder}
                   onToggleFolderStar={handleToggleFolderStar}
                   onToggleFolderPin={handleToggleFolderPin}
                   onShowMessage={setMessage}
