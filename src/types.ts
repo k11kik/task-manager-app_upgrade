@@ -57,3 +57,18 @@ export interface FolderMeta {
   createdAt?: number;
   updatedAt?: number;
 }
+
+export interface CustomTimelineColumn {
+  id: string;
+  label: string;
+}
+
+export interface PhasePattern {
+  id: string;
+  userId?: string;
+  section?: string;
+  name: string;
+  columns: CustomTimelineColumn[];
+  createdAt?: number;
+  updatedAt?: number;
+}

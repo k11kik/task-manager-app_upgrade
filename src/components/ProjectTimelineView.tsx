@@ -414,14 +414,17 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         // Document does not exist in cloud yet:
         // Upload any existing local patterns to cloud so they sync to other devices!
         try {
-          const currentPatterns = phasePatterns;
-          const currentActive = activePatternId;
-          if (currentPatterns && currentPatterns.length > 0) {
+          const localRaw = localStorage.getItem(`navfor_phase_patterns_${activeSection}`);
+          let localParsed: PhasePattern[] = [];
+          try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
+          const toUpload = (Array.isArray(localParsed) && localParsed.length > 0) ? localParsed : phasePatterns;
+          const currentActive = localStorage.getItem(`navfor_active_phase_pattern_${activeSection}`) || activePatternId || DEFAULT_PATTERN_ID;
+          if (toUpload && toUpload.length > 0) {
             const payload = {
               userId: user.uid,
               section: activeSection,
-              activePatternId: currentActive || DEFAULT_PATTERN_ID,
-              patterns: currentPatterns.map(p => ({
+              activePatternId: currentActive,
+              patterns: toUpload.map(p => ({
                 id: p.id,
                 name: p.name,
                 columns: p.columns || [],
@@ -431,11 +434,6 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               updatedAt: Date.now()
             };
             setDoc(configDocRef, payload, { merge: true }).catch(() => {});
-            setDoc(doc(db, 'settings', user.uid), {
-              phaseConfigs: {
-                [safeSection]: payload
-              }
-            }, { merge: true }).catch(() => {});
           }
         } catch {}
       }
@@ -3229,8 +3227,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       <div
         ref={timeFilterMenuRef}
         className={cn(
-          "w-[calc(100vw-24px)] max-w-sm bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-3 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800 box-border overflow-y-auto max-h-[82vh]",
-          // Mobile (<sm): Centered or bottom-sheet within screen bounds so it never cuts off
+          "w-[calc(100vw-24px)] max-w-sm bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-3 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800 box-border overflow-y-auto max-h-[calc(100dvh-32px)] sm:max-h-[82vh] overscroll-contain",
+          // Mobile (<sm): Centered modal so it never cuts off regardless of toolbar location
           "fixed left-1/2 -translate-x-1/2",
           isFullscreen
             ? "bottom-14 sm:bottom-14 sm:left-auto sm:right-2.5 sm:translate-x-0 sm:w-80"

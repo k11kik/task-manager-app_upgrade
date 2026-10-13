@@ -78,6 +78,21 @@
         "updatedAt": { "type": "number", "description": "Timestamp of last modification" }
       },
       "required": ["userId", "section", "patterns"]
+    },
+    "PhasePattern": {
+      "title": "PhasePattern",
+      "description": "Individual timeline phase pattern variation with columns",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "section": { "type": "string" },
+        "name": { "type": "string" },
+        "columns": { "type": "array" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["userId", "name", "columns"]
     }
   },
   "firestore": {
@@ -96,6 +111,10 @@
     "/phase_configs/{configId}": {
       "schema": "PhaseConfig",
       "description": "Synchronized phase patterns configuration per user and section"
+    },
+    "/phase_patterns/{patternDocId}": {
+      "schema": "PhasePattern",
+      "description": "Collection of timeline phase pattern configurations"
     }
   }
 }

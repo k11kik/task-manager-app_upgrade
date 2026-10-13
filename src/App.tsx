@@ -359,7 +359,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.21";
+  const APP_VERSION = "3.1.22";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -2274,9 +2274,78 @@ export default function App() {
       console.warn("Folders listener notice:", err.message);
     });
 
+    const phaseConfigsQuery = query(collection(db, 'phase_configs'), where('userId', '==', user.uid));
+    const unsubscribePhaseConfigs = onSnapshot(phaseConfigsQuery, (snapshot) => {
+      let hasUpdates = false;
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (data.userId === user.uid && Array.isArray(data.patterns) && data.patterns.length > 0) {
+          const sec = data.section || 'General';
+          const localRaw = localStorage.getItem(`navfor_phase_patterns_${sec}`);
+          let localParsed: any[] = [];
+          try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
+
+          const mergedMap = new Map<string, any>();
+          data.patterns.forEach((p: any) => mergedMap.set(p.id, p));
+          if (Array.isArray(localParsed)) {
+            localParsed.forEach((p: any) => {
+              if (!mergedMap.has(p.id)) mergedMap.set(p.id, p);
+            });
+          }
+          const finalPatterns = Array.from(mergedMap.values());
+          try {
+            localStorage.setItem(`navfor_phase_patterns_${sec}`, JSON.stringify(finalPatterns));
+            if (data.activePatternId) {
+              localStorage.setItem(`navfor_active_phase_pattern_${sec}`, data.activePatternId);
+            }
+            const activeP = finalPatterns.find((p: any) => p.id === (data.activePatternId || 'default')) || finalPatterns[0];
+            if (activeP?.columns) {
+              localStorage.setItem(`navfor_custom_timeline_cols_${sec}`, JSON.stringify(activeP.columns));
+            }
+            hasUpdates = true;
+          } catch {}
+        }
+      });
+
+      // Also check if any local custom patterns exist on this device that are not yet in cloud, and upload them
+      try {
+        const localKeys = Object.keys(localStorage).filter(k => k.startsWith('navfor_phase_patterns_'));
+        for (const k of localKeys) {
+          const sec = k.replace('navfor_phase_patterns_', '');
+          const raw = localStorage.getItem(k);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              const hasCustom = parsed.length > 1 || parsed.some((p: any) => p.id !== 'default');
+              const cloudDoc = snapshot.docs.find(d => d.data()?.section === sec);
+              if (hasCustom && (!cloudDoc || !cloudDoc.data()?.patterns || cloudDoc.data().patterns.length <= 1)) {
+                const safeSection = encodeURIComponent(sec).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+                const docRef = doc(db, 'phase_configs', `${user.uid}_${safeSection}`);
+                const activeId = localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || parsed[0]?.id || 'default';
+                setDoc(docRef, {
+                  userId: user.uid,
+                  section: sec,
+                  activePatternId: activeId,
+                  patterns: parsed,
+                  updatedAt: Date.now()
+                }, { merge: true }).catch(() => {});
+              }
+            }
+          }
+        }
+      } catch {}
+
+      if (hasUpdates) {
+        window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
+      }
+    }, (err) => {
+      console.warn("Phase configs listener notice:", err.message);
+    });
+
     return () => {
       unsubscribeTasks();
       unsubscribeFolders();
+      unsubscribePhaseConfigs();
     };
   }, [user, settings.archiveThresholdDays]);
 
