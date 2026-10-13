@@ -44,6 +44,9 @@ import { Task, Category, FolderMeta } from '../types';
 import { cn, tr } from '../lib/utils';
 import { format, addDays, subDays, startOfDay, isSameDay, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
 import { isTaskOccurringOnDate } from '../lib/taskDateUtils';
+import { db } from '../lib/firebase';
+import { doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { User } from 'firebase/auth';
 
 export interface CustomTimelineColumn {
   id: string;
@@ -193,12 +196,13 @@ interface ProjectTimelineViewProps {
   activeSection?: string;
   language?: string;
   folderMetas?: Record<string, FolderMeta>;
-  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
+  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>, options?: { skipHistory?: boolean }) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   isFullscreen?: boolean;
   onToggleFullscreen?: () => void;
   onOpenCreateTaskModal?: (defaultProject?: string) => void;
+  user?: User | null;
   t: (key: string) => string;
 }
 
@@ -230,6 +234,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   isFullscreen = false,
   onToggleFullscreen,
   onOpenCreateTaskModal,
+  user,
   t
 }) => {
   const L = (ja: string, en: string, fr: string) => tr(language, ja, en, fr);
@@ -330,6 +335,117 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     return () => window.removeEventListener('navfor_phase_patterns_updated', syncPatterns);
   }, [syncPatterns]);
 
+  // Helper for safe Firestore Phase Config document ID
+  const getPhaseConfigDocId = useCallback((uid: string, section: string) => {
+    const safeSection = encodeURIComponent(section).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+    return `${uid}_${safeSection}`;
+  }, []);
+
+  // Real-time Cloud Synchronization of Phase Patterns per user account & section across devices
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    const safeSection = encodeURIComponent(activeSection).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+    const configDocId = getPhaseConfigDocId(user.uid, activeSection);
+    const configDocRef = doc(db, 'phase_configs', configDocId);
+
+    const unsubscribe = onSnapshot(configDocRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data.userId === user.uid) {
+          if (Array.isArray(data.patterns) && data.patterns.length > 0) {
+            // Get current local patterns from storage
+            const localRaw = localStorage.getItem(`navfor_phase_patterns_${activeSection}`);
+            let localParsed: PhasePattern[] = [];
+            try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
+
+            // Merge remote and local by ID to ensure custom patterns are never lost
+            const mergedMap = new Map<string, PhasePattern>();
+            data.patterns.forEach((p: PhasePattern) => mergedMap.set(p.id, p));
+            let localHasMore = false;
+            if (Array.isArray(localParsed)) {
+              localParsed.forEach((p: PhasePattern) => {
+                if (!mergedMap.has(p.id)) {
+                  mergedMap.set(p.id, p);
+                  localHasMore = true;
+                }
+              });
+            }
+            const mergedPatterns = Array.from(mergedMap.values());
+            setPhasePatterns(mergedPatterns);
+
+            const resolvedActiveId = data.activePatternId || (mergedMap.has(activePatternId) ? activePatternId : mergedPatterns[0]?.id || DEFAULT_PATTERN_ID);
+            setActivePatternId(resolvedActiveId);
+
+            try {
+              localStorage.setItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(mergedPatterns));
+              localStorage.setItem(`navfor_active_phase_pattern_${activeSection}`, resolvedActiveId);
+              const current = mergedPatterns.find(p => p.id === resolvedActiveId) || mergedPatterns[0];
+              if (current) {
+                localStorage.setItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns));
+              }
+            } catch {}
+
+            // If local had extra custom patterns that cloud didn't have, sync back to cloud!
+            if (localHasMore) {
+              const payload = {
+                userId: user.uid,
+                section: activeSection,
+                activePatternId: resolvedActiveId,
+                patterns: mergedPatterns.map(p => ({
+                  id: p.id,
+                  name: p.name,
+                  columns: p.columns || [],
+                  createdAt: p.createdAt || Date.now(),
+                  updatedAt: p.updatedAt || Date.now()
+                })),
+                updatedAt: Date.now()
+              };
+              setDoc(configDocRef, payload, { merge: true }).catch(() => {});
+              setDoc(doc(db, 'settings', user.uid), {
+                phaseConfigs: {
+                  [safeSection]: payload
+                }
+              }, { merge: true }).catch(() => {});
+            }
+          }
+        }
+      } else {
+        // Document does not exist in cloud yet:
+        // Upload any existing local patterns to cloud so they sync to other devices!
+        try {
+          const currentPatterns = phasePatterns;
+          const currentActive = activePatternId;
+          if (currentPatterns && currentPatterns.length > 0) {
+            const payload = {
+              userId: user.uid,
+              section: activeSection,
+              activePatternId: currentActive || DEFAULT_PATTERN_ID,
+              patterns: currentPatterns.map(p => ({
+                id: p.id,
+                name: p.name,
+                columns: p.columns || [],
+                createdAt: p.createdAt || Date.now(),
+                updatedAt: p.updatedAt || Date.now()
+              })),
+              updatedAt: Date.now()
+            };
+            setDoc(configDocRef, payload, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'settings', user.uid), {
+              phaseConfigs: {
+                [safeSection]: payload
+              }
+            }, { merge: true }).catch(() => {});
+          }
+        } catch {}
+      }
+    }, (err) => {
+      console.warn("Phase patterns account sync notice:", err.message);
+    });
+
+    return () => unsubscribe();
+  }, [user?.uid, activeSection, getPhaseConfigDocId]);
+
   // Active pattern resolution
   const activePattern = useMemo<PhasePattern>(() => {
     return phasePatterns.find(p => p.id === activePatternId) || phasePatterns[0] || {
@@ -358,6 +474,38 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     } catch (e) {
       console.error(e);
     }
+
+    // Cloud Synchronization for Account across devices
+    if (user?.uid) {
+      try {
+        const configDocId = getPhaseConfigDocId(user.uid, activeSection);
+        const configDocRef = doc(db, 'phase_configs', configDocId);
+        const safeSectionKey = encodeURIComponent(activeSection).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+        const payload = {
+          userId: user.uid,
+          section: activeSection,
+          activePatternId: targetActiveId,
+          patterns: patterns.map(p => ({
+            id: p.id,
+            name: p.name,
+            columns: p.columns || [],
+            createdAt: p.createdAt || Date.now(),
+            updatedAt: p.updatedAt || Date.now()
+          })),
+          updatedAt: Date.now()
+        };
+        setDoc(configDocRef, payload, { merge: true }).catch(err => {
+          console.warn("Phase config cloud write notice:", err);
+        });
+        setDoc(doc(db, 'settings', user.uid), {
+          phaseConfigs: {
+            [safeSectionKey]: payload
+          }
+        }, { merge: true }).catch(() => {});
+      } catch (err) {
+        console.warn("Error initiating phase config save to cloud:", err);
+      }
+    }
   };
 
   const handleSelectPattern = (patternId: string) => {
@@ -371,6 +519,38 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
     } catch (e) {
       console.error(e);
+    }
+
+    // Cloud Synchronization for Account across devices
+    if (user?.uid) {
+      try {
+        const configDocId = getPhaseConfigDocId(user.uid, activeSection);
+        const configDocRef = doc(db, 'phase_configs', configDocId);
+        const safeSectionKey = encodeURIComponent(activeSection).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+        const payload = {
+          userId: user.uid,
+          section: activeSection,
+          activePatternId: patternId,
+          patterns: phasePatterns.map(p => ({
+            id: p.id,
+            name: p.name,
+            columns: p.columns || [],
+            createdAt: p.createdAt || Date.now(),
+            updatedAt: p.updatedAt || Date.now()
+          })),
+          updatedAt: Date.now()
+        };
+        setDoc(configDocRef, payload, { merge: true }).catch(err => {
+          console.warn("Phase active pattern cloud write notice:", err);
+        });
+        setDoc(doc(db, 'settings', user.uid), {
+          phaseConfigs: {
+            [safeSectionKey]: payload
+          }
+        }, { merge: true }).catch(() => {});
+      } catch (err) {
+        console.warn("Error updating active pattern in cloud:", err);
+      }
     }
   };
 
@@ -3039,200 +3219,220 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   );
 
   const renderTimeFilterDropdown = () => (
-    <div
-      ref={timeFilterMenuRef}
-      className={cn(
-        "w-72 sm:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-3 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800",
-        isFullscreen ? "fixed bottom-14 right-2.5" : "absolute right-0 top-full mt-1.5"
-      )}
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between pb-2 border-b border-slate-100 mb-2.5">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Clock size={14} className="text-indigo-600 shrink-0" />
-          <span className="font-extrabold text-slate-800 text-[11px] truncate">
-            {L('更新日時フィルター', 'Time Filter (Updated)', 'Filtre de mise à jour')}
-          </span>
+    <>
+      {/* Mobile Backdrop Overlay to prevent cutoff and ensure smooth touch dismissal */}
+      <div 
+        className="sm:hidden fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-[110]"
+        onClick={() => setIsTimeFilterOpen(false)}
+      />
+
+      <div
+        ref={timeFilterMenuRef}
+        className={cn(
+          "w-[calc(100vw-24px)] max-w-sm bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-3 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800 box-border overflow-y-auto max-h-[82vh]",
+          // Mobile (<sm): Centered or bottom-sheet within screen bounds so it never cuts off
+          "fixed left-1/2 -translate-x-1/2",
+          isFullscreen
+            ? "bottom-14 sm:bottom-14 sm:left-auto sm:right-2.5 sm:translate-x-0 sm:w-80"
+            : "top-1/2 -translate-y-1/2 sm:translate-y-0 sm:top-full sm:mt-1.5 sm:absolute sm:left-auto sm:right-0 sm:translate-x-0 sm:w-80"
+        )}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100 mb-2.5">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Clock size={14} className="text-indigo-600 shrink-0" />
+            <span className="font-extrabold text-slate-800 text-[11px] truncate">
+              {L('更新日時フィルター', 'Time Filter (Updated)', 'Filtre de mise à jour')}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <span className={cn(
+              "text-[10px] font-mono px-1.5 py-0.5 rounded-full font-bold",
+              timeFilter.enabled ? "bg-indigo-50 text-indigo-700 border border-indigo-200" : "bg-slate-100 text-slate-500"
+            )}>
+              {activeTasks.length}/{allActiveTasks.length} {L('件', 'items', 'tâches')}
+            </span>
+            {timeFilter.enabled && (
+              <button
+                type="button"
+                onClick={() => {
+                  handleUpdateTimeFilter({ enabled: false });
+                  setIsTimeFilterOpen(false);
+                }}
+                className="text-[10px] font-bold text-red-600 hover:text-red-700 hover:bg-red-50 px-1.5 py-0.5 rounded transition-colors cursor-pointer"
+                title={L('フィルターを解除してすべて表示', 'Clear filter', 'Effacer le filtre')}
+              >
+                {L('解除', 'Clear', 'Effacer')}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsTimeFilterOpen(false)}
+              className="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-1 rounded-lg transition-colors cursor-pointer ml-0.5"
+              title={L('閉じる', 'Close', 'Fermer')}
+            >
+              <X size={14} />
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
-          <span className={cn(
-            "text-[10px] font-mono px-1.5 py-0.5 rounded-full font-bold",
-            timeFilter.enabled ? "bg-indigo-50 text-indigo-700 border border-indigo-200" : "bg-slate-100 text-slate-500"
-          )}>
-            {activeTasks.length}/{allActiveTasks.length} {L('件', 'items', 'tâches')}
-          </span>
-          {timeFilter.enabled && (
+
+        {/* Quick Presets */}
+        <div className="mb-2.5">
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+            <span>{L('クイック指定', 'Quick Presets', 'Sélection rapide')}</span>
+            <span className="text-[9px] text-slate-400 font-normal">{L('ワンクリックで絞り込み', 'One click', '1 clic')}</span>
+          </div>
+          <div className="grid grid-cols-3 gap-1">
             <button
               type="button"
               onClick={() => {
                 handleUpdateTimeFilter({ enabled: false });
                 setIsTimeFilterOpen(false);
               }}
-              className="text-[10px] font-bold text-red-600 hover:text-red-700 hover:bg-red-50 px-1.5 py-0.5 rounded transition-colors cursor-pointer"
-              title={L('フィルターを解除してすべて表示', 'Clear filter', 'Effacer le filtre')}
+              className={cn(
+                "py-1 px-1 rounded-lg text-[10px] font-bold transition-all border text-center cursor-pointer truncate",
+                !timeFilter.enabled
+                  ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                  : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
+              )}
             >
-              {L('解除', 'Clear', 'Effacer')}
+              {L('すべて表示', 'Show All', 'Tout afficher')}
             </button>
-          )}
-        </div>
-      </div>
-
-      {/* Quick Presets */}
-      <div className="mb-3">
-        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
-          <span>{L('クイック指定', 'Quick Presets', 'Sélection rapide')}</span>
-          <span className="text-[9px] text-slate-400 font-normal">{L('ワンクリックで絞り込み', 'One click', '1 clic')}</span>
-        </div>
-        <div className="grid grid-cols-3 gap-1">
-          <button
-            type="button"
-            onClick={() => {
-              handleUpdateTimeFilter({ enabled: false });
-              setIsTimeFilterOpen(false);
-            }}
-            className={cn(
-              "py-1 px-1.5 rounded-lg text-[10px] font-bold transition-all border text-center cursor-pointer",
-              !timeFilter.enabled
-                ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
-                : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
-            )}
-          >
-            {L('すべて表示', 'Show All', 'Tout afficher')}
-          </button>
-          {[
-            { label: L('1週間以上前', '1w+ ago', '1+ sem.'), amount: 1, unit: 'week' as TimeFilterUnit },
-            { label: L('2週間以上前', '2w+ ago', '2+ sem.'), amount: 2, unit: 'week' as TimeFilterUnit },
-            { label: L('1ヶ月以上前', '1mo+ ago', '1+ mois'), amount: 1, unit: 'month' as TimeFilterUnit },
-            { label: L('3ヶ月以上前', '3mo+ ago', '3+ mois'), amount: 3, unit: 'month' as TimeFilterUnit },
-            { label: L('6ヶ月以上前', '6mo+ ago', '6+ mois'), amount: 6, unit: 'month' as TimeFilterUnit },
-            { label: L('1年以上前', '1y+ ago', '1+ an'), amount: 1, unit: 'year' as TimeFilterUnit },
-          ].map(preset => {
-            const isSelected = timeFilter.enabled && timeFilter.amount === preset.amount && timeFilter.unit === preset.unit;
-            return (
-              <button
-                key={`${preset.amount}-${preset.unit}`}
-                type="button"
-                onClick={() => {
-                  handleUpdateTimeFilter({ enabled: true, amount: preset.amount, unit: preset.unit });
-                  setIsTimeFilterOpen(false);
-                }}
-                className={cn(
-                  "py-1 px-1.5 rounded-lg text-[10px] font-bold transition-all border text-center cursor-pointer",
-                  isSelected
-                    ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
-                    : "bg-white hover:bg-indigo-50/60 text-slate-700 border-slate-200"
-                )}
-              >
-                {preset.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Custom Number & Unit Selector */}
-      <div className="pt-2 border-t border-slate-100">
-        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-          {L('数値を指定して絞り込み', 'Custom Time Period', 'Période personnalisée')}
-        </div>
-        <div className="p-2 bg-slate-50/80 rounded-xl border border-slate-200/80 space-y-2">
-          {/* Stepper & Number Input */}
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold text-slate-600">{L('期間の数値', 'Number', 'Nombre')}:</span>
-            <div className="flex items-center bg-white border border-slate-300 rounded-lg p-0.5 shadow-2xs">
-              <button
-                type="button"
-                onClick={() => setCustomAmountInput(prev => Math.max(1, prev - 1))}
-                className="w-6 h-6 flex items-center justify-center rounded text-slate-600 hover:bg-slate-100 font-bold text-xs cursor-pointer"
-                title="-1"
-              >
-                -
-              </button>
-              <input
-                type="number"
-                min="1"
-                max="99"
-                value={customAmountInput}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value, 10);
-                  if (!isNaN(val) && val > 0) setCustomAmountInput(Math.min(99, val));
-                }}
-                className="w-10 text-center font-mono font-bold text-xs text-slate-800 outline-none p-0 border-0"
-              />
-              <button
-                type="button"
-                onClick={() => setCustomAmountInput(prev => Math.min(99, prev + 1))}
-                className="w-6 h-6 flex items-center justify-center rounded text-slate-600 hover:bg-slate-100 font-bold text-xs cursor-pointer"
-                title="+1"
-              >
-                +
-              </button>
-            </div>
-          </div>
-
-          {/* Unit Tabs */}
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold text-slate-600">{L('単位', 'Unit', 'Unité')}:</span>
-            <div className="grid grid-cols-3 gap-1 bg-slate-200/60 p-0.5 rounded-lg flex-1 max-w-[170px]">
-              {[
-                { id: 'week' as TimeFilterUnit, ja: '週間', en: 'Weeks', fr: 'Sem.' },
-                { id: 'month' as TimeFilterUnit, ja: 'ヶ月', en: 'Months', fr: 'Mois' },
-                { id: 'year' as TimeFilterUnit, ja: '年', en: 'Years', fr: 'Ans' },
-              ].map(u => (
+            {[
+              { label: L('1週間以上前', '1w+ ago', '1+ sem.'), amount: 1, unit: 'week' as TimeFilterUnit },
+              { label: L('2週間以上前', '2w+ ago', '2+ sem.'), amount: 2, unit: 'week' as TimeFilterUnit },
+              { label: L('1ヶ月以上前', '1mo+ ago', '1+ mois'), amount: 1, unit: 'month' as TimeFilterUnit },
+              { label: L('3ヶ月以上前', '3mo+ ago', '3+ mois'), amount: 3, unit: 'month' as TimeFilterUnit },
+              { label: L('6ヶ月以上前', '6mo+ ago', '6+ mois'), amount: 6, unit: 'month' as TimeFilterUnit },
+              { label: L('1年以上前', '1y+ ago', '1+ an'), amount: 1, unit: 'year' as TimeFilterUnit },
+            ].map(preset => {
+              const isSelected = timeFilter.enabled && timeFilter.amount === preset.amount && timeFilter.unit === preset.unit;
+              return (
                 <button
-                  key={u.id}
+                  key={`${preset.amount}-${preset.unit}`}
                   type="button"
-                  onClick={() => setCustomUnitInput(u.id)}
+                  onClick={() => {
+                    handleUpdateTimeFilter({ enabled: true, amount: preset.amount, unit: preset.unit });
+                    setIsTimeFilterOpen(false);
+                  }}
                   className={cn(
-                    "py-1 text-[10px] font-bold rounded-md transition-all text-center cursor-pointer",
-                    customUnitInput === u.id
-                      ? "bg-white text-indigo-700 shadow-2xs font-extrabold"
-                      : "text-slate-600 hover:text-slate-900"
+                    "py-1 px-1 rounded-lg text-[10px] font-bold transition-all border text-center cursor-pointer truncate",
+                    isSelected
+                      ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                      : "bg-white hover:bg-indigo-50/60 text-slate-700 border-slate-200"
                   )}
                 >
-                  {tr(language, u.ja, u.en, u.fr)}
+                  {preset.label}
                 </button>
-              ))}
-            </div>
+              );
+            })}
           </div>
+        </div>
 
-          {/* Apply button */}
-          <button
-            type="button"
-            onClick={() => {
-              handleUpdateTimeFilter({
-                enabled: true,
-                amount: Math.max(1, customAmountInput),
-                unit: customUnitInput
-              });
-              setIsTimeFilterOpen(false);
-            }}
-            className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer mt-1"
-          >
-            <Check size={12} />
-            <span>
-              {L(
-                `過去 ${customAmountInput} ${customUnitInput === 'week' ? '週間' : customUnitInput === 'month' ? 'ヶ月' : '年'} 以上前に更新されたタスクを表示`,
-                `Show tasks older than ${customAmountInput} ${customUnitInput === 'week' ? 'weeks' : customUnitInput === 'month' ? 'months' : 'years'}`,
-                `Afficher les tâches antérieures à ${customAmountInput} ${customUnitInput}`
-              )}
-            </span>
-          </button>
+        {/* Custom Number & Unit Selector */}
+        <div className="pt-2 border-t border-slate-100">
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+            {L('数値を指定して絞り込み', 'Custom Time Period', 'Période personnalisée')}
+          </div>
+          <div className="p-2 bg-slate-50/80 rounded-xl border border-slate-200/80 space-y-2">
+            {/* Stepper & Number Input */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-slate-600 shrink-0">{L('期間の数値', 'Number', 'Nombre')}:</span>
+              <div className="flex items-center bg-white border border-slate-300 rounded-lg p-0.5 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => setCustomAmountInput(prev => Math.max(1, prev - 1))}
+                  className="w-6 h-6 flex items-center justify-center rounded text-slate-600 hover:bg-slate-100 font-bold text-xs cursor-pointer"
+                  title="-1"
+                >
+                  -
+                </button>
+                <input
+                  type="number"
+                  min="1"
+                  max="99"
+                  value={customAmountInput}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    if (!isNaN(val) && val > 0) setCustomAmountInput(Math.min(99, val));
+                  }}
+                  className="w-10 text-center font-mono font-bold text-xs text-slate-800 outline-none p-0 border-0"
+                />
+                <button
+                  type="button"
+                  onClick={() => setCustomAmountInput(prev => Math.min(99, prev + 1))}
+                  className="w-6 h-6 flex items-center justify-center rounded text-slate-600 hover:bg-slate-100 font-bold text-xs cursor-pointer"
+                  title="+1"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
+            {/* Unit Tabs */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-slate-600 shrink-0">{L('単位', 'Unit', 'Unité')}:</span>
+              <div className="grid grid-cols-3 gap-1 bg-slate-200/60 p-0.5 rounded-lg flex-1 max-w-[170px]">
+                {[
+                  { id: 'week' as TimeFilterUnit, ja: '週間', en: 'Weeks', fr: 'Sem.' },
+                  { id: 'month' as TimeFilterUnit, ja: 'ヶ月', en: 'Months', fr: 'Mois' },
+                  { id: 'year' as TimeFilterUnit, ja: '年', en: 'Years', fr: 'Ans' },
+                ].map(u => (
+                  <button
+                    key={u.id}
+                    type="button"
+                    onClick={() => setCustomUnitInput(u.id)}
+                    className={cn(
+                      "py-1 text-[10px] font-bold rounded-md transition-all text-center cursor-pointer",
+                      customUnitInput === u.id
+                        ? "bg-white text-indigo-700 shadow-2xs font-extrabold"
+                        : "text-slate-600 hover:text-slate-900"
+                    )}
+                  >
+                    {tr(language, u.ja, u.en, u.fr)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Apply button */}
+            <button
+              type="button"
+              onClick={() => {
+                handleUpdateTimeFilter({
+                  enabled: true,
+                  amount: Math.max(1, customAmountInput),
+                  unit: customUnitInput
+                });
+                setIsTimeFilterOpen(false);
+              }}
+              className="w-full py-2 px-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99] text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer mt-1"
+            >
+              <Check size={13} className="shrink-0" />
+              <span className="text-center leading-tight truncate">
+                {L(
+                  `${customAmountInput}${customUnitInput === 'week' ? '週間' : customUnitInput === 'month' ? 'ヶ月' : '年'}以上前のタスクを表示`,
+                  `Show tasks older than ${customAmountInput} ${customUnitInput === 'week' ? 'w' : customUnitInput === 'month' ? 'mo' : 'y'}`,
+                  `Afficher tâches > ${customAmountInput} ${customUnitInput}`
+                )}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Explanatory description footer */}
+        <div className="mt-2 text-[9.5px] text-slate-500 leading-tight flex items-start gap-1">
+          <Clock size={10} className="shrink-0 mt-0.5 text-slate-400" />
+          <span>
+            {L(
+              '指定期間よりも古い（指定期間以上更新されていない）タスクをタイムライン上に表示します。',
+              'Shows tasks older than the specified period (not updated since then).',
+              'Affiche les tâches antérieures à la période spécifiée.'
+            )}
+          </span>
         </div>
       </div>
-
-      {/* Explanatory description footer */}
-      <div className="mt-2 text-[9px] text-slate-400 leading-normal flex items-start gap-1">
-        <Clock size={10} className="shrink-0 mt-0.5 text-slate-400" />
-        <span>
-          {L(
-            '指定された期間よりも古い（指定期間以上更新されていない）タスクをタイムライン上に表示します。',
-            'Shows tasks older than the specified period (not updated since then).',
-            'Affiche les tâches antérieures à la période spécifiée (non mises à jour depuis).'
-          )}
-        </span>
-      </div>
-    </div>
+    </>
   );
 
   return (
@@ -3603,7 +3803,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           )}
 
           {/* Time Filter Button in Toolbar */}
-          <div className="relative inline-flex items-center" ref={timeFilterMenuRef}>
+          <div className="relative inline-flex items-center">
             <button
               type="button"
               onClick={() => setIsTimeFilterOpen(prev => !prev)}
@@ -3634,28 +3834,6 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <ChevronDown size={10} className={cn("transition-transform", isTimeFilterOpen && "rotate-180")} />
             </button>
             {!isFullscreen && isTimeFilterOpen && renderTimeFilterDropdown()}
-          </div>
-
-          {/* 3-Horizontal-Lines Menu Button (All Functions & Settings) */}
-          <div className="relative inline-flex items-center">
-            <button
-              type="button"
-              onClick={() => {
-                setQuickMenuOrigin('toolbar');
-                setIsQuickMenuOpen(prev => !prev);
-              }}
-              className={cn(
-                "px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-bold rounded-lg border transition-all flex items-center gap-1 sm:gap-1.5 shadow-2xs cursor-pointer",
-                isQuickMenuOpen && quickMenuOrigin === 'toolbar'
-                  ? "bg-indigo-50 text-indigo-700 border-indigo-300 ring-1 ring-indigo-300"
-                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-              )}
-              title={L('メニュー（全機能の操作・設定）', 'Menu (All functions & settings)', 'Menu (toutes les fonctions)')}
-            >
-              <Menu size={13} className="text-indigo-600 shrink-0" />
-              <span className="hidden sm:inline">{L('メニュー', 'Menu', 'Menu')}</span>
-            </button>
-            {isQuickMenuOpen && quickMenuOrigin === 'toolbar' && renderQuickMenuDropdown('toolbar')}
           </div>
 
           {/* Full View / Exit Full View Button */}
@@ -4975,12 +5153,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 const name = newFolderName.trim();
                 if (!name) return;
                 const fullPath = targetParentFolder ? `${targetParentFolder}/${name}` : name;
-                const nextCustom = customFolders.includes(fullPath)
-                  ? customFolders
-                  : [...customFolders, fullPath];
-                saveCustomFolders(nextCustom);
-
-                // Set folder metadata to Focus (reviving if it was in Trash)
+                // Set folder metadata to Focus (reviving if it was in Trash) - called before saveCustomFolders so history snapshot captures prior state!
                 onUpdateFolderMeta?.(fullPath, {
                   category: 'Focus',
                   createdAt: Date.now(),
@@ -4993,9 +5166,14 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 parts.forEach(p => {
                   cur = cur ? `${cur}/${p}` : p;
                   if (folderMetas?.[cur]?.category === 'Trash' || folderMetas?.[cur]?.category === 'Archive') {
-                    onUpdateFolderMeta?.(cur, { category: 'Focus', updatedAt: Date.now() });
+                    onUpdateFolderMeta?.(cur, { category: 'Focus', updatedAt: Date.now() }, { skipHistory: true });
                   }
                 });
+
+                const nextCustom = customFolders.includes(fullPath)
+                  ? customFolders
+                  : [...customFolders, fullPath];
+                saveCustomFolders(nextCustom);
 
                 // Auto expand parent and all its ancestors if collapsed
                 if (targetParentFolder) {

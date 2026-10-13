@@ -35,7 +35,8 @@
         "localBackupPath": { "type": "string" },
         "language": { "type": "string", "enum": ["en", "ja"] },
         "archiveDoneToTrashDays": { "type": "number" },
-        "archiveInactiveToTrashDays": { "type": "number" }
+        "archiveInactiveToTrashDays": { "type": "number" },
+        "phaseConfigs": { "type": "object", "description": "Section-mapped phase patterns and active pattern" }
       },
       "required": ["userId", "urgentLimit", "archiveThresholdDays", "warningThreshold", "criticalThreshold", "isLocalBackupEnabled", "localBackupPath", "language"]
     },
@@ -61,6 +62,22 @@
         "startDate": { "type": "number" }
       },
       "required": ["userId", "path", "category"]
+    },
+    "PhaseConfig": {
+      "title": "PhaseConfig",
+      "description": "User timeline phase patterns and custom columns configuration synchronized per workspace section",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the owner" },
+        "section": { "type": "string", "description": "Workspace section name" },
+        "activePatternId": { "type": "string", "description": "ID of active phase pattern" },
+        "patterns": {
+          "type": "array",
+          "description": "Array of phase patterns"
+        },
+        "updatedAt": { "type": "number", "description": "Timestamp of last modification" }
+      },
+      "required": ["userId", "section", "patterns"]
     }
   },
   "firestore": {
@@ -75,6 +92,10 @@
     "/settings/{userId}": {
       "schema": "UserSettings",
       "description": "User specific settings"
+    },
+    "/phase_configs/{configId}": {
+      "schema": "PhaseConfig",
+      "description": "Synchronized phase patterns configuration per user and section"
     }
   }
 }

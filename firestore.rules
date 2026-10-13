@@ -34,7 +34,14 @@ service cloud.firestore {
           && (!('urls' in data) || (data.urls is list))
           && (!('isStarred' in data) || (data.isStarred is bool))
           && (!('isPinned' in data) || (data.isPinned is bool))
-          && (!('isAllDay' in data) || (data.isAllDay is bool));
+          && (!('isAllDay' in data) || (data.isAllDay is bool))
+          && (!('timelineColumn' in data) || (data.timelineColumn is string || data.timelineColumn == null))
+          && (!('timelineStep' in data) || (data.timelineStep is number || data.timelineStep == null))
+          && (!('timelinePresetColumns' in data) || (data.timelinePresetColumns is map))
+          && (!('timelinePresetSteps' in data) || (data.timelinePresetSteps is map))
+          && (!('order' in data) || (data.order is number || data.order == null))
+          && (!('startDate' in data) || (data.startDate is number || data.startDate == null))
+          && (!('recurrence' in data) || (data.recurrence is map));
       }
 
       allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
@@ -105,12 +112,38 @@ service cloud.firestore {
           && (data.get('language', 'en') in ['en', 'ja', 'fr'])
           && (data.get('sections', ['General']) is list)
           && (!('archiveDoneToTrashDays' in data) || data.archiveDoneToTrashDays is number)
-          && (!('archiveInactiveToTrashDays' in data) || data.archiveInactiveToTrashDays is number);
+          && (!('archiveInactiveToTrashDays' in data) || data.archiveInactiveToTrashDays is number)
+          && (!('phaseConfigs' in data) || data.phaseConfigs is map);
       }
 
       allow get: if isOwner(userId);
       allow create, update: if isOwner(userId) && isValidSettings(request.resource.data);
       allow delete: if isOwner(userId);
+    }
+
+    // Phase Patterns Configuration Security (Synced across devices for user account)
+    match /phase_configs/{configId} {
+      function isValidPhaseConfig(data) {
+        return data.userId == request.auth.uid 
+          && data.section is string
+          && data.patterns is list
+          && (!('activePatternId' in data) || data.activePatternId is string)
+          && (!('updatedAt' in data) || data.updatedAt is number);
+      }
+
+      allow get: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid);
+      allow list: if isSignedIn();
+
+      allow create: if isSignedIn() 
+        && isValidPhaseConfig(request.resource.data)
+        && request.resource.data.userId == request.auth.uid;
+
+      allow update: if isSignedIn() 
+        && (resource == null || resource.data.userId == request.auth.uid)
+        && isValidPhaseConfig(request.resource.data)
+        && request.resource.data.userId == request.auth.uid;
+
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
     }
   }
 }

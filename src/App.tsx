@@ -748,9 +748,9 @@ export default function App() {
     // Initialize folderMetas for any newly created folder path segments
     for (const sp of segmentPaths) {
       if (folderMetas[sp]?.category === 'Trash' || folderMetas[sp]?.category === 'Archive') {
-        updateFolderMeta(sp, { category: 'Focus', updatedAt: now });
+        updateFolderMeta(sp, { category: 'Focus', updatedAt: now }, { skipHistory: true });
       } else if (!folderMetas[sp]?.createdAt) {
-        updateFolderMeta(sp, { createdAt: now });
+        updateFolderMeta(sp, { createdAt: now }, { skipHistory: true });
       }
     }
 
@@ -900,7 +900,7 @@ export default function App() {
       window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch {}
 
-    updateFolderMeta(newFolderPath, { createdAt: now });
+    updateFolderMeta(newFolderPath, { createdAt: now }, { skipHistory: true });
 
     setMessage({
       text: L(
@@ -2084,7 +2084,8 @@ export default function App() {
           displayModeFocus: (data.displayModeFocus || 'standard') as 'compact' | 'standard' | 'large',
           displayModeTodo: (data.displayModeTodo || 'standard') as 'compact' | 'standard' | 'large',
           language: (data.language || 'en') as 'en' | 'ja' | 'fr',
-          sections: loadedSections
+          sections: loadedSections,
+          phaseConfigs: data.phaseConfigs || {}
         };
 
         settingsRef.current = nextSettingsObj;
@@ -2092,6 +2093,43 @@ export default function App() {
         try {
           localStorage.setItem(`navfor_cached_settings_${user.uid}`, JSON.stringify(nextSettingsObj));
         } catch {}
+
+        // Sync cloud phase configs into local storage so all sections & patterns are up to date across devices
+        if (data.phaseConfigs && typeof data.phaseConfigs === 'object') {
+          let hasSyncedPatterns = false;
+          for (const [secKey, config] of Object.entries(data.phaseConfigs as Record<string, any>)) {
+            if (config && Array.isArray(config.patterns) && config.patterns.length > 0) {
+              const targetSec = config.section || secKey;
+              const localRaw = localStorage.getItem(`navfor_phase_patterns_${targetSec}`);
+              let localParsed: any[] = [];
+              try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
+              
+              // Merge local patterns with remote patterns so no custom pattern is ever erased
+              const mergedMap = new Map<string, any>();
+              config.patterns.forEach((p: any) => mergedMap.set(p.id, p));
+              if (Array.isArray(localParsed)) {
+                localParsed.forEach((p: any) => {
+                  if (!mergedMap.has(p.id)) mergedMap.set(p.id, p);
+                });
+              }
+              const finalPatterns = Array.from(mergedMap.values());
+              try {
+                localStorage.setItem(`navfor_phase_patterns_${targetSec}`, JSON.stringify(finalPatterns));
+                if (config.activePatternId) {
+                  localStorage.setItem(`navfor_active_phase_pattern_${targetSec}`, config.activePatternId);
+                }
+                const activeP = finalPatterns.find((p: any) => p.id === (config.activePatternId || 'default')) || finalPatterns[0];
+                if (activeP?.columns) {
+                  localStorage.setItem(`navfor_custom_timeline_cols_${targetSec}`, JSON.stringify(activeP.columns));
+                }
+                hasSyncedPatterns = true;
+              } catch {}
+            }
+          }
+          if (hasSyncedPatterns) {
+            window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
+          }
+        }
 
         if (data.localBackupSlots && typeof data.localBackupSlots === 'object') {
           const remoteSlots = data.localBackupSlots;
@@ -2299,6 +2337,46 @@ export default function App() {
 
     migrate();
   }, [user, authLoading]);
+
+  // Phase Patterns Migration / Cloud Initializer: upload local patterns to cloud if user has any on this device
+  useEffect(() => {
+    if (!user?.uid || authLoading) return;
+
+    try {
+      const keys = Object.keys(localStorage);
+      for (const k of keys) {
+        if (k.startsWith('navfor_phase_patterns_')) {
+          const sec = k.replace('navfor_phase_patterns_', '') || 'General';
+          const raw = localStorage.getItem(k);
+          if (!raw) continue;
+          let parsed: any[] = [];
+          try { parsed = JSON.parse(raw); } catch {}
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const hasCustom = parsed.length > 1 || parsed[0]?.id !== 'default' || (parsed[0]?.columns && parsed[0].columns.length !== 5);
+            if (hasCustom) {
+              const activePat = localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || 'default';
+              const safeSec = encodeURIComponent(sec).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+              const payload = {
+                userId: user.uid,
+                section: sec,
+                activePatternId: activePat,
+                patterns: parsed,
+                updatedAt: Date.now()
+              };
+              setDoc(doc(db, 'phase_configs', `${user.uid}_${safeSec}`), payload, { merge: true }).catch(() => {});
+              setDoc(doc(db, 'settings', user.uid), {
+                phaseConfigs: {
+                  [safeSec]: payload
+                }
+              }, { merge: true }).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Phase pattern auto-sync scan:", e);
+    }
+  }, [user?.uid, authLoading]);
 
   // Local state persistence helper
   const syncLocalTasks = (newTasks: Task[]) => {
@@ -2584,8 +2662,8 @@ export default function App() {
       const customFoldersSnapshot = getCustomFoldersSnapshot();
 
       // Deduplication: prevent pushing duplicate identical snapshots that cause "2-click undo" feeling
-      if (history.length > 0) {
-        const top = history[0];
+      if (historyRef.current.length > 0) {
+        const top = historyRef.current[0];
         const isTasksEqual = JSON.stringify(top.tasks) === JSON.stringify(tasksSnapshot);
         const isSettingsEqual = JSON.stringify(top.settings) === JSON.stringify(settingsSnapshot);
         const isMetasEqual = JSON.stringify(top.allFolderMetas || {}) === JSON.stringify(allFolderMetasSnapshot);
@@ -2595,13 +2673,18 @@ export default function App() {
         }
       }
 
-      setHistory(prev => [{
+      const nextSnapshot: HistorySnapshot = {
         tasks: tasksSnapshot,
         settings: settingsSnapshot,
         allFolderMetas: allFolderMetasSnapshot,
         customFolders: customFoldersSnapshot,
         timestamp: Date.now()
-      }, ...prev].slice(0, 50));
+      };
+
+      const nextHistory = [nextSnapshot, ...historyRef.current].slice(0, 50);
+      historyRef.current = nextHistory;
+      setHistory(nextHistory);
+      redoStackRef.current = [];
       setRedoStack([]);
     } catch (e) {
       console.warn("History push failed", e);
@@ -2609,26 +2692,30 @@ export default function App() {
   };
 
   const undo = async () => {
-    if (history.length === 0 || isUndoing || isUndoingRef.current) return;
+    if (historyRef.current.length === 0 || isUndoing || isUndoingRef.current) return;
     isUndoingRef.current = true;
     setIsUndoing(true);
     
     try {
-      const prevState = history[0];
-      const newHistory = history.slice(1);
+      const prevState = historyRef.current[0];
+      const newHistory = historyRef.current.slice(1);
+      historyRef.current = newHistory;
+      setHistory(newHistory);
       
       const currentTasksSnapshot = JSON.parse(JSON.stringify(tasksRef.current || tasks));
       const currentSettingsSnapshot = JSON.parse(JSON.stringify(settings));
       const currentMetasSnapshot = JSON.parse(JSON.stringify(allFolderMetasRef.current || allFolderMetas || {}));
       const currentFoldersSnapshot = getCustomFoldersSnapshot();
 
-      setRedoStack(prev => [{
+      const newRedo = [{
         tasks: currentTasksSnapshot,
         settings: currentSettingsSnapshot,
         allFolderMetas: currentMetasSnapshot,
         customFolders: currentFoldersSnapshot,
         timestamp: Date.now()
-      }, ...prev].slice(0, 50));
+      }, ...redoStackRef.current].slice(0, 50);
+      redoStackRef.current = newRedo;
+      setRedoStack(newRedo);
       
       // 1. Optimistic & synchronous update of local state (instantly reflected on screen in 1 click!)
       // Tasks
@@ -2636,8 +2723,55 @@ export default function App() {
       tasksRef.current = prevState.tasks;
       syncLocalTasks(prevState.tasks);
 
+      // Custom Folders (empty and populated folders for all sections)
+      const restoredFolders = prevState.customFolders || {};
+      Object.entries(restoredFolders).forEach(([sec, fList]) => {
+        try {
+          localStorage.setItem(`navfor_folders_${sec}`, JSON.stringify(fList));
+        } catch {}
+      });
+
       // Folder Metas (all sections and active section)
-      const restoredMetas = prevState.allFolderMetas || {};
+      const restoredMetas: Record<string, Record<string, FolderMeta>> = JSON.parse(JSON.stringify(prevState.allFolderMetas || {}));
+      
+      // Critical: Ensure all restored custom folders (empty & non-empty) and their ancestors have category 'Focus'
+      Object.entries(restoredFolders).forEach(([sec, fList]) => {
+        if (!restoredMetas[sec]) restoredMetas[sec] = {};
+        ((fList as string[]) || []).forEach(folderPath => {
+          const parts = folderPath.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+          let cur = '';
+          parts.forEach(p => {
+            cur = cur ? `${cur}/${p}` : p;
+            restoredMetas[sec][cur] = {
+              ...(restoredMetas[sec][cur] || { path: cur, section: sec }),
+              category: 'Focus',
+              updatedAt: Date.now()
+            };
+          });
+        });
+      });
+
+      // Also ensure projects of all active tasks are marked 'Focus'
+      prevState.tasks.forEach(t => {
+        if (t.category !== 'Trash' && t.category !== 'Archive') {
+          const sec = getTaskSection(t);
+          if (!restoredMetas[sec]) restoredMetas[sec] = {};
+          const proj = t.project?.trim();
+          if (proj && proj !== 'General') {
+            const parts = proj.split(/[\/\\]/).map(p => p.trim()).filter(Boolean);
+            let cur = '';
+            parts.forEach(p => {
+              cur = cur ? `${cur}/${p}` : p;
+              restoredMetas[sec][cur] = {
+                ...(restoredMetas[sec][cur] || { path: cur, section: sec }),
+                category: 'Focus',
+                updatedAt: Date.now()
+              };
+            });
+          }
+        }
+      });
+
       allFolderMetasRef.current = restoredMetas;
       setAllFolderMetas(restoredMetas);
       const activeMetas = restoredMetas[activeSection] || {};
@@ -2647,13 +2781,6 @@ export default function App() {
         localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify(restoredMetas));
       } catch {}
 
-      // Custom Folders (empty and populated folders for all sections)
-      const restoredFolders = prevState.customFolders || {};
-      Object.entries(restoredFolders).forEach(([sec, fList]) => {
-        try {
-          localStorage.setItem(`navfor_folders_${sec}`, JSON.stringify(fList));
-        } catch {}
-      });
       // Synchronously notify Timeline and Explorer so empty/restored folders reappear immediately!
       window.dispatchEvent(new Event('navfor_folders_updated'));
 
@@ -2712,7 +2839,7 @@ export default function App() {
             folderBatchOps++;
           }
         }
-        // Delete folder docs that existed currently but not in prevState
+        // Delete folder docs that existed currently in trash but are not in restored state
         for (const [sec, secMap] of Object.entries(currentMetasSnapshot)) {
           const prevSecMap = (restoredMetas as any)[sec] || {};
           for (const p of Object.keys(secMap as Record<string, FolderMeta>)) {
@@ -2736,7 +2863,6 @@ export default function App() {
         }
       }
       
-      setHistory(newHistory);
       setMessage({
         text: L('直前の操作を取り消しました（元に戻しました）', 'Undid previous action', 'Action précédente annulée'),
         type: 'info'
@@ -2751,33 +2877,37 @@ export default function App() {
   };
 
   const redo = async () => {
-    if (redoStack.length === 0 || isUndoing || isUndoingRef.current) return;
+    if (redoStackRef.current.length === 0 || isUndoing || isUndoingRef.current) return;
     isUndoingRef.current = true;
     setIsUndoing(true);
     
     try {
-      const nextState = redoStack[0];
-      const newRedoStack = redoStack.slice(1);
+      const nextState = redoStackRef.current[0];
+      const newRedoStack = redoStackRef.current.slice(1);
+      redoStackRef.current = newRedoStack;
+      setRedoStack(newRedoStack);
       
       const currentTasksSnapshot = JSON.parse(JSON.stringify(tasksRef.current || tasks));
       const currentSettingsSnapshot = JSON.parse(JSON.stringify(settings));
       const currentMetasSnapshot = JSON.parse(JSON.stringify(allFolderMetasRef.current || allFolderMetas || {}));
       const currentFoldersSnapshot = getCustomFoldersSnapshot();
 
-      setHistory(prev => [{
+      const newHistory = [{
         tasks: currentTasksSnapshot,
         settings: currentSettingsSnapshot,
         allFolderMetas: currentMetasSnapshot,
         customFolders: currentFoldersSnapshot,
         timestamp: Date.now()
-      }, ...prev].slice(0, 50));
+      }, ...historyRef.current].slice(0, 50);
+      historyRef.current = newHistory;
+      setHistory(newHistory);
       
       // 1. Optimistic & synchronous update of local state (instantly reflected on screen in 1 click!)
       setTasks(nextState.tasks);
       tasksRef.current = nextState.tasks;
       syncLocalTasks(nextState.tasks);
 
-      const restoredMetas = nextState.allFolderMetas || {};
+      const restoredMetas = JSON.parse(JSON.stringify(nextState.allFolderMetas || {}));
       allFolderMetasRef.current = restoredMetas;
       setAllFolderMetas(restoredMetas);
       const activeMetas = restoredMetas[activeSection] || {};
@@ -2869,7 +2999,6 @@ export default function App() {
         }
       }
       
-      setRedoStack(newRedoStack);
       setMessage({
         text: L('やり直しました（進めました）', 'Redid action', 'Action rétablie'),
         type: 'info'
@@ -3673,9 +3802,11 @@ export default function App() {
     }
   };
 
-  const updateFolderMeta = async (path: string, updates: Partial<FolderMeta>) => {
+  const updateFolderMeta = async (path: string, updates: Partial<FolderMeta>, options?: { skipHistory?: boolean }) => {
     if (!path) return;
-    pushToHistory();
+    if (!options?.skipHistory) {
+      pushToHistory();
+    }
     const now = Date.now();
     const currentSecMetas = allFolderMetasRef.current[activeSection] || folderMetas || {};
     const current = currentSecMetas[path] || { path, section: activeSection, category: 'Focus' };
@@ -6500,6 +6631,7 @@ export default function App() {
                       isFullscreen={isEffectiveTimelineFullscreen}
                       onToggleFullscreen={handleToggleTimelineFullscreen}
                       onOpenCreateTaskModal={handleOpenCreateTaskModal}
+                      user={user}
                       t={t}
                     />
                   </div>

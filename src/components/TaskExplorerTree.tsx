@@ -65,7 +65,7 @@ interface TaskExplorerTreeProps {
   deadlineThresholdDays?: number;
   language?: string;
   folderMetas?: Record<string, FolderMeta>;
-  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>) => void;
+  onUpdateFolderMeta?: (folderPath: string, updates: Partial<FolderMeta>, options?: { skipHistory?: boolean }) => void;
   onToggleFolderStar?: (folderPath: string) => void;
   onToggleFolderPin?: (folderPath: string) => void;
   onOpenCreateTaskModal?: (defaultProject?: string) => void;
@@ -932,11 +932,6 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     try {
       if (type === 'folder') {
         const newFolderPath = path ? `${path}/${value}` : value;
-        const next = customFolders.includes(newFolderPath)
-          ? customFolders
-          : [...customFolders, newFolderPath];
-        saveCustomFolders(next);
-
         onUpdateFolderMeta?.(newFolderPath, {
           category: 'Focus',
           createdAt: Date.now(),
@@ -949,9 +944,14 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
         segments.forEach(seg => {
           acc = acc ? `${acc}/${seg}` : seg;
           if (folderMetas?.[acc]?.category === 'Trash' || folderMetas?.[acc]?.category === 'Archive') {
-            onUpdateFolderMeta?.(acc, { category: 'Focus', updatedAt: Date.now() });
+            onUpdateFolderMeta?.(acc, { category: 'Focus', updatedAt: Date.now() }, { skipHistory: true });
           }
         });
+
+        const next = customFolders.includes(newFolderPath)
+          ? customFolders
+          : [...customFolders, newFolderPath];
+        saveCustomFolders(next);
 
         if (path && collapsedFolders.has(path)) {
           const nextSet = new Set<string>(collapsedFolders);
