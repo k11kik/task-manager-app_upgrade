@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -705,6 +706,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   // Quick Menu (3-line hamburger menu for quick access to all functions)
   const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false);
   const [quickMenuOrigin, setQuickMenuOrigin] = useState<'toolbar' | 'floating'>('toolbar');
+  const [quickMenuTriggerRect, setQuickMenuTriggerRect] = useState<DOMRect | null>(null);
+  const [patternMenuTriggerRect, setPatternMenuTriggerRect] = useState<DOMRect | null>(null);
   const quickMenuRef = useRef<HTMLDivElement>(null);
 
   // Time Filter State (filter tasks by updatedAt)
@@ -2783,22 +2786,56 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  const renderPatternMenuDropdown = () => (
-    <>
-      {/* Mobile Backdrop Overlay to ensure smooth touch dismissal and prevent cutoff */}
-      <div 
-        className="sm:hidden fixed inset-0 bg-slate-900/30 backdrop-blur-2xs z-[115]"
-        onClick={() => setIsPatternMenuOpen(false)}
-      />
-      <div 
-        ref={patternMenuRef}
-        className={cn(
-          "w-72 sm:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-2 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800 max-h-[calc(100dvh-10rem)] sm:max-h-[82vh] overflow-y-auto custom-scrollbar",
-          isFullscreen 
-            ? "fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom,0px))] right-2.5 max-w-[calc(100vw-1.25rem)]" 
-            : "absolute top-full left-0 mt-1.5 max-w-[calc(100vw-1.5rem)]"
-        )}
-      >
+  const renderPatternMenuDropdown = () => {
+    if (typeof document === 'undefined') return null;
+
+    const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+    let menuStyle: React.CSSProperties = {};
+
+    if (isFullscreen) {
+      menuStyle = {
+        position: 'fixed',
+        bottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
+        right: '12px',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 6rem)',
+      };
+    } else if (isMobile) {
+      const topPx = patternMenuTriggerRect ? Math.max(8, patternMenuTriggerRect.bottom + 6) : 60;
+      menuStyle = {
+        position: 'fixed',
+        top: `${topPx}px`,
+        left: '10px',
+        right: '10px',
+        maxWidth: 'calc(100vw - 20px)',
+        maxHeight: `calc(100dvh - ${topPx}px - 5.5rem - env(safe-area-inset-bottom, 0px))`,
+      };
+    } else {
+      const topPx = patternMenuTriggerRect ? patternMenuTriggerRect.bottom + 6 : 60;
+      const leftPx = patternMenuTriggerRect ? Math.max(12, patternMenuTriggerRect.left) : 16;
+      menuStyle = {
+        position: 'fixed',
+        top: `${topPx}px`,
+        left: `${leftPx}px`,
+        width: '20rem',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: `min(${Math.max(260, window.innerHeight - topPx - 24)}px, 82vh)`,
+      };
+    }
+
+    return createPortal(
+      <>
+        {/* Backdrop Overlay to ensure smooth touch dismissal and prevent cutoff */}
+        <div 
+          className="fixed inset-0 bg-slate-900/30 sm:bg-slate-900/10 backdrop-blur-2xs z-[120]"
+          onClick={() => setIsPatternMenuOpen(false)}
+        />
+        <div 
+          ref={patternMenuRef}
+          style={menuStyle}
+          className="bg-white border border-slate-200 rounded-2xl shadow-2xl z-[125] p-2 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800 overflow-y-auto overscroll-contain custom-scrollbar flex flex-col"
+          onClick={(e) => e.stopPropagation()}
+        >
         <div className="px-3 py-2 border-b border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Workflow size={15} className="text-indigo-600" />
@@ -2965,41 +3002,79 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <span>{L('Reset Phases', 'Reset Phases', 'Réinit. phases')}</span>
             </button>
           </div>
+          {/* Bottom clearance spacer so the last item is 100% visible and never crowded */}
+          <div className="h-6 sm:h-3 shrink-0" />
         </div>
       </div>
-    </>
+    </>,
+    document.body
   );
+};
 
-  const renderQuickMenuDropdown = (origin: 'toolbar' | 'floating') => (
-    <>
-      {/* Mobile Backdrop Overlay to ensure smooth touch dismissal and no cutoff */}
-      <div 
-        className="sm:hidden fixed inset-0 bg-slate-900/30 backdrop-blur-2xs z-[115]"
-        onClick={() => setIsQuickMenuOpen(false)}
-      />
-      <div
-        ref={quickMenuRef}
-        className={cn(
-          "w-72 sm:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-2 text-xs text-slate-800 select-none animate-in fade-in zoom-in-95 duration-100 max-h-[calc(100dvh-10rem)] sm:max-h-[82vh] overflow-y-auto custom-scrollbar",
-          origin === 'floating'
-            ? "fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom,0px))] right-2.5 max-w-[calc(100vw-1.25rem)]"
-            : "absolute right-0 top-full mt-1.5 max-w-[calc(100vw-1.5rem)]"
-        )}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-2.5 py-2 border-b border-slate-100 font-bold text-slate-800">
-          <span className="flex items-center gap-2 text-xs sm:text-xs">
-            <Menu size={15} className="text-indigo-600" />
-            <span>{L('タイムライン メニュー', 'Timeline Menu', 'Menu chronologie')}</span>
-          </span>
-          <button
-            type="button"
-            onClick={() => setIsQuickMenuOpen(false)}
-            className="w-7 h-7 flex items-center justify-center p-1 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 active:bg-slate-200 transition-colors cursor-pointer"
-          >
-            <X size={15} />
-          </button>
-        </div>
+  const renderQuickMenuDropdown = (origin: 'toolbar' | 'floating') => {
+    if (typeof document === 'undefined') return null;
+
+    const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+    let menuStyle: React.CSSProperties = {};
+
+    if (origin === 'floating') {
+      menuStyle = {
+        position: 'fixed',
+        bottom: 'calc(3.75rem + env(safe-area-inset-bottom, 0px))',
+        right: '12px',
+        width: '20.5rem',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 5rem)',
+      };
+    } else if (isMobile) {
+      const topPx = quickMenuTriggerRect ? Math.max(8, quickMenuTriggerRect.bottom + 6) : 56;
+      menuStyle = {
+        position: 'fixed',
+        top: `${topPx}px`,
+        right: '8px',
+        width: 'calc(100vw - 16px)',
+        maxWidth: '22rem',
+        maxHeight: `calc(100dvh - ${topPx}px - 1.25rem - env(safe-area-inset-bottom, 0px))`,
+      };
+    } else {
+      const topPx = quickMenuTriggerRect ? Math.max(8, quickMenuTriggerRect.bottom + 6) : 56;
+      const rightPx = quickMenuTriggerRect ? Math.max(12, window.innerWidth - quickMenuTriggerRect.right) : 16;
+      menuStyle = {
+        position: 'fixed',
+        top: `${topPx}px`,
+        right: `${rightPx}px`,
+        width: '20.5rem',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: `min(${Math.max(260, window.innerHeight - topPx - 20)}px, 85vh)`,
+      };
+    }
+
+    return createPortal(
+      <>
+        {/* Mobile & Desktop Backdrop Overlay to ensure smooth dismissal and prevent background taps */}
+        <div 
+          className="fixed inset-0 bg-slate-900/30 sm:bg-slate-900/10 backdrop-blur-2xs z-[120]"
+          onClick={() => setIsQuickMenuOpen(false)}
+        />
+        <div
+          ref={quickMenuRef}
+          style={menuStyle}
+          className="bg-white border border-slate-200 rounded-2xl shadow-2xl z-[125] p-2 text-xs text-slate-800 select-none animate-in fade-in zoom-in-95 duration-100 overflow-y-auto overscroll-contain custom-scrollbar flex flex-col"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-2.5 py-2 border-b border-slate-100 font-bold text-slate-800 shrink-0">
+            <span className="flex items-center gap-2 text-xs sm:text-xs">
+              <Menu size={15} className="text-indigo-600" />
+              <span>{L('タイムライン メニュー', 'Timeline Menu', 'Menu chronologie')}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsQuickMenuOpen(false)}
+              className="w-7 h-7 flex items-center justify-center p-1 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 active:bg-slate-200 transition-colors cursor-pointer"
+            >
+              <X size={15} />
+            </button>
+          </div>
 
         {/* Mode Switcher */}
         <div className="px-2 pt-2.5 pb-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
@@ -3427,9 +3502,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </button>
           </>
         )}
+        {/* Bottom clearance spacer so the last item is 100% visible and never crowded or cut off */}
+        <div className="h-8 sm:h-4 shrink-0" />
       </div>
-    </>
+    </>,
+    document.body
   );
+};
 
   const renderTimeFilterDropdown = () => (
     <>
@@ -3717,10 +3796,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 type="button"
                 data-dropdown-trigger="pattern"
-                onClick={() => {
+                onClick={(e) => {
                   if (timelineMode !== 'custom') {
                     handleSetTimelineMode('custom');
                   }
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setPatternMenuTriggerRect(rect);
                   setIsPatternMenuOpen(prev => !prev);
                 }}
                 className={cn(
@@ -3750,7 +3831,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 type="button"
                 data-dropdown-trigger="quick-menu"
-                onClick={() => {
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setQuickMenuTriggerRect(rect);
                   setQuickMenuOrigin('toolbar');
                   setIsQuickMenuOpen(prev => !prev);
                 }}
@@ -4842,7 +4925,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 type="button"
                 data-dropdown-trigger="quick-menu"
-                onClick={() => {
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setQuickMenuTriggerRect(rect);
                   setQuickMenuOrigin('floating');
                   setIsQuickMenuOpen(prev => !prev);
                 }}
@@ -4918,7 +5003,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 <button
                   type="button"
                   data-dropdown-trigger="pattern"
-                  onClick={() => setIsPatternMenuOpen(prev => !prev)}
+                  onClick={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    setPatternMenuTriggerRect(rect);
+                    setIsPatternMenuOpen(prev => !prev);
+                  }}
                   className="px-2 py-1 rounded-lg text-[10px] font-bold bg-indigo-600/90 hover:bg-indigo-600 text-white flex items-center gap-1 transition-colors cursor-pointer shrink-0"
                   title={L('Phaseパターン切り替え・管理', 'Switch & manage phase patterns', 'Gérer les modèles')}
                 >
