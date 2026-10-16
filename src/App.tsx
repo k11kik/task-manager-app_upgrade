@@ -84,7 +84,7 @@ import {
   eachMonthOfInterval
 } from 'date-fns';
 import { ja, fr, enUS } from 'date-fns/locale';
-import { Category, Task, FolderMeta, TaskRecurrence } from './types';
+import { Category, Task, FolderMeta, TaskRecurrence, PhasePattern } from './types';
 import { cn, formatDate, tr } from './lib/utils';
 import { getParentFolderDeadline } from './lib/folderDeadlineUtils';
 import { isTaskOccurringOnDate } from './lib/taskDateUtils';
@@ -431,17 +431,53 @@ export default function App() {
   // Multi-tab and Explorer state (isolated per workspace)
   const [openTaskIds, setOpenTaskIds] = useState<string[]>(() => {
     try {
+      // On mobile devices/screens, app restart should never restore leftover detail tabs as minimized
+      const isMobile = typeof window !== 'undefined' && (
+        window.innerWidth < 1024 ||
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+      );
+      if (isMobile) {
+        return [];
+      }
       const sec = localStorage.getItem('navfor_active_section') || 'General';
-      const saved = localStorage.getItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_open_tabs') : null);
-      return saved ? JSON.parse(saved) : [];
+      const detailVis = localStorage.getItem('navfor_detail_visible');
+      if (detailVis === 'false') {
+        return [];
+      }
+      const namespaced = localStorage.getItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_open_tabs') : null);
+      if (namespaced !== null) {
+        const parsed = JSON.parse(namespaced);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+      return [];
     } catch {
       return [];
     }
   });
   const [activeTabTaskId, setActiveTabTaskId] = useState<string | null>(() => {
     try {
+      const isMobile = typeof window !== 'undefined' && (
+        window.innerWidth < 1024 ||
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+      );
+      if (isMobile) {
+        return null;
+      }
       const sec = localStorage.getItem('navfor_active_section') || 'General';
-      return localStorage.getItem(`navfor_active_tab_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_active_tab') : null) || null;
+      const detailVis = localStorage.getItem('navfor_detail_visible');
+      if (detailVis === 'false') {
+        return null;
+      }
+      const namespacedTabs = localStorage.getItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_open_tabs') : null);
+      const parsedTabs: string[] = namespacedTabs ? JSON.parse(namespacedTabs) : [];
+      if (!parsedTabs || parsedTabs.length === 0) {
+        return null;
+      }
+      const namespacedActive = localStorage.getItem(`navfor_active_tab_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_active_tab') : null);
+      if (namespacedActive && parsedTabs.includes(namespacedActive)) {
+        return namespacedActive;
+      }
+      return parsedTabs[0] || null;
     } catch {
       return null;
     }
@@ -580,14 +616,27 @@ export default function App() {
       prevSectionForTabsRef.current = activeSection;
       setSelectedProject('All');
       setEditingTask(null);
+      const isMobile = typeof window !== 'undefined' && (
+        window.innerWidth < 1024 ||
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+      );
+      if (isMobile) {
+        setOpenTaskIds([]);
+        setActiveTabTaskId(null);
+        setIsDetailPaneVisible(false);
+        return;
+      }
       try {
         const savedTabs = localStorage.getItem(`navfor_open_tabs_${activeSection}`);
         const parsedTabs: string[] = savedTabs ? JSON.parse(savedTabs) : [];
-        const savedActive = localStorage.getItem(`navfor_active_tab_${activeSection}`) || null;
-        setOpenTaskIds(Array.isArray(parsedTabs) ? parsedTabs : []);
-        setActiveTabTaskId(savedActive);
         if (!parsedTabs || parsedTabs.length === 0) {
+          setOpenTaskIds([]);
+          setActiveTabTaskId(null);
           setIsDetailPaneVisible(false);
+        } else {
+          const savedActive = localStorage.getItem(`navfor_active_tab_${activeSection}`);
+          setOpenTaskIds(parsedTabs);
+          setActiveTabTaskId(savedActive && parsedTabs.includes(savedActive) ? savedActive : parsedTabs[0]);
         }
       } catch {
         setOpenTaskIds([]);
@@ -615,7 +664,12 @@ export default function App() {
   const handleOpenTaskInTab = (taskId: string, isPermanent = false) => {
     if (!taskId) return;
     setLastOpenEvent({ taskId, isPermanent, timestamp: Date.now() });
+    const isMobile = typeof window !== 'undefined' && window.innerWidth < 1024;
     setOpenTaskIds(prev => {
+      // On mobile screens, only keep the single active task in tabs to avoid hidden background tab accumulation
+      if (isMobile) {
+        return [taskId];
+      }
       if (prev.includes(taskId)) return prev;
       return [...prev, taskId];
     });
@@ -623,6 +677,10 @@ export default function App() {
     setIsDetailPaneVisible(true);
     try {
       localStorage.setItem('navfor_detail_visible', 'true');
+      if (isMobile) {
+        localStorage.setItem(`navfor_open_tabs_${activeSection}`, JSON.stringify([taskId]));
+        localStorage.setItem(`navfor_active_tab_${activeSection}`, taskId);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -638,8 +696,8 @@ export default function App() {
     setOpenTaskIds(prev => {
       const next = prev.filter(id => id !== taskId);
       if (next.length === 0) {
-        setActiveTabTaskId(null);
-        setIsDetailPaneVisible(false);
+        handleCloseAllTabs();
+        return [];
       } else if (activeTabTaskId === taskId) {
         const idx = prev.indexOf(taskId);
         const nextActive = next[idx] || next[idx - 1] || null;
@@ -657,6 +715,9 @@ export default function App() {
       localStorage.setItem(`navfor_open_tabs_${activeSection}`, '[]');
       localStorage.removeItem(`navfor_active_tab_${activeSection}`);
       localStorage.setItem('navfor_detail_visible', 'false');
+      localStorage.setItem('navfor_open_tabs', '[]');
+      localStorage.removeItem('navfor_active_tab');
+      localStorage.removeItem('navfor_editor_panes');
       const emptyPanes = [
         { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
         { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
@@ -664,6 +725,9 @@ export default function App() {
         { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
       ];
       localStorage.setItem(`navfor_editor_panes_${activeSection}`, JSON.stringify(emptyPanes));
+      localStorage.setItem('navfor_open_tabs_General', '[]');
+      localStorage.removeItem('navfor_active_tab_General');
+      localStorage.setItem('navfor_editor_panes_General', JSON.stringify(emptyPanes));
     } catch (e) {
       console.error(e);
     }
@@ -1365,7 +1429,13 @@ export default function App() {
       displayModeFocus: 'standard' as 'compact' | 'standard' | 'large',
       displayModeTodo: 'standard' as 'compact' | 'standard' | 'large',
       language: 'en' as 'en' | 'ja' | 'fr',
-      sections: ['General'] as string[]
+      sections: ['General'] as string[],
+      phaseConfigs: {} as Record<string, {
+        section?: string;
+        activePatternId?: string;
+        patterns: PhasePattern[];
+        updatedAt?: number;
+      }>
     };
     try {
       const lastUid = localStorage.getItem('navfor_last_uid');
@@ -2277,10 +2347,13 @@ export default function App() {
     const phaseConfigsQuery = query(collection(db, 'phase_configs'), where('userId', '==', user.uid));
     const unsubscribePhaseConfigs = onSnapshot(phaseConfigsQuery, (snapshot) => {
       let hasUpdates = false;
+      const cloudPhaseConfigs: Record<string, any> = {};
+
       snapshot.forEach((docSnap) => {
         const data = docSnap.data();
         if (data.userId === user.uid && Array.isArray(data.patterns) && data.patterns.length > 0) {
           const sec = data.section || 'General';
+          const safeSec = encodeURIComponent(sec).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
           const localRaw = localStorage.getItem(`navfor_phase_patterns_${sec}`);
           let localParsed: any[] = [];
           try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
@@ -2293,12 +2366,20 @@ export default function App() {
             });
           }
           const finalPatterns = Array.from(mergedMap.values());
+          const resolvedActiveId = data.activePatternId || localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || finalPatterns[0]?.id || 'default';
+
+          cloudPhaseConfigs[sec] = {
+            section: sec,
+            activePatternId: resolvedActiveId,
+            patterns: finalPatterns,
+            updatedAt: data.updatedAt || Date.now()
+          };
+          cloudPhaseConfigs[safeSec] = cloudPhaseConfigs[sec];
+
           try {
             localStorage.setItem(`navfor_phase_patterns_${sec}`, JSON.stringify(finalPatterns));
-            if (data.activePatternId) {
-              localStorage.setItem(`navfor_active_phase_pattern_${sec}`, data.activePatternId);
-            }
-            const activeP = finalPatterns.find((p: any) => p.id === (data.activePatternId || 'default')) || finalPatterns[0];
+            localStorage.setItem(`navfor_active_phase_pattern_${sec}`, resolvedActiveId);
+            const activeP = finalPatterns.find((p: any) => p.id === resolvedActiveId) || finalPatterns[0];
             if (activeP?.columns) {
               localStorage.setItem(`navfor_custom_timeline_cols_${sec}`, JSON.stringify(activeP.columns));
             }
@@ -2306,6 +2387,16 @@ export default function App() {
           } catch {}
         }
       });
+
+      if (Object.keys(cloudPhaseConfigs).length > 0) {
+        setSettings(prev => ({
+          ...prev,
+          phaseConfigs: {
+            ...(prev.phaseConfigs || {}),
+            ...cloudPhaseConfigs
+          }
+        }));
+      }
 
       // Also check if any local custom patterns exist on this device that are not yet in cloud, and upload them
       try {
@@ -2413,6 +2504,9 @@ export default function App() {
 
     try {
       const keys = Object.keys(localStorage);
+      let needsSave = false;
+      const nextPhaseConfigs = { ...(settings.phaseConfigs || {}) };
+
       for (const k of keys) {
         if (k.startsWith('navfor_phase_patterns_')) {
           const sec = k.replace('navfor_phase_patterns_', '') || 'General';
@@ -2422,25 +2516,32 @@ export default function App() {
           try { parsed = JSON.parse(raw); } catch {}
           if (Array.isArray(parsed) && parsed.length > 0) {
             const hasCustom = parsed.length > 1 || parsed[0]?.id !== 'default' || (parsed[0]?.columns && parsed[0].columns.length !== 5);
-            if (hasCustom) {
-              const activePat = localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || 'default';
-              const safeSec = encodeURIComponent(sec).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+            const safeSec = encodeURIComponent(sec).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+            const cloudPatterns = settings.phaseConfigs?.[sec]?.patterns || settings.phaseConfigs?.[safeSec]?.patterns;
+
+            if (hasCustom && (!cloudPatterns || cloudPatterns.length <= 1)) {
+              const activePat = localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || parsed[0]?.id || 'default';
               const payload = {
-                userId: user.uid,
                 section: sec,
                 activePatternId: activePat,
                 patterns: parsed,
                 updatedAt: Date.now()
               };
-              setDoc(doc(db, 'phase_configs', `${user.uid}_${safeSec}`), payload, { merge: true }).catch(() => {});
-              setDoc(doc(db, 'settings', user.uid), {
-                phaseConfigs: {
-                  [safeSec]: payload
-                }
+              nextPhaseConfigs[sec] = payload;
+              nextPhaseConfigs[safeSec] = payload;
+              needsSave = true;
+
+              setDoc(doc(db, 'phase_configs', `${user.uid}_${safeSec}`), {
+                userId: user.uid,
+                ...payload
               }, { merge: true }).catch(() => {});
             }
           }
         }
+      }
+
+      if (needsSave) {
+        saveSettings({ phaseConfigs: nextPhaseConfigs });
       }
     } catch (e) {
       console.warn("Phase pattern auto-sync scan:", e);
@@ -2512,6 +2613,58 @@ export default function App() {
       }
       return next;
     });
+  };
+
+  // Explicit Phase Patterns persistence handler for cross-device synchronization
+  const handleSavePhasePatterns = async (section: string, patterns: PhasePattern[], activePatternId?: string) => {
+    const secKey = section || 'General';
+    const safeSec = encodeURIComponent(secKey).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+    const targetActiveId = activePatternId || patterns[0]?.id || 'default';
+
+    // 1. Immediately cache in localStorage & dispatch event for instant UI update
+    try {
+      localStorage.setItem(`navfor_phase_patterns_${secKey}`, JSON.stringify(patterns));
+      localStorage.setItem(`navfor_active_phase_pattern_${secKey}`, targetActiveId);
+      const current = patterns.find(p => p.id === targetActiveId) || patterns[0];
+      if (current) {
+        localStorage.setItem(`navfor_custom_timeline_cols_${secKey}`, JSON.stringify(current.columns));
+      }
+      window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
+    } catch (e) {
+      console.error(e);
+    }
+
+    // 2. Persist to settings state & Firestore settings document (Account synchronized across all devices)
+    const phasePayload = {
+      section: secKey,
+      activePatternId: targetActiveId,
+      patterns,
+      updatedAt: Date.now()
+    };
+
+    const nextPhaseConfigs = {
+      ...(settings.phaseConfigs || {}),
+      [secKey]: phasePayload,
+      [safeSec]: phasePayload
+    };
+
+    await saveSettings({ phaseConfigs: nextPhaseConfigs });
+
+    // 3. Write to dedicated phase_configs document for full dual-channel cloud sync
+    if (user?.uid) {
+      try {
+        const docRef = doc(db, 'phase_configs', `${user.uid}_${safeSec}`);
+        setDoc(docRef, {
+          userId: user.uid,
+          section: secKey,
+          activePatternId: targetActiveId,
+          patterns,
+          updatedAt: Date.now()
+        }, { merge: true }).catch(() => {});
+      } catch (err) {
+        console.warn("Direct phase_configs write warning:", err);
+      }
+    }
   };
 
   const isListMode = settings.displayMode === 'compact';
@@ -6700,6 +6853,55 @@ export default function App() {
                       isFullscreen={isEffectiveTimelineFullscreen}
                       onToggleFullscreen={handleToggleTimelineFullscreen}
                       onOpenCreateTaskModal={handleOpenCreateTaskModal}
+                      phasePatterns={(() => {
+                        const map = new Map<string, PhasePattern>();
+                        const secKey = activeSection || 'General';
+                        const safeSec = encodeURIComponent(secKey).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
+                        // 1. Current section patterns
+                        const secPatterns = settings.phaseConfigs?.[secKey]?.patterns || settings.phaseConfigs?.[safeSec]?.patterns;
+                        if (Array.isArray(secPatterns)) {
+                          secPatterns.forEach(p => { if (p && p.id) map.set(p.id, p); });
+                        }
+                        // 2. All patterns from other sections in user's account settings
+                        if (settings.phaseConfigs && typeof settings.phaseConfigs === 'object') {
+                          Object.values(settings.phaseConfigs).forEach((cfg: any) => {
+                            if (cfg && Array.isArray(cfg.patterns)) {
+                              cfg.patterns.forEach((p: PhasePattern) => {
+                                if (p && p.id) {
+                                  const existing = map.get(p.id);
+                                  if (!existing || (p.updatedAt && (!existing.updatedAt || p.updatedAt >= existing.updatedAt))) {
+                                    map.set(p.id, p);
+                                  }
+                                }
+                              });
+                            }
+                          });
+                        }
+                        // 3. Fallback from localStorage across all sections
+                        try {
+                          const keys = Object.keys(localStorage).filter(k => k.startsWith('navfor_phase_patterns_'));
+                          keys.forEach(k => {
+                            const raw = localStorage.getItem(k);
+                            if (raw) {
+                              const parsed = JSON.parse(raw);
+                              if (Array.isArray(parsed)) {
+                                parsed.forEach((p: PhasePattern) => {
+                                  if (p && p.id && !map.has(p.id)) {
+                                    map.set(p.id, p);
+                                  }
+                                });
+                              }
+                            }
+                          });
+                        } catch {}
+                        const list = Array.from(map.values());
+                        return list.length > 0 ? list : undefined;
+                      })()}
+                      activePatternId={
+                        settings.phaseConfigs?.[activeSection]?.activePatternId ||
+                        settings.phaseConfigs?.[encodeURIComponent(activeSection).replace(/[^a-zA-Z0-9_-]/g, '_')]?.activePatternId
+                      }
+                      onSavePhasePatterns={handleSavePhasePatterns}
                       user={user}
                       t={t}
                     />
@@ -7425,7 +7627,7 @@ export default function App() {
                       setLastOpenEvent({ taskId: id, isPermanent: true, timestamp: Date.now() });
                     }
                   }}
-                  onClose={handleMinimizeDetailPane}
+                  onClose={handleCloseAllTabs}
                   onMinimize={handleMinimizeDetailPane}
                   onCloseAllTabs={handleCloseAllTabs}
                   isHidden={!isDetailPaneVisible}
@@ -7483,7 +7685,7 @@ export default function App() {
                 <div
                   className={cn(
                     "lg:hidden fixed left-2.5 flex items-center bg-slate-900/90 backdrop-blur-md text-white rounded-xl shadow-xl border border-white/15 select-none overflow-hidden max-w-[calc(100vw-9.5rem)]",
-                    isEffectiveTimelineFullscreen ? "bottom-13 sm:bottom-2.5 z-[95]" : "bottom-18 z-[65]"
+                    isEffectiveTimelineFullscreen ? "bottom-[calc(3.85rem+env(safe-area-inset-bottom,0px))] z-[95]" : "bottom-18 z-[65]"
                   )}
                 >
                   <button

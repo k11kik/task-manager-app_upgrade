@@ -19,12 +19,14 @@ import {
   Maximize2,
   Minimize2,
   FileText,
-  Check
+  Check,
+  FolderTree
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { Task, Category, RecurrenceType, TaskRecurrence, FolderMeta } from '../types';
 import { cn, tr } from '../lib/utils';
 import { getParentFolderDeadline } from '../lib/folderDeadlineUtils';
+import { FinderFolderPicker } from './FinderFolderPicker';
 
 export interface CreateTaskModalProps {
   isOpen: boolean;
@@ -74,6 +76,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
   const [isFolderDropdownOpen, setIsFolderDropdownOpen] = useState(false);
   const [filterByTypedFolder, setFilterByTypedFolder] = useState(false);
   const [highlightedFolderIdx, setHighlightedFolderIdx] = useState<number>(-1);
+  const [folderPickerMode, setFolderPickerMode] = useState<'finder' | 'text'>('finder');
 
   const [isDone, setIsDone] = useState(false);
   const [category, setCategory] = useState<Category>('Focus'); // 'Focus' = ToDo, 'Urgent' = Focus
@@ -109,6 +112,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
       setIsFolderDropdownOpen(false);
       setFilterByTypedFolder(false);
       setHighlightedFolderIdx(-1);
+      setFolderPickerMode('finder');
       setIsDone(false);
       setCategory('Focus');
       setIsStarred(false);
@@ -369,7 +373,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
             onClose();
           }
         }}
-        className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden select-text"
+        className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-xl sm:max-w-2xl max-h-[90vh] flex flex-col overflow-hidden select-text"
       >
         {/* Modal Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-slate-50/70 shrink-0">
@@ -410,162 +414,202 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
             </div>
           )}
 
-          {/* 1. Project Folder Selector / Input with Autocomplete & New Folder Creation */}
-          <div className="space-y-1" ref={folderComboboxRef}>
+          {/* 1. Project Folder Selector with Mac Finder 3-Column Miller View */}
+          <div className="space-y-1.5" ref={folderComboboxRef}>
             <div className="flex items-center justify-between">
               <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
                 <Folder size={12} className="text-amber-500" />
                 <span>{L('プロジェクトフォルダ', 'Project Folder', 'Dossier du projet')}</span>
               </label>
-              {!isExactFolderMatch && normalizedProject && (
-                <span className="text-[10px] font-semibold text-indigo-600 flex items-center gap-1">
-                  <FolderPlus size={11} />
-                  {L('新規フォルダ作成', 'Will create new folder', 'Nouveau dossier')}
-                </span>
-              )}
-            </div>
 
-            <div className="relative">
-              <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
-                <span className="pl-2.5 pr-1.5 text-amber-500 shrink-0">
-                  <Folder size={14} />
-                </span>
-                <input
-                  type="text"
-                  value={projectInput}
-                  onFocus={() => {
-                    setIsFolderDropdownOpen(true);
-                  }}
-                  onChange={(e) => {
-                    setProjectInput(e.target.value);
-                    setFilterByTypedFolder(true);
-                    setIsFolderDropdownOpen(true);
-                    setHighlightedFolderIdx(-1);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'ArrowDown') {
-                      e.preventDefault();
-                      setIsFolderDropdownOpen(true);
-                      setHighlightedFolderIdx(prev =>
-                        filteredFolders.length > 0 ? (prev + 1) % filteredFolders.length : -1
-                      );
-                    } else if (e.key === 'ArrowUp') {
-                      e.preventDefault();
-                      setIsFolderDropdownOpen(true);
-                      setHighlightedFolderIdx(prev =>
-                        filteredFolders.length > 0
-                          ? (prev <= 0 ? filteredFolders.length - 1 : prev - 1)
-                          : -1
-                      );
-                    } else if (e.key === 'Enter' && isFolderDropdownOpen && highlightedFolderIdx >= 0 && highlightedFolderIdx < filteredFolders.length) {
-                      e.preventDefault();
-                      setProjectInput(filteredFolders[highlightedFolderIdx]);
-                      setFilterByTypedFolder(false);
-                      setIsFolderDropdownOpen(false);
-                    } else if (e.key === 'Escape' && isFolderDropdownOpen) {
-                      e.stopPropagation();
-                      setIsFolderDropdownOpen(false);
-                    }
-                  }}
-                  placeholder={L(
-                    'フォルダ名またはパスを入力 (例: Marketing/Design)...',
-                    'Type or select folder path (e.g. Marketing/Design)...',
-                    'Saisir ou choisir un dossier (ex: Marketing/Design)...'
-                  )}
-                  className="flex-1 bg-transparent py-1.5 pr-1 text-xs font-mono font-semibold text-slate-800 outline-none min-w-0"
-                />
-                {projectInput && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setProjectInput('');
-                      setFilterByTypedFolder(false);
-                      setIsFolderDropdownOpen(true);
-                    }}
-                    className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors shrink-0"
-                    title={L('クリア', 'Clear', 'Effacer')}
-                  >
-                    <X size={12} />
-                  </button>
-                )}
+              {/* View Mode Toggle: Mac Finder 3-Column vs Text Input */}
+              <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
                 <button
                   type="button"
-                  onClick={() => {
-                    setFilterByTypedFolder(false);
-                    setIsFolderDropdownOpen(prev => !prev);
-                  }}
-                  className="px-2 py-1.5 text-slate-400 hover:text-slate-700 border-l border-slate-200 transition-colors shrink-0"
-                  title={L('既存フォルダ一覧を表示', 'Show existing folders', 'Afficher les dossiers existants')}
+                  onClick={() => setFolderPickerMode('finder')}
+                  className={cn(
+                    "px-2 py-0.5 text-[10px] font-bold rounded flex items-center gap-1 transition-colors cursor-pointer",
+                    folderPickerMode === 'finder'
+                      ? "bg-white text-indigo-700 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                  title={L('Mac Finder カラム表示 (3列で選択)', 'Finder Column View (3 columns)', 'Affichage colonnes Finder')}
                 >
-                  <ChevronDown size={13} className={cn("transition-transform", isFolderDropdownOpen && "rotate-180")} />
+                  <FolderTree size={11} className={folderPickerMode === 'finder' ? "text-indigo-600" : "text-slate-500"} />
+                  <span>{L('Finder表示 (3列)', 'Finder (3 Cols)', 'Finder (3 col.)')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFolderPickerMode('text')}
+                  className={cn(
+                    "px-2 py-0.5 text-[10px] font-bold rounded flex items-center gap-1 transition-colors cursor-pointer",
+                    folderPickerMode === 'text'
+                      ? "bg-white text-indigo-700 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                  title={L('テキストでパスを直接入力', 'Direct Text Input', 'Saisie directe')}
+                >
+                  <span>{L('直接入力', 'Direct Input', 'Texte')}</span>
                 </button>
               </div>
+            </div>
 
-              {/* Autocomplete Candidates Dropdown */}
-              {isFolderDropdownOpen && (
-                <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto custom-scrollbar py-1 text-xs">
-                  {!isExactFolderMatch && normalizedProject && (
+            {/* Finder 3-Column Miller View */}
+            {folderPickerMode === 'finder' ? (
+              <FinderFolderPicker
+                selectedFolder={projectInput}
+                onSelectFolder={(newPath) => {
+                  setProjectInput(newPath);
+                  setFilterByTypedFolder(false);
+                }}
+                existingFolders={existingFolders}
+                activeSection={activeSection}
+                language={language}
+              />
+            ) : (
+              /* Direct Text Input Mode with Autocomplete Dropdown */
+              <div className="relative">
+                <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
+                  <span className="pl-2.5 pr-1.5 text-amber-500 shrink-0">
+                    <Folder size={14} />
+                  </span>
+                  <input
+                    type="text"
+                    value={projectInput}
+                    onFocus={() => {
+                      setIsFolderDropdownOpen(true);
+                    }}
+                    onChange={(e) => {
+                      setProjectInput(e.target.value);
+                      setFilterByTypedFolder(true);
+                      setIsFolderDropdownOpen(true);
+                      setHighlightedFolderIdx(-1);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        setIsFolderDropdownOpen(true);
+                        setHighlightedFolderIdx(prev =>
+                          filteredFolders.length > 0 ? (prev + 1) % filteredFolders.length : -1
+                        );
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        setIsFolderDropdownOpen(true);
+                        setHighlightedFolderIdx(prev =>
+                          filteredFolders.length > 0
+                            ? (prev <= 0 ? filteredFolders.length - 1 : prev - 1)
+                            : -1
+                        );
+                      } else if (e.key === 'Enter' && isFolderDropdownOpen && highlightedFolderIdx >= 0 && highlightedFolderIdx < filteredFolders.length) {
+                        e.preventDefault();
+                        setProjectInput(filteredFolders[highlightedFolderIdx]);
+                        setFilterByTypedFolder(false);
+                        setIsFolderDropdownOpen(false);
+                      } else if (e.key === 'Escape' && isFolderDropdownOpen) {
+                        e.stopPropagation();
+                        setIsFolderDropdownOpen(false);
+                      }
+                    }}
+                    placeholder={L(
+                      'フォルダ名またはパスを入力 (例: Marketing/Design)...',
+                      'Type or select folder path (e.g. Marketing/Design)...',
+                      'Saisir ou choisir un dossier (ex: Marketing/Design)...'
+                    )}
+                    className="flex-1 bg-transparent py-1.5 pr-1 text-xs font-mono font-semibold text-slate-800 outline-none min-w-0"
+                  />
+                  {projectInput && (
                     <button
                       type="button"
                       onClick={() => {
-                        setProjectInput(normalizedProject);
+                        setProjectInput('');
                         setFilterByTypedFolder(false);
-                        setIsFolderDropdownOpen(false);
+                        setIsFolderDropdownOpen(true);
                       }}
-                      className="w-full px-3 py-2 text-left hover:bg-indigo-50/80 flex items-center justify-between gap-2 text-indigo-700 bg-indigo-50/40 border-b border-slate-100"
+                      className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors shrink-0"
+                      title={L('クリア', 'Clear', 'Effacer')}
                     >
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <FolderPlus size={13} className="text-indigo-600 shrink-0" />
-                        <span className="font-mono font-bold truncate">{normalizedProject}</span>
-                      </div>
-                      <span className="text-[10px] font-semibold text-indigo-600 shrink-0">
-                        {L('＋ 新規作成', '+ Create new', '+ Créer')}
-                      </span>
+                      <X size={12} />
                     </button>
                   )}
-
-                  {filteredFolders.length > 0 ? (
-                    filteredFolders.map((folderPath, idx) => {
-                      const isCurrent = folderPath.toLowerCase() === normalizedProject.toLowerCase();
-                      const isHighlighted = idx === highlightedFolderIdx;
-                      return (
-                        <button
-                          key={folderPath}
-                          type="button"
-                          onClick={() => {
-                            setProjectInput(folderPath);
-                            setFilterByTypedFolder(false);
-                            setIsFolderDropdownOpen(false);
-                          }}
-                          className={cn(
-                            "w-full px-3 py-1.5 text-left flex items-center justify-between gap-2 transition-colors",
-                            isHighlighted
-                              ? "bg-indigo-50 text-indigo-700"
-                              : isCurrent
-                              ? "bg-slate-100/80 text-slate-900 font-bold"
-                              : "text-slate-700 hover:bg-slate-50"
-                          )}
-                        >
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            <Folder size={12} className="text-amber-500 shrink-0" />
-                            <span className="font-mono truncate">{folderPath}</span>
-                          </div>
-                          {isCurrent && <Check size={12} className="text-indigo-600 shrink-0" />}
-                        </button>
-                      );
-                    })
-                  ) : (
-                    <div className="px-3 py-2 text-[11px] text-slate-400 italic">
-                      {L(
-                        '一致する既存フォルダがありません（入力したパスで新規作成されます）',
-                        'No matching folders (will create new folder path)',
-                        'Aucun dossier correspondant (sera créé)'
-                      )}
-                    </div>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilterByTypedFolder(false);
+                      setIsFolderDropdownOpen(prev => !prev);
+                    }}
+                    className="px-2 py-1.5 text-slate-400 hover:text-slate-700 border-l border-slate-200 transition-colors shrink-0"
+                    title={L('既存フォルダ一覧を表示', 'Show existing folders', 'Afficher les dossiers existants')}
+                  >
+                    <ChevronDown size={13} className={cn("transition-transform", isFolderDropdownOpen && "rotate-180")} />
+                  </button>
                 </div>
-              )}
-            </div>
+
+                {/* Autocomplete Candidates Dropdown */}
+                {isFolderDropdownOpen && (
+                  <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto custom-scrollbar py-1 text-xs">
+                    {!isExactFolderMatch && normalizedProject && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProjectInput(normalizedProject);
+                          setFilterByTypedFolder(false);
+                          setIsFolderDropdownOpen(false);
+                        }}
+                        className="w-full px-3 py-2 text-left hover:bg-indigo-50/80 flex items-center justify-between gap-2 text-indigo-700 bg-indigo-50/40 border-b border-slate-100"
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <FolderPlus size={13} className="text-indigo-600 shrink-0" />
+                          <span className="font-mono font-bold truncate">{normalizedProject}</span>
+                        </div>
+                        <span className="text-[10px] font-semibold text-indigo-600 shrink-0">
+                          {L('＋ 新規作成', '+ Create new', '+ Créer')}
+                        </span>
+                      </button>
+                    )}
+
+                    {filteredFolders.length > 0 ? (
+                      filteredFolders.map((folderPath, idx) => {
+                        const isCurrent = folderPath.toLowerCase() === normalizedProject.toLowerCase();
+                        const isHighlighted = idx === highlightedFolderIdx;
+                        return (
+                          <button
+                            key={folderPath}
+                            type="button"
+                            onClick={() => {
+                              setProjectInput(folderPath);
+                              setFilterByTypedFolder(false);
+                              setIsFolderDropdownOpen(false);
+                            }}
+                            className={cn(
+                              "w-full px-3 py-1.5 text-left flex items-center justify-between gap-2 transition-colors",
+                              isHighlighted
+                                ? "bg-indigo-50 text-indigo-700"
+                                : isCurrent
+                                ? "bg-slate-100/80 text-slate-900 font-bold"
+                                : "text-slate-700 hover:bg-slate-50"
+                            )}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <Folder size={12} className="text-amber-500 shrink-0" />
+                              <span className="font-mono truncate">{folderPath}</span>
+                            </div>
+                            {isCurrent && <Check size={12} className="text-indigo-600 shrink-0" />}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="px-3 py-2 text-[11px] text-slate-400 italic">
+                        {L(
+                          '一致する既存フォルダがありません（入力したパスで新規作成されます）',
+                          'No matching folders (will create new folder path)',
+                          'Aucun dossier correspondant (sera créé)'
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* 2. Title and Done checkbox */}
