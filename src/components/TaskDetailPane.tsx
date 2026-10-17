@@ -92,10 +92,14 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
 
   // Resize handler for right panel
   const isResizingRef = useRef(false);
+  const isTitleFocusedRef = useRef(false);
+  const isTitleComposingRef = useRef(false);
 
   useEffect(() => {
     if (task) {
-      setTitle(task.title || '');
+      if (!isTitleFocusedRef.current) {
+        setTitle(task.title || '');
+      }
       setNotes(task.notes || '');
       setUrls(task.urls || []);
       setIsAllDay(task.isAllDay || false);
@@ -166,8 +170,13 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
   };
 
   const saveTitle = (newTitle: string) => {
-    if (!newTitle.trim() || newTitle === task.title) return;
-    onUpdateTask(task.id, { title: newTitle.trim() });
+    const trimmed = newTitle.trim();
+    if (!trimmed) {
+      setTitle(task.title || '');
+      return;
+    }
+    if (trimmed === task.title) return;
+    onUpdateTask(task.id, { title: trimmed });
     triggerSaveNotice();
   };
 
@@ -329,10 +338,28 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
               <textarea
                 rows={1}
                 value={title}
+                onFocus={() => {
+                  isTitleFocusedRef.current = true;
+                }}
                 onChange={(e) => setTitle(e.target.value.replace(/\r?\n/g, ' '))}
-                onBlur={() => saveTitle(title)}
+                onCompositionStart={() => {
+                  isTitleComposingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  setTimeout(() => {
+                    isTitleComposingRef.current = false;
+                  }, 50);
+                }}
+                onBlur={() => {
+                  isTitleFocusedRef.current = false;
+                  isTitleComposingRef.current = false;
+                  saveTitle(title);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
+                    if (isTitleComposingRef.current || e.nativeEvent.isComposing || (e as any).isComposing || e.keyCode === 229) {
+                      return; // IME composition in progress: do not save or blur!
+                    }
                     e.preventDefault();
                     saveTitle(title);
                     (e.target as HTMLTextAreaElement).blur();

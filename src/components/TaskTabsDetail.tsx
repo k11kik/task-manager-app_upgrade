@@ -231,6 +231,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
 
   // Track focus and unsaved edits so typing in Notes/Title never triggers mid-typing backups or cursor jumps
   const isTitleFocusedRef = useRef(false);
+  const isTitleComposingRef = useRef(false);
   const isNotesFocusedRef = useRef(false);
   const syncedTaskIdRef = useRef<string | null>(null);
   const lastSavedTitleRef = useRef<string>('');
@@ -363,7 +364,11 @@ const SinglePane: React.FC<SinglePaneProps> = ({
     if (!activeTask) return;
     dirtyTitleRef.current = null;
     const trimmed = newTitle.trim();
-    if (!trimmed || trimmed === lastSavedTitleRef.current) return;
+    if (!trimmed) {
+      setTitle(lastSavedTitleRef.current || activeTask.title || '');
+      return;
+    }
+    if (trimmed === lastSavedTitleRef.current) return;
     lastSavedTitleRef.current = trimmed;
     onPinTab(activeTask.id); // Promotes to permanent on edit
     onUpdateTask(activeTask.id, { title: trimmed });
@@ -772,8 +777,9 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                     e.stopPropagation();
                     onCloseTab(item.id);
                   }}
-                  className="ml-0.5 p-0.5 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-200/80 transition-colors opacity-70 group-hover:opacity-100 not-italic"
+                  className="ml-0.5 p-1 sm:p-0.5 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-200/80 transition-colors opacity-80 sm:opacity-70 group-hover:opacity-100 not-italic cursor-pointer touch-manipulation flex items-center justify-center min-w-[20px] min-h-[20px]"
                   title={L('閉じる (中クリックでも可)', 'Close', 'Fermer')}
+                  aria-label={L('タブを閉じる', 'Close tab', 'Fermer l’onglet')}
                 >
                   <X size={12} />
                 </button>
@@ -939,17 +945,28 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                     setTitle(nextVal);
                     if (nextVal.trim() !== lastSavedTitleRef.current) {
                       dirtyTitleRef.current = { taskId: activeTask.id, value: nextVal };
-                      onPinTab(activeTask.id);
                     } else {
                       dirtyTitleRef.current = null;
                     }
                   }}
+                  onCompositionStart={() => {
+                    isTitleComposingRef.current = true;
+                  }}
+                  onCompositionEnd={() => {
+                    setTimeout(() => {
+                      isTitleComposingRef.current = false;
+                    }, 50);
+                  }}
                   onBlur={() => {
                     isTitleFocusedRef.current = false;
+                    isTitleComposingRef.current = false;
                     saveTitle(title);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
+                      if (isTitleComposingRef.current || e.nativeEvent.isComposing || (e as any).isComposing || e.keyCode === 229) {
+                        return; // IME composition in progress: do not save or blur!
+                      }
                       e.preventDefault();
                       saveTitle(title);
                       (e.target as HTMLTextAreaElement).blur();
@@ -1961,15 +1978,6 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 
   // Close a single tab in a pane
   const handleCloseTabInPane = (paneId: number, taskId: string) => {
-    const isMobile = typeof window !== 'undefined' && (
-      window.innerWidth < 1024 ||
-      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-    );
-    if (isMobile) {
-      handleCloseAllTabs();
-      return;
-    }
-
     const remainingVisibleTabs = panes.reduce((acc, p) => {
       if (!visiblePaneIds.includes(p.id)) return acc;
       const nextIds = p.id === paneId ? p.openTaskIds.filter(id => id !== taskId) : p.openTaskIds;

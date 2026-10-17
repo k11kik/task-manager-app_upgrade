@@ -125,6 +125,18 @@ export const getTaskCurrentStep = (
   return 0;
 };
 
+// Helper to determine if a task has an all-day deadline or is all-day
+export const isTaskAllDayDeadline = (task: { deadline?: number; startDate?: number; isAllDay?: boolean } | null | undefined): boolean => {
+  if (!task) return false;
+  if (task.isAllDay) return true;
+  if (typeof task.deadline === 'number') {
+    const d = new Date(task.deadline);
+    if (d.getHours() === 23 && d.getMinutes() >= 59) return true;
+    if (d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0) return true;
+  }
+  return false;
+};
+
 // Helper for approaching or overdue deadline alerts
 export const getTaskDeadlineAlert = (deadline?: number, isDone?: boolean, language: string = 'ja') => {
   if (!deadline || isDone) return null;
@@ -134,19 +146,22 @@ export const getTaskDeadlineAlert = (deadline?: number, isDone?: boolean, langua
   const isTargetToday = isToday(targetDate);
   const isTargetTomorrow = isTomorrow(targetDate);
   const daysDiff = differenceInCalendarDays(targetDate, new Date());
+  const isAllDay = isTaskAllDayDeadline({ deadline });
 
   if (isOverdue) {
     return {
       isOverdue: true,
       label: tr(language, '期限切', 'Overdue', 'Retard'),
-      tooltip: tr(language, `期限切れ: ${format(targetDate, 'yyyy/MM/dd HH:mm')}`, `Overdue: ${format(targetDate, 'MM/dd/yyyy HH:mm')}`, `En retard : ${format(targetDate, 'dd/MM/yyyy HH:mm')}`)
+      tooltip: tr(language, `期限切れ: ${format(targetDate, isAllDay ? 'yyyy/MM/dd' : 'yyyy/MM/dd HH:mm')}`, `Overdue: ${format(targetDate, isAllDay ? 'MM/dd/yyyy' : 'MM/dd/yyyy HH:mm')}`, `En retard : ${format(targetDate, isAllDay ? 'dd/MM/yyyy' : 'dd/MM/yyyy HH:mm')}`)
     };
   }
   if (isTargetToday) {
     return {
       isOverdue: false,
       label: tr(language, '本日', 'Today', 'Auj.'),
-      tooltip: tr(language, `本日締切: ${format(targetDate, 'HH:mm')}`, `Due today: ${format(targetDate, 'HH:mm')}`, `Échéance aujourd'hui : ${format(targetDate, 'HH:mm')}`)
+      tooltip: isAllDay 
+        ? tr(language, '本日締切 (終日)', 'Due today (All day)', "Échéance aujourd'hui (Toute la journée)")
+        : tr(language, `本日締切: ${format(targetDate, 'HH:mm')}`, `Due today: ${format(targetDate, 'HH:mm')}`, `Échéance aujourd'hui : ${format(targetDate, 'HH:mm')}`)
     };
   }
   if (isTargetTomorrow) {
@@ -1383,17 +1398,129 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     window.addEventListener('touchend', handleEnd);
   };
 
+  // Fine grid calculations for Calendar Mode
+  const effectiveGridStep = isGridEnabled ? gridStepHours : 24;
+  const slotDurationMs = useMemo(() => effectiveGridStep * 3600 * 1000, [effectiveGridStep]);
+  const slotsPerDay = useMemo(() => Math.max(1, Math.round(24 / effectiveGridStep)), [effectiveGridStep]);
+
+  // User adjustable Date columns width (for Dates mode)
+  // Default is 200px when grid is OFF (matching Phase display default of 200px)
+  const defaultDateColWidth = useMemo(() => {
+    if (!isGridEnabled) return 200;
+    if (gridStepHours <= 1) return 30 * 24; // 720
+    if (gridStepHours <= 2) return 38 * 12; // 456
+    if (gridStepHours <= 4) return 46 * 6;  // 276
+    if (gridStepHours <= 6) return 60 * 4;  // 240
+    if (gridStepHours <= 12) return 84 * 2; // 168
+    return 200;
+  }, [isGridEnabled, gridStepHours]);
+
+  const [customDateColWidthOff, setCustomDateColWidthOff] = useState<number | null>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_date_col_width_off');
+      if (saved) {
+        const parsed = Number(saved);
+        if (!isNaN(parsed) && parsed >= 80) return parsed;
+      }
+    } catch {}
+    return null;
+  });
+
+  const [customDateColWidthOn, setCustomDateColWidthOn] = useState<number | null>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_date_col_width_on');
+      if (saved) {
+        const parsed = Number(saved);
+        if (!isNaN(parsed) && parsed >= 80) return parsed;
+      }
+    } catch {}
+    return null;
+  });
+
+  const isResizingDateCol = useRef(false);
+  const startDateXRef = useRef(0);
+  const startDateWidthRef = useRef(0);
+
+  const effectiveDateColWidth = useMemo(() => {
+    if (!isGridEnabled) {
+      return customDateColWidthOff ?? 200;
+    }
+    return customDateColWidthOn ?? defaultDateColWidth;
+  }, [isGridEnabled, customDateColWidthOff, customDateColWidthOn, defaultDateColWidth]);
+
+  const slotWidth = useMemo(() => {
+    if (!isGridEnabled) return effectiveDateColWidth;
+    return Math.max(20, Math.round(effectiveDateColWidth / slotsPerDay));
+  }, [isGridEnabled, effectiveDateColWidth, slotsPerDay]);
+
+  const handleStartDateColResize = (clientX: number) => {
+    isResizingDateCol.current = true;
+    startDateXRef.current = clientX;
+    startDateWidthRef.current = effectiveDateColWidth;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const minWidth = !isGridEnabled ? 100 : Math.max(120, slotsPerDay * 20);
+    const maxWidth = !isGridEnabled ? 800 : Math.max(800, slotsPerDay * 80);
+
+    const handleMove = (e: MouseEvent | TouchEvent) => {
+      if (!isResizingDateCol.current) return;
+      const currentX = 'touches' in e ? e.touches[0].clientX : (e as MouseEvent).clientX;
+      const delta = currentX - startDateXRef.current;
+      const newWidth = Math.max(minWidth, Math.min(maxWidth, startDateWidthRef.current + delta));
+
+      if (!isGridEnabled) {
+        setCustomDateColWidthOff(newWidth);
+      } else {
+        setCustomDateColWidthOn(newWidth);
+      }
+    };
+
+    const handleEnd = () => {
+      if (!isResizingDateCol.current) return;
+      isResizingDateCol.current = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleEnd);
+      window.removeEventListener('touchmove', handleMove);
+      window.removeEventListener('touchend', handleEnd);
+      try {
+        if (!isGridEnabled) {
+          setCustomDateColWidthOff(w => {
+            if (w !== null) localStorage.setItem('navfor_timeline_date_col_width_off', String(w));
+            return w;
+          });
+        } else {
+          setCustomDateColWidthOn(w => {
+            if (w !== null) localStorage.setItem('navfor_timeline_date_col_width_on', String(w));
+            return w;
+          });
+        }
+      } catch {}
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('touchmove', handleMove, { passive: false });
+    window.addEventListener('touchend', handleEnd);
+  };
+
   const handleResetColumnWidths = () => {
     const defaultProj = typeof window !== 'undefined' && window.innerWidth < 640 ? 210 : 256;
     setProjectColWidth(defaultProj);
     setFullscreenProjectColWidth(135);
     setTodoColWidth(160);
     setCustomColWidths({});
+    setCustomDateColWidthOff(null);
+    setCustomDateColWidthOn(null);
     try {
       localStorage.removeItem('navfor_timeline_project_col_width');
       localStorage.removeItem('navfor_timeline_fs_project_col_width');
       localStorage.removeItem('navfor_timeline_todo_col_width');
       localStorage.removeItem('navfor_timeline_custom_col_widths');
+      localStorage.removeItem('navfor_timeline_date_col_width_off');
+      localStorage.removeItem('navfor_timeline_date_col_width_on');
     } catch {}
   };
 
@@ -1431,22 +1558,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     return dates;
   }, [windowStartDate, daysCount]);
 
-  // Fine grid calculations for Calendar Mode
-  const effectiveGridStep = isGridEnabled ? gridStepHours : 24;
-  const slotDurationMs = useMemo(() => effectiveGridStep * 3600 * 1000, [effectiveGridStep]);
-  const slotsPerDay = useMemo(() => Math.max(1, Math.round(24 / effectiveGridStep)), [effectiveGridStep]);
   const totalSlots = useMemo(() => daysCount * slotsPerDay, [daysCount, slotsPerDay]);
   const timelineStartMs = useMemo(() => startOfDay(windowStartDate).getTime(), [windowStartDate]);
-
-  const slotWidth = useMemo(() => {
-    if (!isGridEnabled) return 130;
-    if (gridStepHours <= 1) return 30;
-    if (gridStepHours <= 2) return 38;
-    if (gridStepHours <= 4) return 46;
-    if (gridStepHours <= 6) return 60;
-    if (gridStepHours <= 12) return 84;
-    return 130;
-  }, [isGridEnabled, gridStepHours]);
 
   const totalGridWidth = useMemo(() => totalSlots * slotWidth, [totalSlots, slotWidth]);
 
@@ -1779,6 +1892,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     const items: CandidateItem[] = [];
 
     scheduled.forEach(task => {
+      const allDay = isTaskAllDayDeadline(task) || !isGridEnabled;
+
       if (task.recurrence && task.recurrence.type !== 'none') {
         // Evaluate recurrence across the visible window dates
         for (let d = 0; d < daysCount; d++) {
@@ -1786,7 +1901,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           if (isTaskOccurringOnDate(task, dayDate, true)) {
             let startMs = dayDate.getTime();
             let endMs = dayDate.getTime() + 86400000;
-            if (!task.isAllDay && (task.startDate || task.deadline)) {
+            if (!allDay && isGridEnabled && (task.startDate || task.deadline)) {
               const refDate = new Date(task.startDate || task.deadline!);
               const hours = refDate.getHours();
               const mins = refDate.getMinutes();
@@ -1808,15 +1923,30 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         let startMs: number;
         let endMs: number;
 
-        if (hasStart && hasEnd && task.startDate! < task.deadline!) {
-          startMs = task.startDate!;
-          endMs = task.deadline!;
+        if (hasStart && hasEnd && task.startDate! <= task.deadline!) {
+          if (allDay) {
+            startMs = startOfDay(new Date(task.startDate!)).getTime();
+            endMs = startOfDay(new Date(task.deadline!)).getTime() + 86400000;
+          } else {
+            startMs = task.startDate!;
+            endMs = task.deadline!;
+          }
         } else if (hasEnd) {
-          startMs = task.deadline!;
-          endMs = task.deadline!;
+          if (allDay) {
+            startMs = startOfDay(new Date(task.deadline!)).getTime();
+            endMs = startMs + 86400000;
+          } else {
+            startMs = task.deadline!;
+            endMs = task.deadline! + Math.max(slotDurationMs, 3600000);
+          }
         } else if (hasStart) {
-          startMs = task.startDate!;
-          endMs = task.startDate!;
+          if (allDay) {
+            startMs = startOfDay(new Date(task.startDate!)).getTime();
+            endMs = startMs + 86400000;
+          } else {
+            startMs = task.startDate!;
+            endMs = task.startDate! + Math.max(slotDurationMs, 3600000);
+          }
         } else {
           return;
         }
@@ -1832,17 +1962,40 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
     items.sort((a, b) => a.startMs - b.startMs || (a.task.order ?? 0) - (b.task.order ?? 0) || a.task.createdAt - b.task.createdAt);
 
+    const dayWidth = slotsPerDay * slotWidth;
+
     items.forEach(({ task, startMs, endMs, occurrenceKey }) => {
       const startSlotIdx = (startMs - timelineStartMs) / slotDurationMs;
       const endSlotIdx = (endMs - timelineStartMs) / slotDurationMs;
 
-      const startPx = Math.max(0, startSlotIdx * slotWidth);
+      // Skip items completely outside visible window
+      if (endSlotIdx <= 0 || startSlotIdx >= totalSlots) {
+        return;
+      }
+
+      const visibleStartSlotIdx = Math.max(0, startSlotIdx);
+      const rawStartPx = visibleStartSlotIdx * slotWidth;
+      const startPx = rawStartPx + 3;
+
       let widthPx: number;
-      if (task.startDate && task.deadline && task.startDate < task.deadline && (!task.recurrence || task.recurrence.type === 'none')) {
-        const spanPx = (endSlotIdx - startSlotIdx) * slotWidth;
-        widthPx = Math.max(120, spanPx);
+      const allDay = isTaskAllDayDeadline(task) || !isGridEnabled;
+      const isMultiDay = Boolean(
+        task.startDate && 
+        task.deadline && 
+        startOfDay(new Date(task.startDate)).getTime() < startOfDay(new Date(task.deadline)).getTime() && 
+        (!task.recurrence || task.recurrence.type === 'none')
+      );
+
+      if (isMultiDay) {
+        const spanSlots = Math.max(1, endSlotIdx - visibleStartSlotIdx);
+        const spanPx = spanSlots * slotWidth;
+        widthPx = Math.max(90, spanPx - 6);
+      } else if (allDay) {
+        widthPx = Math.max(90, dayWidth - 6);
       } else {
-        widthPx = Math.max(130, Math.min(260, slotWidth * 3 - 4));
+        const spanSlots = Math.max(1, endSlotIdx - visibleStartSlotIdx);
+        const spanPx = spanSlots * slotWidth;
+        widthPx = Math.max(90, Math.min(dayWidth - 6, Math.max(spanPx - 6, slotWidth * 2 - 6)));
       }
       const endPx = startPx + widthPx;
 
@@ -1961,7 +2114,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     const updates: Partial<Task> = {
       project: projectPath,
       deadline: targetTimeMs,
-      isAllDay: false
+      isAllDay: !isGridEnabled
     };
 
     if (onUpdateTask) {
@@ -2019,8 +2172,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       if (timelineMode === 'calendar') {
         scheduled = projectTasks.filter(t => typeof t.deadline === 'number' || typeof t.startDate === 'number' || (t.recurrence && t.recurrence.type !== 'none'))
           .sort((a, b) => {
-            const aTime = a.startDate || a.deadline || 0;
-            const bTime = b.startDate || b.deadline || 0;
+            const aAllDay = isTaskAllDayDeadline(a) || !isGridEnabled;
+            const bAllDay = isTaskAllDayDeadline(b) || !isGridEnabled;
+            const aTime = aAllDay ? startOfDay(new Date(a.startDate || a.deadline || 0)).getTime() : (a.startDate || a.deadline || 0);
+            const bTime = bAllDay ? startOfDay(new Date(b.startDate || b.deadline || 0)).getTime() : (b.startDate || b.deadline || 0);
             return aTime - bTime || (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
           });
       } else {
@@ -2042,8 +2197,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         ...unscheduled.map((t, idx) => ({ task: t, xApprox: -200 + idx * 10 })),
         ...scheduled.map((t) => {
           let xApprox = 0;
-          if (timelineMode === 'calendar' && t.deadline) {
-            xApprox = (t.deadline - timelineStartMs) / slotDurationMs;
+          if (timelineMode === 'calendar' && (t.deadline || t.startDate)) {
+            const allDay = isTaskAllDayDeadline(t) || !isGridEnabled;
+            const targetTime = allDay
+              ? startOfDay(new Date(t.startDate || t.deadline!)).getTime()
+              : (t.startDate || t.deadline!);
+            xApprox = (targetTime - timelineStartMs) / slotDurationMs;
           } else {
             const colIdx = customColumns.findIndex(c => c.id === getTaskCurrentColumnId(t, customColumns, activePattern.id));
             const stepIdx = getTaskCurrentStep(t, activePattern.id);
@@ -4002,7 +4161,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     key={date.toISOString()}
                     style={{ width: `${dayWidth}px` }}
                     className={cn(
-                      "shrink-0 border-r border-slate-300 select-none transition-colors flex flex-col justify-center",
+                      "shrink-0 border-r border-slate-300 select-none transition-colors flex flex-col justify-center group/datecol relative",
                       today && "bg-indigo-50/80 font-bold",
                       !today && isWeekend && "bg-slate-50 text-slate-500",
                       !today && !isWeekend && "bg-slate-100 text-slate-700"
@@ -4045,6 +4204,23 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         ))}
                       </div>
                     )}
+
+                    {/* Draggable resize handle on right edge */}
+                    <div
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleStartDateColResize(e.clientX);
+                      }}
+                      onTouchStart={(e) => {
+                        e.stopPropagation();
+                        handleStartDateColResize(e.touches[0].clientX);
+                      }}
+                      className="absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-30 flex items-center justify-center group-hover/datecol:bg-slate-300/60"
+                      title={L("ドラッグして日付列の幅を調整", "Drag to resize date column width", "Glisser pour ajuster la largeur de la colonne")}
+                    >
+                      <div className="w-0.5 h-3.5 bg-slate-400 rounded-full" />
+                    </div>
                   </div>
                 );
               })}

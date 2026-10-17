@@ -646,6 +646,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
                   if (errorText) setErrorText(null);
                 }}
                 onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing || (e as any).isComposing || e.keyCode === 229) return;
                   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                     e.preventDefault();
                     handleSubmit();
