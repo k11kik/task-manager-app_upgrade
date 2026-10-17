@@ -744,6 +744,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   });
 
   const [isTimeFilterOpen, setIsTimeFilterOpen] = useState(false);
+  const [timeFilterTriggerRect, setTimeFilterTriggerRect] = useState<DOMRect | null>(null);
   const timeFilterMenuRef = useRef<HTMLDivElement>(null);
   const [customAmountInput, setCustomAmountInput] = useState<number>(timeFilter.amount || 2);
   const [customUnitInput, setCustomUnitInput] = useState<TimeFilterUnit>(timeFilter.unit || 'week');
@@ -3596,31 +3597,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </span>
           </button>
 
-          {/* Lanes Column Toggle */}
-          <button
-            type="button"
-            onClick={() => {
-              setShowLanesInFullscreen(prev => !prev);
-              setIsQuickMenuOpen(false);
-            }}
-            className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 transition-colors text-left cursor-pointer"
-          >
-            <span className="flex items-center gap-2">
-              <Folder size={13} className="text-indigo-600 shrink-0" />
-              <span>{L('プロジェクトレーン', 'Project Lanes', 'Couloirs de projets')}</span>
-            </span>
-            <span className={cn(
-              "text-[9px] px-1.5 py-0.5 rounded font-mono font-bold uppercase",
-              (!isFullscreen || showLanesInFullscreen) ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
-            )}>
-              {(!isFullscreen || showLanesInFullscreen) ? 'ON' : 'OFF'}
-            </span>
-          </button>
-
           {/* Time Filter in Quick Menu */}
           <button
             type="button"
-            onClick={() => {
+            data-dropdown-trigger="time-filter"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setTimeFilterTriggerRect(rect);
               setIsQuickMenuOpen(false);
               setIsTimeFilterOpen(true);
             }}
@@ -3669,25 +3652,58 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   );
 };
 
-  const renderTimeFilterDropdown = () => (
-    <>
-      {/* Mobile Backdrop Overlay to prevent cutoff and ensure smooth touch dismissal */}
-      <div 
-        className="sm:hidden fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-[110]"
-        onClick={() => setIsTimeFilterOpen(false)}
-      />
+  const renderTimeFilterDropdown = () => {
+    if (typeof document === 'undefined') return null;
 
-      <div
-        ref={timeFilterMenuRef}
-        className={cn(
-          "w-[calc(100vw-24px)] max-w-sm bg-white border border-slate-200 rounded-2xl shadow-2xl z-[120] p-3 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800 box-border overflow-y-auto max-h-[calc(100dvh-32px)] sm:max-h-[82vh] overscroll-contain",
-          // Mobile (<sm): Centered modal so it never cuts off regardless of toolbar location
-          "fixed left-1/2 -translate-x-1/2",
-          isFullscreen
-            ? "bottom-14 sm:bottom-14 sm:left-auto sm:right-2.5 sm:translate-x-0 sm:w-80"
-            : "top-1/2 -translate-y-1/2 sm:translate-y-0 sm:top-full sm:mt-1.5 sm:absolute sm:left-auto sm:right-0 sm:translate-x-0 sm:w-80"
-        )}
-      >
+    const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+    let menuStyle: React.CSSProperties = {};
+
+    if (isFullscreen) {
+      menuStyle = {
+        position: 'fixed',
+        bottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
+        right: '12px',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 6rem)',
+      };
+    } else if (isMobile) {
+      const topPx = timeFilterTriggerRect ? Math.max(8, timeFilterTriggerRect.bottom + 6) : 60;
+      menuStyle = {
+        position: 'fixed',
+        top: `${topPx}px`,
+        left: '10px',
+        right: '10px',
+        maxWidth: 'calc(100vw - 20px)',
+        maxHeight: `calc(100dvh - ${topPx}px - 5.5rem - env(safe-area-inset-bottom, 0px))`,
+      };
+    } else {
+      const topPx = timeFilterTriggerRect ? timeFilterTriggerRect.bottom + 6 : 60;
+      const leftPx = timeFilterTriggerRect 
+        ? Math.max(12, Math.min(window.innerWidth - 336, timeFilterTriggerRect.left))
+        : 16;
+      menuStyle = {
+        position: 'fixed',
+        top: `${topPx}px`,
+        left: `${leftPx}px`,
+        width: '20rem',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: `min(${Math.max(260, window.innerHeight - topPx - 24)}px, 82vh)`,
+      };
+    }
+
+    return createPortal(
+      <>
+        {/* Backdrop Overlay to prevent cutoff and ensure smooth touch dismissal */}
+        <div 
+          className="fixed inset-0 bg-slate-900/30 sm:bg-slate-900/10 backdrop-blur-2xs z-[120]"
+          onClick={() => setIsTimeFilterOpen(false)}
+        />
+
+        <div
+          ref={timeFilterMenuRef}
+          style={menuStyle}
+          className="bg-white border border-slate-200 rounded-2xl shadow-2xl z-[125] p-3 text-xs select-none animate-in fade-in zoom-in-95 duration-100 text-slate-800 box-border overflow-y-auto overscroll-contain"
+        >
         {/* Header */}
         <div className="flex items-center justify-between pb-2 border-b border-slate-100 mb-2.5">
           <div className="flex items-center gap-1.5 min-w-0">
@@ -3883,8 +3899,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           </span>
         </div>
       </div>
-    </>
+    </>,
+    document.body
   );
+};
 
   return (
     <div 
@@ -3981,6 +3999,38 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
               {/* Dropdown Menu */}
               {!isFullscreen && isPatternMenuOpen && renderPatternMenuDropdown()}
+            </div>
+
+            {/* 3. Time Filter Button on Timeline Top Toolbar */}
+            <div className="relative inline-flex items-center shrink-0">
+              <button
+                type="button"
+                data-dropdown-trigger="time-filter"
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setTimeFilterTriggerRect(rect);
+                  setIsTimeFilterOpen(prev => !prev);
+                }}
+                className={cn(
+                  "px-2 sm:px-2.5 py-1.5 sm:py-1 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer select-none shrink-0 min-h-[36px] sm:min-h-[30px]",
+                  timeFilter.enabled
+                    ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
+                    : isTimeFilterOpen
+                      ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                      : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-indigo-600"
+                )}
+                title={L('更新日時フィルター設定（期間指定でタスクを絞り込み）', 'Time Filter settings (Filter tasks by updated date)', 'Filtre de date')}
+              >
+                <Clock size={14} className={cn("shrink-0", timeFilter.enabled ? "text-white" : "text-slate-500")} />
+                <span className="hidden xs:inline">
+                  {timeFilter.enabled ? getTimeFilterLabel(timeFilter) : L('期間', 'Time', 'Date')}
+                </span>
+                {timeFilter.enabled && (
+                  <span className="text-[10px] bg-white/20 px-1 py-0.2 rounded font-mono font-bold shrink-0">
+                    {activeTasks.length}/{allActiveTasks.length}
+                  </span>
+                )}
+              </button>
             </div>
           </div>
 
@@ -5124,7 +5174,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               <button
                 type="button"
                 data-dropdown-trigger="time-filter"
-                onClick={() => setIsTimeFilterOpen(prev => !prev)}
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setTimeFilterTriggerRect(rect);
+                  setIsTimeFilterOpen(prev => !prev);
+                }}
                 className={cn(
                   "px-2 py-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-bold shrink-0",
                   timeFilter.enabled
