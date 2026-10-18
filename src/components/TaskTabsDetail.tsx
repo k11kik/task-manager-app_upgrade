@@ -232,6 +232,7 @@ const SinglePane: React.FC<SinglePaneProps> = ({
   // Track focus and unsaved edits so typing in Notes/Title never triggers mid-typing backups or cursor jumps
   const isTitleFocusedRef = useRef(false);
   const isTitleComposingRef = useRef(false);
+  const lastTitleCompositionEndRef = useRef(0);
   const isNotesFocusedRef = useRef(false);
   const syncedTaskIdRef = useRef<string | null>(null);
   const lastSavedTitleRef = useRef<string>('');
@@ -774,6 +775,12 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                 <button
                   type="button"
                   onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onCloseTab(item.id);
+                  }}
+                  onTouchEnd={(e) => {
+                    e.preventDefault();
                     e.stopPropagation();
                     onCloseTab(item.id);
                   }}
@@ -953,9 +960,8 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                     isTitleComposingRef.current = true;
                   }}
                   onCompositionEnd={() => {
-                    setTimeout(() => {
-                      isTitleComposingRef.current = false;
-                    }, 50);
+                    isTitleComposingRef.current = false;
+                    lastTitleCompositionEndRef.current = Date.now();
                   }}
                   onBlur={() => {
                     isTitleFocusedRef.current = false;
@@ -964,8 +970,14 @@ const SinglePane: React.FC<SinglePaneProps> = ({
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
-                      if (isTitleComposingRef.current || e.nativeEvent.isComposing || (e as any).isComposing || e.keyCode === 229) {
-                        return; // IME composition in progress: do not save or blur!
+                      if (
+                        isTitleComposingRef.current ||
+                        e.nativeEvent.isComposing ||
+                        (e as any).isComposing ||
+                        e.keyCode === 229 ||
+                        Date.now() - lastTitleCompositionEndRef.current < 200
+                      ) {
+                        return; // IME composition / kanji conversion in progress: do not save or blur!
                       }
                       e.preventDefault();
                       saveTitle(title);
@@ -2002,7 +2014,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     }
 
     setPanes(prev => {
-      return prev.map(p => {
+      const updated = prev.map(p => {
         if (p.id !== paneId) return p;
         const nextOpen = p.openTaskIds.filter(id => id !== taskId);
         let nextActive = p.activeTaskId;
@@ -2017,6 +2029,20 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
           previewTaskId: p.previewTaskId === taskId ? null : p.previewTaskId
         };
       });
+
+      const nextAllOpen = Array.from(new Set(updated.flatMap(p => p.openTaskIds)));
+      if (onOpenTaskIdsChange) {
+        onOpenTaskIdsChange(nextAllOpen);
+      }
+      try {
+        localStorage.setItem(panesStorageKey, JSON.stringify(updated));
+        localStorage.setItem(openTabsStorageKey, JSON.stringify(nextAllOpen));
+        if (nextActiveForParent) {
+          localStorage.setItem(activeTabStorageKey, nextActiveForParent);
+        }
+      } catch (e) {}
+
+      return updated;
     });
 
     if (nextActiveForParent && onSelectTask) {

@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { Task, Category } from '../types';
 import { cn, tr } from '../lib/utils';
-import { format } from 'date-fns';
+import { format, isToday } from 'date-fns';
 
 interface FocusHeaderSectionProps {
   urgentTasks: Task[];
@@ -107,8 +107,16 @@ export const FocusHeaderSection: React.FC<FocusHeaderSectionProps> = ({
                 // Deadline
                 let deadlineBadge = null;
                 if (task.deadline && !task.isDone) {
-                  const diff = task.deadline - now;
-                  if (diff < 0) {
+                  const targetDate = new Date(task.deadline);
+                  const isTargetToday = isToday(targetDate);
+                  const isAllDay = task.isAllDay;
+                  const effectiveDeadline = (isAllDay && isTargetToday)
+                    ? new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59, 999).getTime()
+                    : task.deadline;
+                  const diff = effectiveDeadline - now;
+                  if (isTargetToday) {
+                    deadlineBadge = <span className="text-[9px] bg-amber-100 text-amber-800 px-1 py-0.2 rounded border border-amber-200 font-mono font-bold">{L('本日', 'Today', "Auj.")}</span>;
+                  } else if (diff < 0) {
                     deadlineBadge = <span className="text-[9px] bg-red-100 text-red-700 px-1 py-0.2 rounded border border-red-200 font-mono font-bold">{L('期限切', 'Overdue', 'Expiré')}</span>;
                   } else if (diff <= deadlineThresholdDays * 86400000) {
                     const days = Math.ceil(diff / 86400000);

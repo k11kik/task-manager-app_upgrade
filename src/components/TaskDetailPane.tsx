@@ -94,6 +94,7 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
   const isResizingRef = useRef(false);
   const isTitleFocusedRef = useRef(false);
   const isTitleComposingRef = useRef(false);
+  const lastTitleCompositionEndRef = useRef(0);
 
   useEffect(() => {
     if (task) {
@@ -346,9 +347,8 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
                   isTitleComposingRef.current = true;
                 }}
                 onCompositionEnd={() => {
-                  setTimeout(() => {
-                    isTitleComposingRef.current = false;
-                  }, 50);
+                  isTitleComposingRef.current = false;
+                  lastTitleCompositionEndRef.current = Date.now();
                 }}
                 onBlur={() => {
                   isTitleFocusedRef.current = false;
@@ -357,7 +357,13 @@ export const TaskDetailPane: React.FC<TaskDetailPaneProps> = ({
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    if (isTitleComposingRef.current || e.nativeEvent.isComposing || (e as any).isComposing || e.keyCode === 229) {
+                    if (
+                      isTitleComposingRef.current ||
+                      e.nativeEvent.isComposing ||
+                      (e as any).isComposing ||
+                      e.keyCode === 229 ||
+                      Date.now() - lastTitleCompositionEndRef.current < 200
+                    ) {
                       return; // IME composition in progress: do not save or blur!
                     }
                     e.preventDefault();

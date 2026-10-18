@@ -1182,17 +1182,18 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   };
 
   // Deadline formatting helper for language
-  const formatDeadlineBadge = (deadline: number) => {
+  const formatDeadlineBadge = (deadline: number, isAllDay?: boolean) => {
     const now = Date.now();
-    const isOverdue = deadline < now;
     const targetDate = new Date(deadline);
+    const isTargetToday = isToday(targetDate);
+    const isOverdue = (isAllDay && isTargetToday) ? false : deadline < now;
     const daysDiff = differenceInCalendarDays(targetDate, new Date());
 
+    if (isTargetToday) {
+      return { status: 'approaching', label: L('本日', 'Today', 'Auj.') };
+    }
     if (isOverdue) {
       return { status: 'expired', label: L('期限切', 'Overdue', 'Retard') };
-    }
-    if (isToday(targetDate)) {
-      return { status: 'approaching', label: L('本日', 'Today', 'Auj.') };
     }
     if (isTomorrow(targetDate)) {
       return { status: 'approaching', label: L('明日', 'Tomorrow', 'Demain') };
@@ -1545,7 +1546,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const isUrgent = task.category === 'Urgent';
     const isRenamingHere = renamingItem?.type === 'task' && renamingItem.idOrPath === task.id && (!renamingItem.parentPath || renamingItem.parentPath === parentPath);
 
-    const deadlineInfo = task.deadline && !task.isDone ? formatDeadlineBadge(task.deadline) : null;
+    const deadlineInfo = task.deadline && !task.isDone ? formatDeadlineBadge(task.deadline, task.isAllDay) : null;
 
     return (
       <div

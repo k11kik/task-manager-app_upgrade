@@ -616,16 +616,6 @@ export default function App() {
       prevSectionForTabsRef.current = activeSection;
       setSelectedProject('All');
       setEditingTask(null);
-      const isMobile = typeof window !== 'undefined' && (
-        window.innerWidth < 1024 ||
-        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-      );
-      if (isMobile) {
-        setOpenTaskIds([]);
-        setActiveTabTaskId(null);
-        setIsDetailPaneVisible(false);
-        return;
-      }
       try {
         const savedTabs = localStorage.getItem(`navfor_open_tabs_${activeSection}`);
         const parsedTabs: string[] = savedTabs ? JSON.parse(savedTabs) : [];
@@ -664,12 +654,7 @@ export default function App() {
   const handleOpenTaskInTab = (taskId: string, isPermanent = false) => {
     if (!taskId) return;
     setLastOpenEvent({ taskId, isPermanent, timestamp: Date.now() });
-    const isMobile = typeof window !== 'undefined' && window.innerWidth < 1024;
     setOpenTaskIds(prev => {
-      // On mobile screens, only keep the single active task in tabs to avoid hidden background tab accumulation
-      if (isMobile) {
-        return [taskId];
-      }
       if (prev.includes(taskId)) return prev;
       return [...prev, taskId];
     });
@@ -677,10 +662,6 @@ export default function App() {
     setIsDetailPaneVisible(true);
     try {
       localStorage.setItem('navfor_detail_visible', 'true');
-      if (isMobile) {
-        localStorage.setItem(`navfor_open_tabs_${activeSection}`, JSON.stringify([taskId]));
-        localStorage.setItem(`navfor_active_tab_${activeSection}`, taskId);
-      }
     } catch (e) {
       console.error(e);
     }

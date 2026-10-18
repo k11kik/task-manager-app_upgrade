@@ -105,6 +105,7 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
   // Track focus and unsaved edits so typing in Notes/Title never triggers mid-typing backups or cursor jumps
   const isTitleFocusedRef = useRef(false);
   const isTitleComposingRef = useRef(false);
+  const lastTitleCompositionEndRef = useRef(0);
   const isNotesFocusedRef = useRef(false);
   const syncedFolderPathRef = useRef<string | null>(null);
   const lastSavedTitleRef = useRef<string>(folderMeta?.title || folderName);
@@ -465,9 +466,8 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
                 isTitleComposingRef.current = true;
               }}
               onCompositionEnd={() => {
-                setTimeout(() => {
-                  isTitleComposingRef.current = false;
-                }, 50);
+                isTitleComposingRef.current = false;
+                lastTitleCompositionEndRef.current = Date.now();
               }}
               onBlur={() => {
                 isTitleFocusedRef.current = false;
@@ -476,7 +476,13 @@ export const FolderDetailPane: React.FC<FolderDetailPaneProps> = ({
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
-                  if (isTitleComposingRef.current || e.nativeEvent.isComposing || (e as any).isComposing || e.keyCode === 229) {
+                  if (
+                    isTitleComposingRef.current ||
+                    e.nativeEvent.isComposing ||
+                    (e as any).isComposing ||
+                    e.keyCode === 229 ||
+                    Date.now() - lastTitleCompositionEndRef.current < 200
+                  ) {
                     return; // IME composition in progress: do not save or blur!
                   }
                   e.preventDefault();
