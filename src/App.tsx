@@ -56,7 +56,8 @@ import {
   Repeat,
   BookOpen,
   Edit2,
-  Check
+  Check,
+  Folder
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DragDropContext, Droppable, Draggable as DraggableDnd } from '@hello-pangea/dnd';
@@ -64,6 +65,7 @@ const Draggable = DraggableDnd as any;
 import { 
   format, 
   differenceInDays, 
+  startOfDay,
   startOfMonth, 
   endOfMonth, 
   startOfWeek, 
@@ -359,7 +361,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.22";
+  const APP_VERSION = "3.1.23";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -6891,7 +6893,15 @@ export default function App() {
                   /* Calendar Mode */
                   <CalendarView 
                     tasks={searchAndProjectFilteredTasks} 
+                    folderMetas={folderMetas}
+                    activeSection={activeSection}
+                    selectedProject={selectedProject}
+                    searchTerm={searchTerm}
                     onEdit={setEditingTask} 
+                    onSelectFolder={(folderPath) => {
+                      setViewMode('dashboard');
+                      handleOpenTaskInTab('folder:' + folderPath, true);
+                    }}
                     t={t} 
                     locale={dateLocale}
                   />
@@ -6911,6 +6921,8 @@ export default function App() {
                       onToggleStar={(taskId) => toggleStar(taskId)}
                       onTogglePin={(taskId) => togglePin(taskId)}
                       archiveThresholdDays={settings.archiveThresholdDays}
+                      archiveInactiveToTrashDays={settings.archiveInactiveToTrashDays}
+                      archiveDoneToTrashDays={settings.archiveDoneToTrashDays}
                       onCleanupArchive={() => cleanupArchive()}
                       language={settings.language}
                       t={t}
@@ -8243,12 +8255,63 @@ const TaskCard: React.FC<TaskCardProps> = ({
   );
 };
 
-function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t: Task) => void; t: (key: string) => string; locale: any }) {
+function isFolderOccurringOnDate(folder: FolderMeta, targetDate: Date, showRecurrence: boolean = true): boolean {
+  if (!folder || !folder.deadline) return false;
+
+  // Recurrence support if folder has recurrence
+  if (folder.recurrence && folder.recurrence.type !== 'none' && showRecurrence) {
+    if (isTaskOccurringOnDate(folder as any, targetDate, true)) {
+      return true;
+    }
+  }
+
+  const targetDay = startOfDay(targetDate).getTime();
+  const deadlineDay = startOfDay(new Date(folder.deadline)).getTime();
+
+  if (typeof folder.startDate === 'number' && folder.startDate > 0) {
+    const startDay = startOfDay(new Date(folder.startDate)).getTime();
+    if (startDay <= deadlineDay) {
+      return targetDay >= startDay && targetDay <= deadlineDay;
+    }
+  }
+
+  return targetDay === deadlineDay;
+}
+
+function CalendarView({ 
+  tasks, 
+  folderMetas,
+  activeSection,
+  selectedProject,
+  searchTerm,
+  onEdit, 
+  onSelectFolder,
+  t, 
+  locale 
+}: { 
+  tasks: Task[]; 
+  folderMetas?: Record<string, FolderMeta>;
+  activeSection?: string;
+  selectedProject?: string;
+  searchTerm?: string;
+  onEdit: (t: Task) => void; 
+  onSelectFolder?: (folderPath: string) => void;
+  t: (key: string) => string; 
+  locale: any 
+}) {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [calendarMode, setCalendarMode] = useState<'year' | 'month' | 'week' | 'day'>('month');
   const [showRecurrence, setShowRecurrence] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('navfor_calendar_show_recurrence');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+  const [showFolders, setShowFolders] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_calendar_show_folders');
       return saved !== null ? saved === 'true' : true;
     } catch {
       return true;
@@ -8265,6 +8328,34 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
       (typeof t.deadline === 'number' || typeof t.startDate === 'number' || (t.recurrence && t.recurrence.type !== 'none'))
     );
   }, [tasks]);
+
+  // Active folders with deadline for calendar display
+  const activeCalendarFolders = useMemo(() => {
+    if (!folderMetas || !showFolders) return [];
+    const search = (searchTerm || '').trim().toLowerCase();
+
+    return Object.values(folderMetas).filter((meta: FolderMeta) => {
+      if (!meta || !meta.path) return false;
+      if (meta.category === 'Trash' || meta.category === 'Archive') return false;
+      if (meta.section && activeSection && meta.section !== activeSection) return false;
+      if (!meta.deadline || typeof meta.deadline !== 'number' || meta.deadline <= 0) return false;
+
+      if (selectedProject && selectedProject !== 'All') {
+        const matchesProj = meta.path === selectedProject || meta.path.startsWith(selectedProject + '/');
+        if (!matchesProj) return false;
+      }
+
+      if (search) {
+        const nameMatch = (meta.title || '').toLowerCase().includes(search) || 
+                          (meta.name || '').toLowerCase().includes(search) || 
+                          meta.path.toLowerCase().includes(search) ||
+                          (meta.notes || '').toLowerCase().includes(search);
+        if (!nameMatch) return false;
+      }
+
+      return true;
+    });
+  }, [folderMetas, showFolders, activeSection, selectedProject, searchTerm]);
 
   const navigate = (direction: 'prev' | 'next') => {
     ignoreScrollChange.current = false;
@@ -8326,27 +8417,52 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
              format(currentDate, 'MMM d, yyyy', { locale })}
           </h2>
 
-          {/* Recurrence Toggle (繰り返しを表示する/しない) */}
-          <label 
-            className="flex items-center gap-1.5 px-2 md:px-2.5 py-1 md:py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-[8px] md:text-[10px] font-bold text-slate-700 cursor-pointer select-none transition-colors"
-            title={L("繰り返しのタスクを表示するか切り替えます", "Toggle display of repeating tasks", "Afficher/masquer les tâches récurrentes")}
-          >
-            <input
-              type="checkbox"
-              checked={showRecurrence}
-              onChange={(e) => {
-                const nextVal = e.target.checked;
-                setShowRecurrence(nextVal);
-                try {
-                  localStorage.setItem('navfor_calendar_show_recurrence', String(nextVal));
-                } catch {}
-              }}
-              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 scale-90"
-            />
-            <Repeat size={12} className={showRecurrence ? "text-indigo-600 shrink-0" : "text-slate-400 shrink-0"} />
-            <span className="hidden sm:inline">{L('繰り返しを表示', 'Show Repeats', 'Afficher répétitions')}</span>
-            <span className="sm:hidden">{L('繰返', 'Repeat', 'Répét.')}</span>
-          </label>
+          {/* Controls: Repeat Toggle + Folder Deadlines Toggle */}
+          <div className="flex items-center gap-1.5">
+            {/* Recurrence Toggle (繰り返しを表示する/しない) */}
+            <label 
+              className="flex items-center gap-1 px-2 md:px-2.5 py-1 md:py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-[8px] md:text-[10px] font-bold text-slate-700 cursor-pointer select-none transition-colors"
+              title={L("繰り返しのタスクを表示するか切り替えます", "Toggle display of repeating tasks", "Afficher/masquer les tâches récurrentes")}
+            >
+              <input
+                type="checkbox"
+                checked={showRecurrence}
+                onChange={(e) => {
+                  const nextVal = e.target.checked;
+                  setShowRecurrence(nextVal);
+                  try {
+                    localStorage.setItem('navfor_calendar_show_recurrence', String(nextVal));
+                  } catch {}
+                }}
+                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 scale-90"
+              />
+              <Repeat size={12} className={showRecurrence ? "text-indigo-600 shrink-0" : "text-slate-400 shrink-0"} />
+              <span className="hidden sm:inline">{L('繰り返しを表示', 'Show Repeats', 'Afficher répétitions')}</span>
+              <span className="sm:hidden">{L('繰返', 'Repeat', 'Répét.')}</span>
+            </label>
+
+            {/* Folder Deadlines Toggle (フォルダの期限を表示する/しない) */}
+            <label 
+              className="flex items-center gap-1 px-2 md:px-2.5 py-1 md:py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-[8px] md:text-[10px] font-bold text-slate-700 cursor-pointer select-none transition-colors"
+              title={L("期限のあるフォルダをカレンダーに表示するか切り替えます", "Toggle display of folders with deadlines", "Afficher/masquer les dossiers avec date limite")}
+            >
+              <input
+                type="checkbox"
+                checked={showFolders}
+                onChange={(e) => {
+                  const nextVal = e.target.checked;
+                  setShowFolders(nextVal);
+                  try {
+                    localStorage.setItem('navfor_calendar_show_folders', String(nextVal));
+                  } catch {}
+                }}
+                className="rounded border-slate-300 text-amber-600 focus:ring-amber-500 scale-90"
+              />
+              <Folder size={12} className={showFolders ? "text-amber-500 shrink-0 fill-amber-500/20" : "text-slate-400 shrink-0"} />
+              <span className="hidden sm:inline">{L('フォルダを表示', 'Show Folders', 'Afficher dossiers')}</span>
+              <span className="sm:hidden">{L('フォルダ', 'Folders', 'Dossiers')}</span>
+            </label>
+          </div>
 
           <div className="flex items-center gap-1.5 md:gap-2">
             <button 
@@ -8375,7 +8491,9 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
             ignoreScrollChange={ignoreScrollChange}
             currentDate={currentDate} 
             tasks={activeCalendarTasks}
+            folders={activeCalendarFolders}
             showRecurrence={showRecurrence}
+            showFolders={showFolders}
             onDateSelect={(d) => { setCurrentDate(d); setCalendarMode('month'); }} 
             onYearChange={setCurrentDate} 
             locale={locale}
@@ -8387,8 +8505,10 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
             ignoreScrollChange={ignoreScrollChange}
             currentDate={currentDate} 
             tasks={activeCalendarTasks}
+            folders={activeCalendarFolders}
             showRecurrence={showRecurrence}
             onEdit={onEdit} 
+            onSelectFolder={onSelectFolder}
             onDateSelect={(d) => { setCurrentDate(d); setCalendarMode('day'); }} 
             onMonthChange={setCurrentDate} 
             locale={locale}
@@ -8398,8 +8518,10 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
           <WeekView 
             currentDate={currentDate} 
             tasks={activeCalendarTasks} 
+            folders={activeCalendarFolders}
             showRecurrence={showRecurrence}
             onEdit={onEdit} 
+            onSelectFolder={onSelectFolder}
             locale={locale} 
           />
         )}
@@ -8407,8 +8529,10 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
           <DayView 
             currentDate={currentDate} 
             tasks={activeCalendarTasks} 
+            folders={activeCalendarFolders}
             showRecurrence={showRecurrence}
             onEdit={onEdit} 
+            onSelectFolder={onSelectFolder}
             locale={locale} 
           />
         )}
@@ -8417,7 +8541,7 @@ function CalendarView({ tasks, onEdit, t, locale }: { tasks: Task[]; onEdit: (t:
   );
 }
 
-const YearGrid = React.memo(({ yearDate, tasks, showRecurrence, onDateSelect, locale }: { yearDate: Date; tasks: Task[]; showRecurrence: boolean; onDateSelect: (d: Date) => void; locale: any }) => {
+const YearGrid = React.memo(({ yearDate, tasks, folders = [], showRecurrence, onDateSelect, locale }: { yearDate: Date; tasks: Task[]; folders?: FolderMeta[]; showRecurrence: boolean; onDateSelect: (d: Date) => void; locale: any }) => {
   const year = yearDate.getFullYear();
   const monthsData = useMemo(() => {
     const months = eachMonthOfInterval({
@@ -8431,12 +8555,16 @@ const YearGrid = React.memo(({ yearDate, tasks, showRecurrence, onDateSelect, lo
         end: endOfMonth(month)
       }).map(day => {
         const dayTasksCount = tasks.filter(t => isTaskOccurringOnDate(t, day, showRecurrence)).length;
+        const dayFoldersCount = folders.filter(f => isFolderOccurringOnDate(f, day, showRecurrence)).length;
+        const totalCount = dayTasksCount + dayFoldersCount;
         return {
           date: day,
           key: format(day, 'yyyy-MM-dd'),
           dayNum: format(day, 'd'),
           isToday: isSameDay(day, today),
-          count: dayTasksCount
+          count: totalCount,
+          hasFolders: dayFoldersCount > 0,
+          hasTasks: dayTasksCount > 0
         };
       });
       return {
@@ -8446,7 +8574,7 @@ const YearGrid = React.memo(({ yearDate, tasks, showRecurrence, onDateSelect, lo
         days
       };
     });
-  }, [yearDate, tasks, showRecurrence, locale]);
+  }, [yearDate, tasks, folders, showRecurrence, locale]);
 
   const weekdays = useMemo(() => {
     const start = startOfWeek(new Date(), { locale });
@@ -8474,11 +8602,12 @@ const YearGrid = React.memo(({ yearDate, tasks, showRecurrence, onDateSelect, lo
               ))}
               {mData.days.map(dayInfo => (
                 <div 
-                  key={dayInfo.key}
+                  key={dayInfo.key} 
                   className={cn(
-                    "w-6 h-6 flex items-center justify-center rounded-full transition-all cursor-pointer",
+                    "w-6 h-6 flex items-center justify-center rounded-full transition-all cursor-pointer font-bold",
                     dayInfo.count > 5 ? "bg-red-500 text-white" :
                     dayInfo.count > 2 ? "bg-amber-400 text-slate-800" :
+                    dayInfo.hasFolders ? "bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs" :
                     dayInfo.count > 0 ? "bg-indigo-100 text-indigo-600" :
                     dayInfo.isToday ? "border border-indigo-500 text-indigo-500" : "text-slate-400 hover:bg-slate-100"
                   )}
@@ -8495,7 +8624,7 @@ const YearGrid = React.memo(({ yearDate, tasks, showRecurrence, onDateSelect, lo
   );
 });
 
-function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, showRecurrence, onDateSelect, onYearChange, locale }: { scrollContainerRef: React.RefObject<HTMLDivElement>; ignoreScrollChange: React.RefObject<boolean>; currentDate: Date; tasks: Task[]; showRecurrence: boolean; onDateSelect: (d: Date) => void; onYearChange: (d: Date) => void; locale: any }) {
+function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, folders, showRecurrence, showFolders, onDateSelect, onYearChange, locale }: { scrollContainerRef: React.RefObject<HTMLDivElement>; ignoreScrollChange: React.RefObject<boolean>; currentDate: Date; tasks: Task[]; folders?: FolderMeta[]; showRecurrence: boolean; showFolders?: boolean; onDateSelect: (d: Date) => void; onYearChange: (d: Date) => void; locale: any }) {
   const lastReportedYear = useRef(currentDate.getFullYear().toString());
   const isInitialScrollDone = useRef(false);
 
@@ -8550,7 +8679,7 @@ function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, 
       const timer = setTimeout(scrollToTarget, 100);
       return () => clearTimeout(timer);
     }
-  }, []);
+  }, []); 
 
   useEffect(() => {
     if (!isInitialScrollDone.current) return;
@@ -8575,6 +8704,7 @@ function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, 
             key={yearDate.toString()} 
             yearDate={yearDate} 
             tasks={tasks} 
+            folders={folders}
             showRecurrence={showRecurrence}
             onDateSelect={onDateSelect} 
             locale={locale}
@@ -8584,25 +8714,49 @@ function YearView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, 
   );
 }
 
-const MonthGrid = React.memo(({ monthDate, tasks, showRecurrence, onEdit, onDateSelect, locale }: { monthDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; onDateSelect: (d: Date) => void; locale: any }) => {
+const MonthGrid = React.memo(({ 
+  monthDate, 
+  tasks, 
+  folders = [],
+  showRecurrence, 
+  onEdit, 
+  onSelectFolder,
+  onDateSelect, 
+  locale 
+}: { 
+  monthDate: Date; 
+  tasks: Task[]; 
+  folders?: FolderMeta[];
+  showRecurrence: boolean; 
+  onEdit: (t: Task) => void; 
+  onSelectFolder?: (folderPath: string) => void;
+  onDateSelect: (d: Date) => void; 
+  locale: any 
+}) => {
   const weeks = useMemo(() => {
     const start = startOfWeek(startOfMonth(monthDate), { locale });
     const end = endOfWeek(endOfMonth(monthDate), { locale });
     const allDays = eachDayOfInterval({ start, end });
     const chunked = [];
     for (let i = 0; i < allDays.length; i += 7) {
-      const week = allDays.slice(i, i + 7).map(day => ({
-        date: day,
-        key: format(day, 'yyyy-MM-dd'),
-        isCurrentMonth: isSameMonth(day, monthDate),
-        isToday: isSameDay(day, new Date()),
-        dayNum: format(day, 'd'),
-        tasks: tasks.filter(t => isTaskOccurringOnDate(t, day, showRecurrence))
-      }));
+      const week = allDays.slice(i, i + 7).map(day => {
+        const dayTasks = tasks.filter(t => isTaskOccurringOnDate(t, day, showRecurrence));
+        const dayFolders = folders.filter(f => isFolderOccurringOnDate(f, day, showRecurrence));
+        return {
+          date: day,
+          key: format(day, 'yyyy-MM-dd'),
+          isCurrentMonth: isSameMonth(day, monthDate),
+          isToday: isSameDay(day, new Date()),
+          dayNum: format(day, 'd'),
+          tasks: dayTasks,
+          folders: dayFolders,
+          totalCount: dayTasks.length + dayFolders.length
+        };
+      });
       chunked.push(week);
     }
     return chunked;
-  }, [monthDate, tasks, showRecurrence, locale]);
+  }, [monthDate, tasks, folders, showRecurrence, locale]);
 
   return (
     <div className="flex flex-col mb-8" data-month={format(monthDate, 'yyyy-MM')}>
@@ -8615,7 +8769,7 @@ const MonthGrid = React.memo(({ monthDate, tasks, showRecurrence, onEdit, onDate
         {weeks.map((week, weekIdx) => (
           <div key={weekIdx} className="grid grid-cols-7">
             {week.map(dayInfo => {
-              const { date, isCurrentMonth, isToday, dayNum, tasks: dayTasks } = dayInfo;
+              const { date, isCurrentMonth, isToday, dayNum, tasks: dayTasks, folders: dayFolders, totalCount } = dayInfo;
 
               return (
                 <div 
@@ -8636,14 +8790,41 @@ const MonthGrid = React.memo(({ monthDate, tasks, showRecurrence, onEdit, onDate
                     >
                       {dayNum}
                     </button>
-                    {dayTasks.length > 0 && (
-                      <span className="text-[8px] font-bold text-indigo-400 opacity-60">
-                        {dayTasks.length}
+                    {totalCount > 0 && (
+                      <span className={cn(
+                        "text-[8px] font-bold opacity-75",
+                        dayFolders.length > 0 ? "text-amber-600 font-extrabold" : "text-indigo-400"
+                      )}>
+                        {totalCount}
                       </span>
                     )}
                   </div>
                   <div className="flex-1 flex flex-col gap-0.5 overflow-hidden">
-                    {dayTasks.slice(0, 5).map(task => (
+                    {/* Folders first in yellow/amber styling */}
+                    {dayFolders.slice(0, 5).map(folder => {
+                      const folderTitle = folder.title || folder.name || folder.path.split('/').pop() || folder.path;
+                      return (
+                        <button
+                          key={`folder_${folder.path}_${dayInfo.key}`}
+                          onClick={(e) => { e.stopPropagation(); onSelectFolder?.(folder.path); }}
+                          className="text-[8px] font-bold text-left px-1.5 py-0.5 rounded border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100/90 shadow-2xs truncate transition-all flex items-center gap-1 group/fchip"
+                          title={`📁 [Folder] ${folder.path}: ${folderTitle}${folder.deadline ? ` (${format(folder.deadline, 'yyyy/MM/dd HH:mm')})` : ''}`}
+                        >
+                          <Folder size={9} className="shrink-0 text-amber-600 fill-amber-500/30" />
+                          <span className="opacity-70 font-mono text-[7px] shrink-0 text-amber-800">
+                            [{folder.path.split('/').pop() || folder.path}]
+                          </span>
+                          {!folder.isAllDay && folder.deadline && (
+                            <span className="opacity-75 font-mono text-[7px] shrink-0 text-amber-800">
+                              {format(folder.deadline, 'HH:mm')}
+                            </span>
+                          )}
+                          <span className="truncate">{folderTitle}</span>
+                        </button>
+                      );
+                    })}
+                    {/* Tasks, filling remaining slots up to 5 items */}
+                    {dayTasks.slice(0, Math.max(0, 5 - Math.min(5, dayFolders.length))).map(task => (
                       <button
                         key={`${task.id}_${dayInfo.key}`}
                         onClick={(e) => { e.stopPropagation(); onEdit(task); }}
@@ -8664,12 +8845,12 @@ const MonthGrid = React.memo(({ monthDate, tasks, showRecurrence, onEdit, onDate
                         <span className="truncate">{task.title}</span>
                       </button>
                     ))}
-                    {dayTasks.length > 5 && (
+                    {totalCount > 5 && (
                       <button 
                         onClick={() => onDateSelect(date)}
                         className="text-[8px] font-black text-indigo-400 hover:text-indigo-600 text-center py-0.5"
                       >
-                        + {dayTasks.length - 5}
+                        + {totalCount - 5}
                       </button>
                     )}
                   </div>
@@ -8683,7 +8864,31 @@ const MonthGrid = React.memo(({ monthDate, tasks, showRecurrence, onEdit, onDate
   );
 });
 
-function MonthView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks, showRecurrence, onEdit, onDateSelect, onMonthChange, locale }: { scrollContainerRef: React.RefObject<HTMLDivElement>; ignoreScrollChange: React.RefObject<boolean>; currentDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; onDateSelect: (d: Date) => void; onMonthChange: (d: Date) => void; locale: any }) {
+function MonthView({ 
+  scrollContainerRef, 
+  ignoreScrollChange, 
+  currentDate, 
+  tasks, 
+  folders = [],
+  showRecurrence, 
+  onEdit, 
+  onSelectFolder,
+  onDateSelect, 
+  onMonthChange, 
+  locale 
+}: { 
+  scrollContainerRef: React.RefObject<HTMLDivElement>; 
+  ignoreScrollChange: React.RefObject<boolean>; 
+  currentDate: Date; 
+  tasks: Task[]; 
+  folders?: FolderMeta[];
+  showRecurrence: boolean; 
+  onEdit: (t: Task) => void; 
+  onSelectFolder?: (folderPath: string) => void;
+  onDateSelect: (d: Date) => void; 
+  onMonthChange: (d: Date) => void; 
+  locale: any 
+}) {
   const isInitialScrollDone = useRef(false);
   const lastReportedMonth = useRef(format(currentDate, 'yyyy-MM'));
 
@@ -8776,8 +8981,10 @@ function MonthView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks,
               key={month.toString()} 
               monthDate={month} 
               tasks={tasks} 
+              folders={folders}
               showRecurrence={showRecurrence}
               onEdit={onEdit} 
+              onSelectFolder={onSelectFolder}
               onDateSelect={onDateSelect} 
               locale={locale}
           />
@@ -8787,7 +8994,23 @@ function MonthView({ scrollContainerRef, ignoreScrollChange, currentDate, tasks,
   );
 }
 
-function WeekView({ currentDate, tasks, showRecurrence, onEdit, locale }: { currentDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; locale: any }) {
+function WeekView({ 
+  currentDate, 
+  tasks, 
+  folders = [],
+  showRecurrence, 
+  onEdit, 
+  onSelectFolder,
+  locale 
+}: { 
+  currentDate: Date; 
+  tasks: Task[]; 
+  folders?: FolderMeta[];
+  showRecurrence: boolean; 
+  onEdit: (t: Task) => void; 
+  onSelectFolder?: (folderPath: string) => void;
+  locale: any 
+}) {
   const weekDays = useMemo(() => {
     const start = startOfWeek(currentDate, { locale });
     const end = endOfWeek(currentDate, { locale });
@@ -8799,6 +9022,7 @@ function WeekView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curr
       <div className="grid grid-cols-7 h-full">
         {weekDays.map(day => {
           const dayTasks = tasks.filter(t => isTaskOccurringOnDate(t, day, showRecurrence));
+          const dayFolders = folders.filter(f => isFolderOccurringOnDate(f, day, showRecurrence));
           const isToday = isSameDay(day, new Date());
 
           return (
@@ -8816,6 +9040,38 @@ function WeekView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curr
                 </span>
               </div>
               <div className="flex-1 p-3 flex flex-col gap-2 overflow-y-auto custom-scrollbar">
+                {/* Folders with Deadlines in Week View */}
+                {dayFolders.map(folder => {
+                  const folderTitle = folder.title || folder.name || folder.path.split('/').pop() || folder.path;
+                  return (
+                    <button
+                      key={`folder_${folder.path}_${day.toISOString()}`}
+                      onClick={() => onSelectFolder?.(folder.path)}
+                      className="p-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100/90 text-[10px] font-bold text-left transition-all hover:translate-y-[-1px] hover:shadow-md shadow-xs group"
+                      title={`📁 Folder: ${folder.path}`}
+                    >
+                      <div className="flex items-center justify-between mb-1 opacity-75 font-mono text-[8px] text-amber-800">
+                        <span className="flex items-center gap-1 font-bold">
+                          <Folder size={11} className="text-amber-600 fill-amber-500/30" />
+                          <span>{folder.path}</span>
+                        </span>
+                        {!folder.isAllDay && folder.deadline && (
+                          <span className="font-mono text-amber-700">{format(folder.deadline, 'HH:mm')}</span>
+                        )}
+                      </div>
+                      <div className="text-amber-950 font-black">
+                        {folderTitle}
+                      </div>
+                      {folder.notes && (
+                        <div className="text-[9px] text-amber-800/80 truncate mt-1 italic font-normal">
+                          {folder.notes}
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+
+                {/* Tasks in Week View */}
                 {dayTasks.map(task => (
                   <button
                     key={`${task.id}_${day.toISOString()}`}
@@ -8841,7 +9097,7 @@ function WeekView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curr
                     </div>
                   </button>
                 ))}
-                {dayTasks.length === 0 && (
+                {dayTasks.length === 0 && dayFolders.length === 0 && (
                   <div className="flex-1 flex items-center justify-center border-2 border-dashed border-slate-100 rounded-2xl opacity-20">
                     <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 rotate-90">Empty</span>
                   </div>
@@ -8855,8 +9111,26 @@ function WeekView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curr
   );
 }
 
-function DayView({ currentDate, tasks, showRecurrence, onEdit, locale }: { currentDate: Date; tasks: Task[]; showRecurrence: boolean; onEdit: (t: Task) => void; locale: any }) {
+function DayView({ 
+  currentDate, 
+  tasks, 
+  folders = [],
+  showRecurrence, 
+  onEdit, 
+  onSelectFolder,
+  locale 
+}: { 
+  currentDate: Date; 
+  tasks: Task[]; 
+  folders?: FolderMeta[];
+  showRecurrence: boolean; 
+  onEdit: (t: Task) => void; 
+  onSelectFolder?: (folderPath: string) => void;
+  locale: any 
+}) {
   const dayTasks = tasks.filter(t => isTaskOccurringOnDate(t, currentDate, showRecurrence));
+  const dayFolders = folders.filter(f => isFolderOccurringOnDate(f, currentDate, showRecurrence));
+  const totalCount = dayTasks.length + dayFolders.length;
   const lang = locale?.code?.startsWith('ja') ? 'ja' : locale?.code?.startsWith('fr') ? 'fr' : 'en';
   const L = (ja: string, en: string, fr: string) => tr(lang, ja, en, fr);
   
@@ -8869,11 +9143,49 @@ function DayView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curre
         </div>
         <div>
           <h2 className="text-3xl font-black text-slate-800 tracking-tight">{format(currentDate, 'EEEE', { locale })}</h2>
-          <p className="text-sm font-bold text-slate-400 uppercase tracking-widest mt-1">{dayTasks.length} items scheduled</p>
+          <p className="text-sm font-bold text-slate-400 uppercase tracking-widest mt-1">
+            {totalCount} {L('件の予定', 'items scheduled', 'éléments programmés')}
+          </p>
         </div>
       </div>
 
       <div className="space-y-4">
+        {/* Folders in Day View */}
+        {dayFolders.map(folder => {
+          const folderTitle = folder.title || folder.name || folder.path.split('/').pop() || folder.path;
+          return (
+            <button
+              key={`folder_${folder.path}_${currentDate.toISOString()}`}
+              onClick={() => onSelectFolder?.(folder.path)}
+              className="w-full flex items-center gap-6 p-6 rounded-3xl border border-amber-300 bg-amber-50/80 hover:bg-amber-100 hover:border-amber-400 shadow-sm hover:shadow-xl hover:shadow-amber-100 hover:translate-x-2 transition-all text-left group"
+            >
+              <div className="w-16 text-xs font-black tabular-nums text-amber-700 py-2 border-r border-amber-200 flex flex-col items-center justify-center shrink-0">
+                <Folder size={20} className="text-amber-600 fill-amber-500/30 mb-0.5" />
+                <span className="text-[8px] uppercase tracking-wider font-extrabold text-amber-600">FOLDER</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[10px] font-extrabold text-amber-800 bg-amber-100 px-2 py-0.5 rounded leading-none shrink-0 truncate max-w-[150px]">
+                    {folder.path}
+                  </span>
+                  {!folder.isAllDay && folder.deadline && (
+                    <span className="text-[10px] font-mono text-amber-700">
+                      {format(folder.deadline, 'HH:mm')}
+                    </span>
+                  )}
+                  {folder.isStarred && <Star size={12} className="text-amber-500 fill-amber-500" />}
+                </div>
+                <h3 className="text-lg font-bold text-amber-950 leading-tight">
+                  {folderTitle}
+                </h3>
+                {folder.notes && <p className="text-sm text-amber-800/80 mt-2 line-clamp-1 italic">{folder.notes}</p>}
+              </div>
+              <ChevronRight className="text-amber-400 group-hover:text-amber-600 group-hover:translate-x-1 transition-all" size={24} />
+            </button>
+          );
+        })}
+
+        {/* Tasks in Day View */}
         {dayTasks.sort((a,b) => (a.startDate || a.deadline || 0) - (b.startDate || b.deadline || 0)).map(task => (
           <button
             key={`${task.id}_${currentDate.toISOString()}`}
@@ -8917,7 +9229,7 @@ function DayView({ currentDate, tasks, showRecurrence, onEdit, locale }: { curre
             <ChevronRight className="text-slate-300 group-hover:text-indigo-400 group-hover:translate-x-1 transition-all" size={24} />
           </button>
         ))}
-        {dayTasks.length === 0 && (
+        {dayTasks.length === 0 && dayFolders.length === 0 && (
           <div className="py-32 flex flex-col items-center justify-center text-slate-200 border-4 border-dashed border-slate-50 rounded-[3rem]">
             <Calendar size={64} strokeWidth={1} />
             <p className="mt-4 text-xs font-black uppercase tracking-widest text-slate-400">Clear Schedule</p>

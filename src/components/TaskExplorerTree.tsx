@@ -1188,20 +1188,51 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
     const isTargetToday = isToday(targetDate);
     const isOverdue = (isAllDay && isTargetToday) ? false : deadline < now;
     const daysDiff = differenceInCalendarDays(targetDate, new Date());
+    const dateFormatted = format(targetDate, language === 'fr' ? 'd/M' : 'M/d');
+    const fullDateFormatted = format(
+      targetDate, 
+      language === 'fr' 
+        ? (isAllDay ? 'dd/MM/yyyy' : 'dd/MM/yyyy HH:mm') 
+        : language === 'en' 
+          ? (isAllDay ? 'MM/dd/yyyy' : 'MM/dd/yyyy HH:mm') 
+          : (isAllDay ? 'yyyy/MM/dd' : 'yyyy/MM/dd HH:mm')
+    );
 
     if (isTargetToday) {
-      return { status: 'approaching', label: L('本日', 'Today', 'Auj.') };
+      return { 
+        status: 'approaching', 
+        label: L('本日', 'Today', 'Auj.'),
+        tooltip: isAllDay 
+          ? L('本日締切 (終日)', 'Due today (All day)', "Échéance aujourd'hui (Toute la journée)")
+          : L(`本日締切: ${format(targetDate, 'HH:mm')}`, `Due today: ${format(targetDate, 'HH:mm')}`, `Échéance aujourd'hui : ${format(targetDate, 'HH:mm')}`)
+      };
     }
     if (isOverdue) {
-      return { status: 'expired', label: L('期限切', 'Overdue', 'Retard') };
+      return { 
+        status: 'expired', 
+        label: L('期限切', 'Overdue', 'Retard'),
+        tooltip: L(`期限切れ: ${fullDateFormatted}`, `Overdue: ${fullDateFormatted}`, `En retard : ${fullDateFormatted}`)
+      };
     }
     if (isTomorrow(targetDate)) {
-      return { status: 'approaching', label: L('明日', 'Tomorrow', 'Demain') };
+      return { 
+        status: 'approaching', 
+        label: L('明日', 'Tomorrow', 'Demain'),
+        tooltip: L(`明日締切: ${dateFormatted}`, `Due tomorrow: ${dateFormatted}`, `Échéance demain : ${dateFormatted}`)
+      };
     }
     if (daysDiff <= (deadlineThresholdDays || 3)) {
-      return { status: 'approaching', label: L(`${daysDiff}日後`, `In ${daysDiff}d`, `Dans ${daysDiff}j`) };
+      return { 
+        status: 'approaching', 
+        label: L(`${daysDiff}日後`, `In ${daysDiff}d`, `Dans ${daysDiff}j`),
+        tooltip: L(`締切間近: ${dateFormatted}`, `Due soon: ${dateFormatted}`, `Échéance proche : ${dateFormatted}`)
+      };
     }
-    return { status: 'normal', label: format(targetDate, 'M/d') };
+    return { 
+      status: 'normal', 
+      label: dateFormatted,
+      tooltip: L(`締切: ${fullDateFormatted}`, `Deadline: ${fullDateFormatted}`, `Date limite : ${fullDateFormatted}`)
+    };
   };
 
   // Render a folder node and its children
@@ -1388,7 +1419,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
                     folderDeadlineInfo.status === 'approaching' && "bg-amber-100 text-amber-800 border border-amber-200",
                     folderDeadlineInfo.status === 'normal' && "text-slate-400 font-normal"
                   )}
-                  title={folderMeta?.deadline ? format(new Date(folderMeta.deadline), 'yyyy/MM/dd HH:mm') : undefined}
+                  title={folderDeadlineInfo.tooltip || (folderMeta?.deadline ? format(new Date(folderMeta.deadline), language === 'fr' ? 'dd/MM/yyyy HH:mm' : language === 'en' ? 'MM/dd/yyyy HH:mm' : 'yyyy/MM/dd HH:mm') : undefined)}
                 >
                   {folderDeadlineInfo.label}
                 </span>
@@ -1713,6 +1744,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
               deadlineInfo.status === 'approaching' && "bg-amber-100 text-amber-800 border border-amber-200",
               deadlineInfo.status === 'normal' && "text-slate-400 font-normal"
             )}
+            title={deadlineInfo.tooltip}
           >
             {deadlineInfo.label}
           </span>

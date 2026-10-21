@@ -42,6 +42,8 @@ interface ArchiveTrashExplorerViewProps {
   onTogglePin?: (taskId: string) => void;
   trashCleanupThresholdDays?: number;
   archiveThresholdDays?: number;
+  archiveInactiveToTrashDays?: number;
+  archiveDoneToTrashDays?: number;
   activeTaskId?: string | null;
   openTaskIds?: string[];
   onEmptyTrash?: () => void;
@@ -62,6 +64,8 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
   onTogglePin,
   trashCleanupThresholdDays = 30,
   archiveThresholdDays = 90,
+  archiveInactiveToTrashDays = 99999,
+  archiveDoneToTrashDays = 7,
   activeTaskId,
   openTaskIds = [],
   onEmptyTrash,
@@ -277,7 +281,7 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
           {task.deadline && (
             <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded flex items-center gap-1 shrink-0">
               <CalendarIcon size={10} />
-              <span>{format(new Date(task.deadline), 'MM/dd')}</span>
+              <span>{format(new Date(task.deadline), language === 'fr' ? 'dd/MM' : 'MM/dd')}</span>
             </span>
           )}
         </div>
@@ -484,9 +488,13 @@ export const ArchiveTrashExplorerView: React.FC<ArchiveTrashExplorerViewProps> =
                 ? (trashCleanupThresholdDays === 99999 
                     ? L('ゴミ箱内のタスクは無期限に保持されます', 'Trash is permanently kept', 'Les éléments de la corbeille sont conservés indéfiniment') 
                     : L(`${trashCleanupThresholdDays}日後に自動で完全に消去されます`, `Permanently deleted after ${trashCleanupThresholdDays} days`, `Supprimé définitivement après ${trashCleanupThresholdDays} jours`))
-                : (archiveThresholdDays === 99999
-                    ? L('アーカイブされたタスク一覧', 'Archived tasks list', 'Liste des tâches archivées')
-                    : L(`${archiveThresholdDays}日非アクティブでゴミ箱へ移動します`, `Moved to trash after ${archiveThresholdDays} days`, `Déplacé dans la corbeille après ${archiveThresholdDays} jours`))
+                : (archiveInactiveToTrashDays === 99999
+                    ? (archiveDoneToTrashDays !== 99999
+                        ? L(`非アクティブタスクは無期限保持（完了タスクは${archiveDoneToTrashDays}日後にゴミ箱へ移動）`, `Inactive tasks kept indefinitely (completed tasks moved to trash after ${archiveDoneToTrashDays} days)`, `Tâches inactives conservées indéfiniment (terminées mises à la corbeille après ${archiveDoneToTrashDays} jours)`)
+                        : L('アーカイブされたタスク一覧（無期限に保持されます）', 'Archived tasks list (Kept indefinitely)', 'Liste des tâches archivées (conservées indéfiniment)'))
+                    : (archiveDoneToTrashDays !== 99999
+                        ? L(`${archiveInactiveToTrashDays}日非アクティブでゴミ箱へ移動（完了タスクは${archiveDoneToTrashDays}日後）`, `Moved to trash after ${archiveInactiveToTrashDays} days of inactivity (${archiveDoneToTrashDays}d for completed)`, `Mis à la corbeille après ${archiveInactiveToTrashDays} jours d'inactivité (${archiveDoneToTrashDays} j pour les terminées)`)
+                        : L(`${archiveInactiveToTrashDays}日非アクティブでゴミ箱へ移動します`, `Moved to trash after ${archiveInactiveToTrashDays} days of inactivity`, `Mis à la corbeille après ${archiveInactiveToTrashDays} jours d'inactivité`)))
               }
             </p>
           </div>
