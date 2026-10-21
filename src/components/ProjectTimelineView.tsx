@@ -5049,7 +5049,28 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               customQuickAddRequiredHeight = inputTop + 54;
             }
 
-            const gridContentHeight = timelineMode === 'calendar' ? calendarLaneHeight : Math.max(customLaneHeight, customQuickAddRequiredHeight);
+            // If Quick Add is open in a Dates/calendar slot in this lane, ensure lane height expands to show it below existing tasks
+            let calendarQuickAddRequiredHeight = 0;
+            if (quickAddCell?.project === project.fullPath && quickAddCell?.type === 'calendar') {
+              const targetSlotPx = (quickAddCell.slotIdx ?? 0) * slotWidth;
+              const inputWidth = slotWidth >= 200 ? Math.min(slotWidth - 6, 280) : 210;
+              const inputLeft = Math.max(0, Math.min(totalGridWidth - inputWidth - 6, targetSlotPx + 2));
+              const inputRight = inputLeft + inputWidth;
+              const tasksInSlot = calendarPlaced.filter(p => {
+                const overlapsInput = Math.max(p.startPx, inputLeft) < Math.min(p.endPx, inputRight);
+                const overlapsSlot = Math.max(p.startPx, targetSlotPx) < Math.min(p.endPx, targetSlotPx + slotWidth);
+                return overlapsInput || overlapsSlot;
+              });
+              const baseTop = hideSideColumns ? 24 : 6;
+              const rowStep = 38;
+              const maxRowIdx = tasksInSlot.length > 0 ? Math.max(...tasksInSlot.map(p => p.rowIdx)) : -1;
+              const inputTop = maxRowIdx >= 0 ? baseTop + (maxRowIdx + 1) * rowStep + 2 : baseTop;
+              calendarQuickAddRequiredHeight = inputTop + 54;
+            }
+
+            const gridContentHeight = timelineMode === 'calendar' 
+              ? Math.max(calendarLaneHeight, calendarQuickAddRequiredHeight) 
+              : Math.max(customLaneHeight, customQuickAddRequiredHeight);
             const laneHeight = isCollapsed ? 36 : Math.max(58, gridContentHeight, unscheduledEstimatedHeight);
 
             return (
@@ -5476,45 +5497,61 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         </div>
 
                         {/* Quick Add Form in clicked grid slot */}
-                        {quickAddCell?.project === project.fullPath && quickAddCell?.type === 'calendar' && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: `${Math.min(totalGridWidth - 220, (quickAddCell.slotIdx ?? 0) * slotWidth)}px`,
-                              top: '4px',
-                              width: '210px',
-                              zIndex: 40
-                            }}
-                            className="bg-white p-1 rounded-lg shadow-xl border border-indigo-400 pointer-events-auto"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <form onSubmit={handleQuickAddSubmit}>
-                              <input
-                                autoFocus
-                                type="text"
-                                placeholder={L("タスク名を入力...", "Task name...", "Nom de la tâche...")}
-                                value={quickAddTitle}
-                                onChange={(e) => setQuickAddTitle(e.target.value)}
-                                onKeyDown={(e) => {
-                                  e.stopPropagation();
-                                  if (e.key === 'Escape') {
-                                    setQuickAddCell(null);
-                                    setQuickAddTitle('');
-                                  }
-                                }}
-                                onBlur={() => {
-                                  if (isSubmittingQuickAddRef.current) return;
-                                  if (quickAddTitle.trim()) {
-                                    handleQuickAddSubmit();
-                                  } else {
-                                    setQuickAddCell(null);
-                                  }
-                                }}
-                                className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
-                              />
-                            </form>
-                          </div>
-                        )}
+                        {quickAddCell?.project === project.fullPath && quickAddCell?.type === 'calendar' && (() => {
+                          const targetSlotPx = (quickAddCell.slotIdx ?? 0) * slotWidth;
+                          const inputWidth = slotWidth >= 200 ? Math.min(slotWidth - 6, 280) : 210;
+                          const inputLeft = Math.max(0, Math.min(totalGridWidth - inputWidth - 6, targetSlotPx + 2));
+                          const inputRight = inputLeft + inputWidth;
+                          const tasksInSlot = calendarPlaced.filter(p => {
+                            const overlapsInput = Math.max(p.startPx, inputLeft) < Math.min(p.endPx, inputRight);
+                            const overlapsSlot = Math.max(p.startPx, targetSlotPx) < Math.min(p.endPx, targetSlotPx + slotWidth);
+                            return overlapsInput || overlapsSlot;
+                          });
+                          const baseTop = hideSideColumns ? 24 : 6;
+                          const rowStep = 38;
+                          const maxRowIdx = tasksInSlot.length > 0 ? Math.max(...tasksInSlot.map(p => p.rowIdx)) : -1;
+                          const inputTop = maxRowIdx >= 0 ? baseTop + (maxRowIdx + 1) * rowStep + 2 : baseTop;
+
+                          return (
+                            <div
+                              style={{
+                                position: 'absolute',
+                                left: `${inputLeft}px`,
+                                top: `${inputTop}px`,
+                                width: `${inputWidth}px`,
+                                zIndex: 40
+                              }}
+                              className="bg-white p-1 rounded-lg shadow-xl border border-indigo-400 pointer-events-auto"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <form onSubmit={handleQuickAddSubmit}>
+                                <input
+                                  autoFocus
+                                  type="text"
+                                  placeholder={L("タスク名を入力...", "Task name...", "Nom de la tâche...")}
+                                  value={quickAddTitle}
+                                  onChange={(e) => setQuickAddTitle(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    e.stopPropagation();
+                                    if (e.key === 'Escape') {
+                                      setQuickAddCell(null);
+                                      setQuickAddTitle('');
+                                    }
+                                  }}
+                                  onBlur={() => {
+                                    if (isSubmittingQuickAddRef.current) return;
+                                    if (quickAddTitle.trim()) {
+                                      handleQuickAddSubmit();
+                                    } else {
+                                      setQuickAddCell(null);
+                                    }
+                                  }}
+                                  className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
+                                />
+                              </form>
+                            </div>
+                          );
+                        })()}
                       </div>
                     ) : (
                       /* Custom Abstract Columns / Stages Grid Lane (Dates pattern without dates) */
