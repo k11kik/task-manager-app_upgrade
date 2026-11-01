@@ -212,7 +212,7 @@ export const getTaskDeadlineAlert = (deadline?: number, isDone?: boolean, langua
 // Tasks in the same priority tier are sorted by deadline (if applicable), then by manual order, then alphabetically by title
 export const getTaskTimelinePriorityTier = (task: { category?: string; deadline?: number; isPinned?: boolean; isStarred?: boolean; isDone?: boolean }): number => {
   if (Boolean(task.isDone)) return 6; // Done
-  if (task.category === 'Urgent' || task.category?.trim().toLowerCase() === 'urgent' || (task as any).isUrgent || (task as any).isFocus || (task as any).focus) return 1; // Focus (in Navfor, category 'Urgent' is Focus)
+  if (task.category === 'Urgent' || task.category?.trim().toLowerCase() === 'urgent' || Boolean((task as any).isUrgent)) return 1; // Focus (in Navfor data model, category 'Urgent' is Focus)
   if (Boolean(task.deadline && Number(task.deadline) > 0)) return 2; // Deadline
   if (Boolean(task.isPinned)) return 3; // Pinned
   if (Boolean(task.isStarred)) return 4; // Star
@@ -226,10 +226,9 @@ export const compareTasksByTimelinePriority = (a: Task, b: Task): number => {
   if (tierA === 2 && a.deadline && b.deadline && a.deadline !== b.deadline) {
     return a.deadline - b.deadline;
   }
-  if (a.order !== undefined && b.order !== undefined && a.order !== b.order) {
-    return a.order - b.order;
-  }
-  return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+  const titleCompare = (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+  if (titleCompare !== 0) return titleCompare;
+  return (a.id || '').localeCompare(b.id || '');
 };
 
 interface ProjectTimelineViewProps {
@@ -835,8 +834,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   }, [isTimeFilterOpen]);
 
-  // Deadline alerts (Approaching & Overdue) top bar interactive popovers
-  const [deadlineAlertModalType, setDeadlineAlertModalType] = useState<'approaching' | 'overdue' | null>(null);
+  // Top bar interactive popovers (Focus, Approaching & Overdue alerts)
+  const [deadlineAlertModalType, setDeadlineAlertModalType] = useState<'focus' | 'approaching' | 'overdue' | null>(null);
   const [deadlineAlertTriggerRect, setDeadlineAlertTriggerRect] = useState<DOMRect | null>(null);
   const deadlineAlertModalRef = useRef<HTMLDivElement>(null);
 
@@ -1652,10 +1651,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     slotKey: string; // date timestamp, columnId, or 'backlog'
   } | null>(null);
 
-  // Drag over task target state (for reordering before/after)
+  // Drag over task target state
   const [dragOverTask, setDragOverTask] = useState<{
     taskId: string;
-    position: 'before' | 'after';
   } | null>(null);
 
   // Quick inline task creation in timeline cell
@@ -1770,6 +1768,15 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
 
     return { approachingTasks: approaching, overdueTasks: overdue };
   }, [allActiveTasks, language]);
+
+  // Focus tasks for top toolbar indicator (non-done tasks with Focus category, which in Navfor data model is 'Urgent')
+  const focusTasks = useMemo(() => {
+    const list = allActiveTasks.filter(t => {
+      if (t.isDone) return false;
+      return t.category === 'Urgent' || t.category?.trim().toLowerCase() === 'urgent' || Boolean((t as any).isUrgent);
+    });
+    return list.sort(compareTasksByTimelinePriority);
+  }, [allActiveTasks]);
 
   // Group tasks by project matching TaskExplorerTree hierarchy and ordering
   const projectTree = useMemo(() => {
@@ -2300,7 +2307,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             const bAllDay = isTaskAllDayDeadline(b) || !isGridEnabled;
             const aTime = aAllDay ? startOfDay(new Date(a.startDate || a.deadline || 0)).getTime() : (a.startDate || a.deadline || 0);
             const bTime = bAllDay ? startOfDay(new Date(b.startDate || b.deadline || 0)).getTime() : (b.startDate || b.deadline || 0);
-            return aTime - bTime || (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt;
+            return aTime - bTime || compareTasksByTimelinePriority(a, b);
           });
       } else {
         const colOrderMap = new Map<string, number>(customColumns.map((c, idx) => [c.id, idx]));
@@ -2327,7 +2334,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           } else {
             const colIdx = customColumns.findIndex(c => c.id === getTaskCurrentColumnId(t, customColumns, activePattern.id));
             const stepIdx = getTaskCurrentStep(t, activePattern.id);
-            xApprox = colIdx >= 0 ? colIdx * 1000 + stepIdx * 100 + (t.order ?? 0) : 0;
+            xApprox = colIdx >= 0 ? colIdx * 1000 + stepIdx * 100 : 0;
           }
           return { task: t, xApprox };
         })
@@ -2896,23 +2903,6 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         }
       }
 
-      // Calculate new order to place at end of slot
-      const existingInSlot = activeTasks.filter(t => {
-        if (t.project !== project) return false;
-        if (t.id === data.taskId) return false;
-        if (slot.type === 'calendar') {
-          if (!slot.date) return !t.deadline;
-          return t.deadline && isSameDay(new Date(t.deadline), slot.date);
-        } else {
-          const tCol = getTaskCurrentColumnId(t, customColumns, activePattern.id);
-          if (!slot.columnId) return !tCol;
-          return tCol === slot.columnId;
-        }
-      });
-
-      const maxOrder = existingInSlot.reduce((max, t) => Math.max(max, t.order ?? 0), 0);
-      updates.order = maxOrder + 10;
-
       if (onUpdateTask) {
         onUpdateTask(data.taskId, updates);
       } else {
@@ -2926,11 +2916,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  // Reorder task by dropping directly before or after another task chip
+  // Move task to target task's project and slot (cannot reorder within the same slot; sorting is fixed)
   const handleTaskDropOnTask = (
     e: React.DragEvent,
-    targetTask: Task,
-    position: 'before' | 'after'
+    targetTask: Task
   ) => {
     e.preventDefault();
     e.stopPropagation();
@@ -2942,8 +2931,34 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       if (!data?.taskId || data.taskId === targetTask.id) return;
 
       const draggedTask = activeTasks.find(t => t.id === data.taskId);
+      if (!draggedTask) return;
+
       const targetColId = timelineMode === 'custom' ? getTaskCurrentColumnId(targetTask, customColumns, activePattern.id) : undefined;
       const isTargetBacklog = timelineMode === 'calendar' ? !targetTask.deadline : !targetColId;
+
+      const draggedColId = timelineMode === 'custom' ? getTaskCurrentColumnId(draggedTask, customColumns, activePattern.id) : undefined;
+      const isSameProject = (draggedTask.project?.trim() || 'General') === (targetTask.project?.trim() || 'General');
+
+      let isSameSlot = false;
+      if (timelineMode === 'calendar') {
+        if (!draggedTask.deadline && !targetTask.deadline) {
+          isSameSlot = true;
+        } else if (draggedTask.deadline && targetTask.deadline && isSameDay(new Date(draggedTask.deadline), new Date(targetTask.deadline))) {
+          isSameSlot = true;
+        }
+      } else {
+        if (!draggedColId && !targetColId) {
+          isSameSlot = true;
+        } else if (draggedColId === targetColId) {
+          isSameSlot = true;
+        }
+      }
+
+      // If dragged task is already in the same slot and project, user cannot manually reorder them
+      if (isSameProject && isSameSlot) {
+        (window as any).__navforDraggingTask = null;
+        return;
+      }
 
       const updates: Partial<Task> = {
         project: targetTask.project,
@@ -2993,38 +3008,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           updates.isAllDay = targetTask.isAllDay;
         }
       }
-      // If moving in custom columns or between ToDo items, do NOT touch or reset deadline!
 
-      // Find all sibling tasks in target slot (including ToDo List / backlog)
-      const siblings = activeTasks.filter(t => {
-        if (t.project !== targetTask.project) return false;
-        if (t.id === data.taskId) return false; // exclude dragging task
-        if (timelineMode === 'calendar') {
-          if (!targetTask.deadline) return !t.deadline;
-          return t.deadline && isSameDay(new Date(t.deadline), new Date(targetTask.deadline));
-        } else {
-          const tCol = getTaskCurrentColumnId(t, customColumns, activePattern.id);
-          if (!targetColId) return !tCol;
-          return tCol === targetColId;
-        }
-      }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
-
-      const targetIdx = siblings.findIndex(s => s.id === targetTask.id);
-      const insertIdx = position === 'before' ? Math.max(0, targetIdx) : targetIdx + 1;
-
-      // Insert dragging task placeholder into list
-      const reordered = [...siblings];
-      reordered.splice(insertIdx, 0, { id: data.taskId } as any);
-
-      // Distribute fresh spaced order numbers (10, 20, 30...)
-      reordered.forEach((item, index) => {
-        const newOrder = (index + 1) * 10;
-        if (item.id === data.taskId) {
-          updates.order = newOrder;
-        } else if (item.order !== newOrder) {
-          if (onUpdateTask) onUpdateTask(item.id, { order: newOrder });
-        }
-      });
+      // Notice: we do not set custom order numbers. The position within the destination slot
+      // is always strictly governed by compareTasksByTimelinePriority (priority tiers + alphabetical order).
 
       if (onUpdateTask) {
         onUpdateTask(data.taskId, updates);
@@ -4083,8 +4069,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const renderDeadlineAlertModal = () => {
     if (!deadlineAlertModalType || typeof document === 'undefined') return null;
 
+    const isFocus = deadlineAlertModalType === 'focus';
     const isOverdue = deadlineAlertModalType === 'overdue';
-    const list = isOverdue ? overdueTasks : approachingTasks;
+    let list: { task: Task; alert?: ReturnType<typeof getTaskDeadlineAlert> }[] = [];
+    if (isFocus) {
+      list = focusTasks.map(t => ({
+        task: t,
+        alert: t.deadline ? getTaskDeadlineAlert(t.deadline, t.isDone, language, t.isAllDay) : undefined
+      }));
+    } else if (isOverdue) {
+      list = overdueTasks;
+    } else {
+      list = approachingTasks;
+    }
+
     const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
     const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 800;
     const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1200;
@@ -4164,26 +4162,30 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           {/* Header */}
           <div className={cn(
             "flex items-center justify-between px-3.5 py-2.5 border-b select-none shrink-0",
-            isOverdue 
-              ? "bg-gradient-to-r from-red-50 to-rose-50/60 border-red-100" 
-              : "bg-gradient-to-r from-amber-50 to-orange-50/60 border-amber-100"
+            isFocus
+              ? "bg-gradient-to-r from-red-50 to-rose-50/60 border-red-100"
+              : isOverdue 
+                ? "bg-gradient-to-r from-red-50 to-rose-50/60 border-red-100" 
+                : "bg-gradient-to-r from-amber-50 to-orange-50/60 border-amber-100"
           )}>
             <div className="flex items-center gap-2 min-w-0">
               <div className={cn(
                 "w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-2xs",
-                isOverdue ? "bg-red-500 text-white" : "bg-amber-500 text-white"
+                isFocus ? "bg-red-500 text-white" : isOverdue ? "bg-red-500 text-white" : "bg-amber-500 text-white"
               )}>
-                <Clock size={15} />
+                {isFocus ? <Zap size={15} fill="currentColor" /> : <Clock size={15} />}
               </div>
               <div className="flex items-center gap-1.5 min-w-0">
                 <h3 className="text-xs font-bold text-slate-900 truncate">
-                  {isOverdue 
-                    ? L('期限切れのタスク', 'Overdue Tasks', 'Tâches en retard') 
-                    : L('締切間近のタスク', 'Due Soon Tasks', 'Échéances proches')}
+                  {isFocus
+                    ? L('Focusタスク', 'Focus Tasks', 'Tâches Focus')
+                    : isOverdue 
+                      ? L('期限切れのタスク', 'Overdue Tasks', 'Tâches en retard') 
+                      : L('締切間近のタスク', 'Due Soon Tasks', 'Échéances proches')}
                 </h3>
                 <span className={cn(
                   "px-1.5 py-0.2 rounded-full text-[10px] font-mono font-extrabold text-white shrink-0 shadow-2xs",
-                  isOverdue ? "bg-red-600" : "bg-amber-500"
+                  isFocus ? "bg-red-600" : isOverdue ? "bg-red-600" : "bg-amber-500"
                 )}>
                   {list.length}
                 </span>
@@ -4203,32 +4205,46 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           {/* Subtitle / quick instruction */}
           <div className="px-3.5 py-1 bg-slate-50/70 border-b border-slate-100 text-[10px] text-slate-500 select-none flex items-center justify-between">
             <span>{L('タスクをクリックでタイムライン上にフォーカス', 'Click task to view on timeline', 'Cliquer pour accéder')}</span>
-            <span>{L('⚡ Focus移動で優先処理', '⚡ Move to Focus', '⚡ Vers Focus')}</span>
+            <span>{isFocus ? L('⚡ Focus優先タスク', '⚡ Focus Priority', '⚡ Priorité Focus') : L('⚡ Focus移動で優先処理', '⚡ Move to Focus', '⚡ Vers Focus')}</span>
           </div>
 
           {/* Task list */}
           <div className="overflow-y-auto custom-scrollbar flex-1 divide-y divide-slate-100/90 p-1.5 max-h-[380px]">
             {list.length === 0 ? (
               <div className="py-10 px-4 text-center select-none">
-                <CheckCircle2 size={30} className="text-emerald-500 mx-auto mb-2 opacity-80" />
+                {isFocus ? (
+                  <Zap size={30} className="text-amber-500 mx-auto mb-2 opacity-80" />
+                ) : (
+                  <CheckCircle2 size={30} className="text-emerald-500 mx-auto mb-2 opacity-80" />
+                )}
                 <p className="text-xs font-bold text-slate-700">
-                  {isOverdue 
-                    ? L('期限切れのタスクはありません', 'No overdue tasks', 'Aucune tâche en retard')
-                    : L('期限間近のタスクはありません', 'No approaching deadlines', 'Aucune échéance proche')}
+                  {isFocus
+                    ? L('Focusタスクはありません', 'No focus tasks', 'Aucune tâche Focus')
+                    : isOverdue 
+                      ? L('期限切れのタスクはありません', 'No overdue tasks', 'Aucune tâche en retard')
+                      : L('期限間近のタスクはありません', 'No approaching deadlines', 'Aucune échéance proche')}
                 </p>
                 <p className="text-[11px] text-slate-400 mt-0.5">
-                  {L('すべての期限付きタスクが順調です', 'All scheduled tasks are on track', 'Tout est en ordre')}
+                  {isFocus
+                    ? L('タスクの⚡アイコンからFocusに追加できます', 'Add tasks to Focus using the ⚡ icon', 'Ajoutez des tâches au Focus avec l’icône ⚡')
+                    : L('すべての期限付きタスクが順調です', 'All scheduled tasks are on track', 'Tout est en ordre')}
                 </p>
               </div>
             ) : (
               list.map(({ task, alert }) => {
-                const isUrgent = task.category === 'Urgent' || (task as any).isUrgent;
+                const isUrgent = task.category === 'Urgent' || Boolean((task as any).isUrgent);
                 const isSelected = activeTaskId === task.id;
 
                 return (
                   <div
                     key={task.id}
                     onClick={() => {
+                      const isUnscheduled = timelineMode === 'calendar'
+                        ? (!task.deadline && !task.startDate && (!task.recurrence || task.recurrence.type === 'none'))
+                        : !getTaskCurrentColumnId(task, customColumns, activePattern.id);
+                      if (isUnscheduled && !showUnscheduledColumn) {
+                        setShowUnscheduledColumn(true);
+                      }
                       onSelectTask(task.id, true);
                       setSelectedKey(`task:${task.id}`);
                       setSelectedFolderPath(null);
@@ -4237,7 +4253,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                         const el = document.getElementById(`timeline-task-${task.id}`);
                         el?.focus({ preventScroll: true });
                         el?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-                      }, 60);
+                      }, 80);
                     }}
                     className={cn(
                       "group flex items-center justify-between gap-2 p-2 rounded-xl transition-all cursor-pointer select-none",
@@ -4260,7 +4276,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                       <Circle size={16} strokeWidth={1.8} />
                     </button>
 
-                    {/* Task Title + Folder */}
+                    {/* Task Title + Folder + Info */}
                     <div className="flex flex-col min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className="text-xs font-semibold text-slate-900 truncate">
@@ -4276,22 +4292,40 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                       <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-0.5">
                         <Folder size={10} className="shrink-0 text-slate-400" />
                         <span className="truncate">{task.project || 'General'}</span>
-                        <span className="mx-0.5 opacity-40">•</span>
-                        <span>{format(new Date(task.deadline!), isTaskAllDayDeadline(task) ? 'yyyy/MM/dd' : 'MM/dd HH:mm')}</span>
+                        {task.deadline ? (
+                          <>
+                            <span className="mx-0.5 opacity-40">•</span>
+                            <span>{format(new Date(task.deadline), isTaskAllDayDeadline(task) ? 'yyyy/MM/dd' : 'MM/dd HH:mm')}</span>
+                          </>
+                        ) : timelineMode === 'custom' && getTaskCurrentColumnId(task, customColumns, activePattern.id) ? (
+                          <>
+                            <span className="mx-0.5 opacity-40">•</span>
+                            <span className="text-indigo-600 font-medium truncate">
+                              {customColumns.find(c => c.id === getTaskCurrentColumnId(task, customColumns, activePattern.id))?.name || 'Phase'}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="mx-0.5 opacity-40">•</span>
+                            <span className="text-amber-600 font-medium">{L('ToDo', 'ToDo', 'À faire')}</span>
+                          </>
+                        )}
                       </div>
                     </div>
 
                     {/* Right side: Badge + Focus Button + Star */}
                     <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-                      {/* Deadline label badge */}
-                      <span className={cn(
-                        "px-1.5 py-0.5 rounded text-[10px] font-mono font-bold leading-tight shrink-0 shadow-2xs",
-                        alert.isOverdue 
-                          ? "bg-red-100 text-red-700 border border-red-200" 
-                          : "bg-amber-100 text-amber-800 border border-amber-200"
-                      )} title={alert.tooltip}>
-                        {alert.label}
-                      </span>
+                      {/* Deadline label badge if present */}
+                      {alert && (
+                        <span className={cn(
+                          "px-1.5 py-0.5 rounded text-[10px] font-mono font-bold leading-tight shrink-0 shadow-2xs",
+                          alert.isOverdue 
+                            ? "bg-red-100 text-red-700 border border-red-200" 
+                            : "bg-amber-100 text-amber-800 border border-amber-200"
+                        )} title={alert.tooltip}>
+                          {alert.label}
+                        </span>
+                      )}
 
                       {/* Move to Focus button (⚡ Focus) */}
                       <button
@@ -4367,8 +4401,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       {/* Timeline Top Control Toolbar (Normal View only - Hidden in Full View to maximize screen space for Timeline) */}
       {!isFullscreen && (
         <div className="relative z-50 flex items-center justify-between px-2 sm:px-3 border-b shrink-0 select-none py-1.5 bg-slate-50/90 border-slate-200 min-h-[38px] w-full max-w-full flex-nowrap gap-1.5 sm:gap-2">
-          {/* Left: Mode Switcher (Dates vs Custom/Stages) & Phase Pattern Button & Time Filter */}
-          <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 flex-1 flex-nowrap overflow-x-hidden">
+          {/* Left: Mode Switcher (Dates vs Custom/Stages) & Phase Pattern Button & Time Filter & Focus / Deadline Indicators */}
+          <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 flex-1 flex-nowrap overflow-x-auto no-scrollbar scroll-smooth py-0.5">
             {/* Optional Small Project Timeline Title (Shown only when Timeline is very wide to avoid any button crowding) */}
             {!isCompactToolbar && timelineWidth >= 840 && (
               <>
@@ -4391,7 +4425,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 type="button"
                 onClick={() => handleSetTimelineMode('calendar')}
                 className={cn(
-                  "py-1.5 sm:py-1 text-xs sm:text-[11px] font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shrink-0 min-h-[34px] sm:min-h-[30px]",
+                  "py-1 sm:py-1 text-xs sm:text-[11px] font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shrink-0 min-h-[30px] sm:min-h-[30px]",
                   isCompactToolbar ? "px-2" : "px-2.5",
                   timelineMode === 'calendar'
                     ? "bg-indigo-600 text-white shadow-xs"
@@ -4406,7 +4440,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 type="button"
                 onClick={() => handleSetTimelineMode('custom')}
                 className={cn(
-                  "py-1.5 sm:py-1 text-xs sm:text-[11px] font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shrink-0 min-h-[34px] sm:min-h-[30px]",
+                  "py-1 sm:py-1 text-xs sm:text-[11px] font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shrink-0 min-h-[30px] sm:min-h-[30px]",
                   isCompactToolbar ? "px-2" : "px-2.5",
                   timelineMode === 'custom'
                     ? "bg-indigo-600 text-white shadow-xs"
@@ -4420,7 +4454,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             </div>
 
             {/* 2. Phase Pattern Button (Icon-only with chevron when Timeline width is small or on mobile) */}
-            <div className="relative inline-flex items-center min-w-0 shrink">
+            <div className="relative inline-flex items-center min-w-0 shrink-0">
               <button
                 type="button"
                 data-dropdown-trigger="pattern"
@@ -4433,7 +4467,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   setIsPatternMenuOpen(prev => !prev);
                 }}
                 className={cn(
-                  "py-1.5 sm:py-1 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1 shadow-2xs cursor-pointer select-none shrink-0 min-h-[34px] sm:min-h-[30px]",
+                  "py-1 sm:py-1 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1 shadow-2xs cursor-pointer select-none shrink-0 min-h-[30px] sm:min-h-[30px]",
                   isCompactToolbar ? "px-2 justify-center" : "px-2.5 min-w-0 max-w-[145px] xs:max-w-[180px] sm:max-w-[220px]",
                   timelineMode === 'custom'
                     ? "bg-indigo-50 border-indigo-200/90 text-indigo-900 hover:bg-indigo-100/70"
@@ -4468,7 +4502,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   setIsTimeFilterOpen(prev => !prev);
                 }}
                 className={cn(
-                  "py-1.5 sm:py-1 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer select-none shrink-0 min-h-[34px] sm:min-h-[30px]",
+                  "py-1 sm:py-1 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer select-none shrink-0 min-h-[30px] sm:min-h-[30px]",
                   isCompactToolbar ? "px-2 justify-center" : "px-2.5",
                   timeFilter.enabled
                     ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
@@ -4500,7 +4534,43 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               </button>
             </div>
 
-            {/* 3b. Approaching & Overdue Deadline Alert Indicators (Right of Time filter button) */}
+            {/* 3b. Focus Indicator (Right of Time filter button, left of Deadline alerts) */}
+            {focusTasks.length > 0 && (
+              <button
+                type="button"
+                data-dropdown-trigger="deadline-alert"
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setDeadlineAlertTriggerRect(rect);
+                  setDeadlineAlertModalType(prev => prev === 'focus' ? null : 'focus');
+                }}
+                className={cn(
+                  "py-1 sm:py-1 px-2 sm:px-2.5 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1 shadow-2xs cursor-pointer select-none shrink-0 min-h-[30px] sm:min-h-[30px]",
+                  deadlineAlertModalType === 'focus'
+                    ? "bg-red-600 text-white border-red-700 shadow-xs"
+                    : "bg-red-50 text-red-900 border-red-200 hover:bg-red-100 hover:border-red-300"
+                )}
+                title={L(
+                  `Focusタスク: ${focusTasks.length}件 (クリックで一覧表示・移動)`,
+                  `Focus tasks: ${focusTasks.length} (click to view / jump)`,
+                  `Tâches Focus : ${focusTasks.length}`
+                )}
+              >
+                <Zap 
+                  size={13} 
+                  fill="currentColor"
+                  className={cn(
+                    "shrink-0",
+                    deadlineAlertModalType === 'focus' ? "text-white fill-white" : "text-red-500 fill-red-500"
+                  )} 
+                />
+                <span className="font-mono font-bold text-xs leading-none flex items-center">
+                  <span className="text-[10px] opacity-75 mr-0.5">×</span>{focusTasks.length}
+                </span>
+              </button>
+            )}
+
+            {/* 3c. Approaching & Overdue Deadline Alert Indicators */}
             {approachingTasks.length > 0 && (
               <button
                 type="button"
@@ -4511,7 +4581,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   setDeadlineAlertModalType(prev => prev === 'approaching' ? null : 'approaching');
                 }}
                 className={cn(
-                  "py-1.5 sm:py-1 px-2.5 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer select-none shrink-0 min-h-[34px] sm:min-h-[30px]",
+                  "py-1 sm:py-1 px-2 sm:px-2.5 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer select-none shrink-0 min-h-[30px] sm:min-h-[30px]",
                   deadlineAlertModalType === 'approaching'
                     ? "bg-amber-500 text-white border-amber-600 shadow-xs"
                     : "bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100"
@@ -4546,7 +4616,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                   setDeadlineAlertModalType(prev => prev === 'overdue' ? null : 'overdue');
                 }}
                 className={cn(
-                  "py-1.5 sm:py-1 px-2.5 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer select-none shrink-0 min-h-[34px] sm:min-h-[30px]",
+                  "py-1 sm:py-1 px-2 sm:px-2.5 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer select-none shrink-0 min-h-[30px] sm:min-h-[30px]",
                   deadlineAlertModalType === 'overdue'
                     ? "bg-red-600 text-white border-red-700 shadow-xs"
                     : "bg-red-50 text-red-900 border-red-300 hover:bg-red-100"
@@ -4572,8 +4642,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
             )}
           </div>
 
-          {/* Right: Menu Button ONLY (Icon-only when Timeline width is small or on mobile) */}
-          <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+          {/* Right: Menu Button ONLY (Pinned to the right with background barrier so no overlap occurs) */}
+          <div className="flex items-center gap-1.5 shrink-0 ml-auto z-10 bg-slate-50/95 pl-1.5">
             <div className="relative inline-flex items-center">
               <button
                 type="button"
@@ -5856,7 +5926,31 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               {isFullscreen && isTimeFilterOpen && renderTimeFilterDropdown()}
             </div>
 
-            {/* Approaching & Overdue Deadline Badges in Fullscreen */}
+            {/* Focus, Approaching & Overdue Alert Badges in Fullscreen */}
+            {focusTasks.length > 0 && (
+              <button
+                type="button"
+                data-dropdown-trigger="deadline-alert"
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setDeadlineAlertTriggerRect(rect);
+                  setDeadlineAlertModalType(prev => prev === 'focus' ? null : 'focus');
+                }}
+                className={cn(
+                  "px-2 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer shrink-0 min-h-[32px]",
+                  deadlineAlertModalType === 'focus'
+                    ? "bg-red-600 text-white shadow-2xs"
+                    : "text-red-300 hover:text-white hover:bg-red-500/20"
+                )}
+                title={L(`Focusタスク: ${focusTasks.length}件`, `Focus: ${focusTasks.length} tasks`, `Tâches Focus : ${focusTasks.length}`)}
+              >
+                <Zap size={13} fill="currentColor" className="text-red-400 fill-red-400 shrink-0" />
+                <span className="font-mono font-bold flex items-center">
+                  <span className="text-[10px] opacity-75 mr-0.5">×</span>{focusTasks.length}
+                </span>
+              </button>
+            )}
+
             {approachingTasks.length > 0 && (
               <button
                 type="button"
@@ -6466,17 +6560,41 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         onDragOver={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          const rect = e.currentTarget.getBoundingClientRect();
-          const midY = rect.top + rect.height / 2;
-          const pos = e.clientY < midY ? 'before' : 'after';
-          setDragOverTask({ taskId: task.id, position: pos });
+          const draggedData = (window as any).__navforDraggingTask;
+          if (!draggedData?.taskId || draggedData.taskId === task.id) return;
+
+          // Check if dragging within the same slot and project
+          const isSameProject = (draggedData.currentProject || draggedData.fromProject) === task.project;
+          let isSameSlot = false;
+          if (timelineMode === 'calendar') {
+            if (!draggedData.fromDeadline && !task.deadline) {
+              isSameSlot = true;
+            } else if (draggedData.fromDeadline && task.deadline && isSameDay(new Date(draggedData.fromDeadline), new Date(task.deadline))) {
+              isSameSlot = true;
+            }
+          } else {
+            const currentPatternCol = task.timelinePresetColumns?.[activePattern.id] ?? task.timelineColumn;
+            const draggedPatternCol = draggedData.fromTimelineColumn;
+            if (!currentPatternCol && !draggedPatternCol) {
+              isSameSlot = true;
+            } else if (currentPatternCol === draggedPatternCol) {
+              isSameSlot = true;
+            }
+          }
+
+          if (isSameProject && isSameSlot) {
+            // Cannot reorder tasks within the same column/slot manually
+            if (dragOverTask) setDragOverTask(null);
+            return;
+          }
+
+          setDragOverTask({ taskId: task.id });
         }}
         onDragLeave={() => {
           if (dragOverTask?.taskId === task.id) setDragOverTask(null);
         }}
         onDrop={(e) => {
-          const pos = dragOverTask?.position || 'after';
-          handleTaskDropOnTask(e, task, pos);
+          handleTaskDropOnTask(e, task);
         }}
         onFocus={() => {
           (window as any).__navforActivePane = 'timeline';
@@ -6506,8 +6624,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 ? "bg-red-50 text-red-950 border-red-200 hover:bg-red-100 hover:border-red-300"
                 : "bg-white text-slate-800 border-slate-200/90 hover:bg-slate-50 hover:border-slate-300"),
           task.isDone && !isSelected && "opacity-60 bg-slate-100 text-slate-400 border-slate-200",
-          isDragTarget && dragOverTask?.position === 'before' && "border-t-2 border-t-indigo-600 shadow-md",
-          isDragTarget && dragOverTask?.position === 'after' && "border-b-2 border-b-indigo-600 shadow-md"
+          isDragTarget && "ring-2 ring-indigo-500 bg-indigo-50/80 shadow-md"
         )}
       >
         {/* Checkbox - iPhone Reminders style spacious touch target & clear circle */}
