@@ -361,7 +361,7 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.25";
+  const APP_VERSION = "3.1.26";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);

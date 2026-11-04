@@ -18,6 +18,7 @@ import {
   ArrowRight,
   Filter,
   ChevronDown,
+  ChevronUp,
   ChevronsDownUp,
   ChevronsUpDown,
   CalendarDays,
@@ -838,6 +839,29 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [deadlineAlertModalType, setDeadlineAlertModalType] = useState<'focus' | 'approaching' | 'overdue' | null>(null);
   const [deadlineAlertTriggerRect, setDeadlineAlertTriggerRect] = useState<DOMRect | null>(null);
   const deadlineAlertModalRef = useRef<HTMLDivElement>(null);
+
+  // Prominent Focus & Pinned Tasks bar right below toolbar (minimizable to avoid crowding Timeline, default to minimized)
+  const [isFocusBarMinimized, setIsFocusBarMinimized] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('navfor_timeline_focus_minimized');
+      if (saved !== null) {
+        return saved === 'true';
+      }
+      return true;
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleFocusBarMinimized = () => {
+    setIsFocusBarMinimized(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('navfor_timeline_focus_minimized', String(next));
+      } catch {}
+      return next;
+    });
+  };
 
   useEffect(() => {
     const handleOutside = (e: MouseEvent | TouchEvent) => {
@@ -1774,6 +1798,30 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     const list = allActiveTasks.filter(t => {
       if (t.isDone) return false;
       return t.category === 'Urgent' || t.category?.trim().toLowerCase() === 'urgent' || Boolean((t as any).isUrgent);
+    });
+    return list.sort(compareTasksByTimelinePriority);
+  }, [allActiveTasks]);
+
+  // Pinned tasks for priority banner and indicator (non-done tasks with isPinned)
+  const pinnedTasks = useMemo(() => {
+    const list = allActiveTasks.filter(t => !t.isDone && Boolean(t.isPinned));
+    return list.sort(compareTasksByTimelinePriority);
+  }, [allActiveTasks]);
+
+  // Combined priority tasks (Focus & Pinned) for the banner below the toolbar
+  const priorityBannerTasks = useMemo(() => {
+    const seen = new Set<string>();
+    const list: Task[] = [];
+    allActiveTasks.forEach(t => {
+      if (t.isDone) return;
+      const isFocus = t.category === 'Urgent' || t.category?.trim().toLowerCase() === 'urgent' || Boolean((t as any).isUrgent);
+      const isPinned = Boolean(t.isPinned);
+      if (isFocus || isPinned) {
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          list.push(t);
+        }
+      }
     });
     return list.sort(compareTasksByTimelinePriority);
   }, [allActiveTasks]);
@@ -4066,6 +4114,27 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   );
 };
 
+  // Smoothly scroll and center any task on the timeline
+  const handleJumpToTask = (taskId: string) => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return;
+    const isUnscheduled = timelineMode === 'calendar'
+      ? (!task.deadline && !task.startDate && (!task.recurrence || task.recurrence.type === 'none'))
+      : !getTaskCurrentColumnId(task, customColumns, activePattern.id);
+    if (isUnscheduled && !showUnscheduledColumn) {
+      setShowUnscheduledColumn(true);
+    }
+    onSelectTask(taskId, true);
+    setSelectedKey(`task:${taskId}`);
+    setSelectedFolderPath(null);
+    setDeadlineAlertModalType(null);
+    setTimeout(() => {
+      const el = document.getElementById(`timeline-task-${taskId}`);
+      el?.focus({ preventScroll: true });
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    }, 80);
+  };
+
   const renderDeadlineAlertModal = () => {
     if (!deadlineAlertModalType || typeof document === 'undefined') return null;
 
@@ -4238,23 +4307,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 return (
                   <div
                     key={task.id}
-                    onClick={() => {
-                      const isUnscheduled = timelineMode === 'calendar'
-                        ? (!task.deadline && !task.startDate && (!task.recurrence || task.recurrence.type === 'none'))
-                        : !getTaskCurrentColumnId(task, customColumns, activePattern.id);
-                      if (isUnscheduled && !showUnscheduledColumn) {
-                        setShowUnscheduledColumn(true);
-                      }
-                      onSelectTask(task.id, true);
-                      setSelectedKey(`task:${task.id}`);
-                      setSelectedFolderPath(null);
-                      setDeadlineAlertModalType(null);
-                      setTimeout(() => {
-                        const el = document.getElementById(`timeline-task-${task.id}`);
-                        el?.focus({ preventScroll: true });
-                        el?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-                      }, 80);
-                    }}
+                    onClick={() => handleJumpToTask(task.id)}
                     className={cn(
                       "group flex items-center justify-between gap-2 p-2 rounded-xl transition-all cursor-pointer select-none",
                       isSelected 
@@ -4380,6 +4433,272 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         </div>
       </>,
       document.body
+    );
+  };
+
+  // Prominently display Focus & Pinned tasks in a collapsible banner right between the top toolbar and Timeline grid
+  const renderFocusTasksBanner = () => {
+    if (priorityBannerTasks.length === 0) return null;
+
+    if (isFocusBarMinimized) {
+      return (
+        <div className="bg-gradient-to-r from-red-50/95 via-rose-50/90 to-amber-50/80 border-b border-rose-200/90 px-2.5 sm:px-3 py-1 flex items-center justify-between text-xs shrink-0 select-none z-20 transition-all">
+          <div className="flex items-center gap-2 min-w-0 flex-1 overflow-x-auto no-scrollbar py-0.5">
+            {/* Unified stylish icon + number indicator (Explore-style filled icon, no background) */}
+            <button
+              type="button"
+              onClick={toggleFocusBarMinimized}
+              className="flex items-center gap-2 py-0.5 px-1.5 -ml-1 rounded-md hover:bg-rose-100/60 transition-colors cursor-pointer shrink-0 select-none"
+              title={L("クリックして展開", "Click to expand", "Cliquer pour déplier")}
+            >
+              {focusTasks.length > 0 && (
+                <span className="flex items-center gap-1" title={L(`Focus: ${focusTasks.length}件`, `Focus: ${focusTasks.length}`, `Focus : ${focusTasks.length}`)}>
+                  <Zap size={13} className="text-red-500 fill-red-500 shrink-0" />
+                  <span className="font-mono font-bold text-xs text-red-600 leading-none">
+                    {focusTasks.length}
+                  </span>
+                </span>
+              )}
+              {focusTasks.length > 0 && pinnedTasks.length > 0 && (
+                <span className="w-px h-3 bg-rose-300/80 shrink-0" />
+              )}
+              {pinnedTasks.length > 0 && (
+                <span className="flex items-center gap-1" title={L(`ピン留め: ${pinnedTasks.length}件`, `Pinned: ${pinnedTasks.length}`, `Épinglé : ${pinnedTasks.length}`)}>
+                  <Pin size={12} className="text-indigo-600 fill-indigo-600 shrink-0" />
+                  <span className="font-mono font-bold text-xs text-indigo-600 leading-none">
+                    {pinnedTasks.length}
+                  </span>
+                </span>
+              )}
+            </button>
+
+            <span className="w-px h-3.5 bg-rose-200/80 shrink-0" />
+
+            {/* Compact clickable preview chips of priority tasks */}
+            <div className="flex items-center gap-1.5 min-w-0 flex-nowrap overflow-x-auto no-scrollbar ml-0.5">
+              {priorityBannerTasks.map(task => {
+                const isFocus = task.category === 'Urgent' || task.category?.trim().toLowerCase() === 'urgent' || Boolean((task as any).isUrgent);
+                const isPinned = Boolean(task.isPinned);
+                const isSelected = activeTaskId === task.id;
+
+                return (
+                  <button
+                    key={task.id}
+                    type="button"
+                    onClick={() => handleJumpToTask(task.id)}
+                    className={cn(
+                      "flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-bold max-w-[170px] sm:max-w-[240px] truncate shadow-2xs transition-all cursor-pointer shrink-0 border",
+                      isSelected
+                        ? isFocus
+                          ? "bg-red-500 text-white border-red-600"
+                          : "bg-indigo-600 text-white border-indigo-700"
+                        : isFocus
+                          ? "bg-white/95 hover:bg-white text-slate-800 border-rose-200/90 hover:border-rose-300"
+                          : "bg-white/95 hover:bg-white text-slate-800 border-indigo-200/90 hover:border-indigo-300"
+                    )}
+                    title={L(`${task.title} (クリックしてタイムラインへ移動)`, `${task.title} (Click to jump to timeline)`, task.title)}
+                  >
+                    {isFocus ? (
+                      <Zap size={11} className={cn("shrink-0", isSelected ? "text-white fill-white" : "text-red-500 fill-red-500")} />
+                    ) : (
+                      <Pin size={11} className={cn("shrink-0", isSelected ? "text-white fill-white" : "text-indigo-600 fill-indigo-600")} />
+                    )}
+                    <span className="truncate">{task.title}</span>
+                    {isFocus && isPinned && (
+                      <Pin size={9} className={cn("shrink-0", isSelected ? "text-white/80 fill-white/80" : "text-indigo-400 fill-indigo-400")} />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Expand button */}
+          <button
+            type="button"
+            onClick={toggleFocusBarMinimized}
+            className="ml-2 px-2 py-0.5 rounded-md text-[11px] font-bold text-red-800 hover:text-red-950 hover:bg-red-100/70 flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+            title={L("詳細を展開", "Expand Details", "Déplier les détails")}
+          >
+            <ChevronDown size={13} className="shrink-0" />
+            <span className="hidden xs:inline">{L("展開", "Expand", "Déplier")}</span>
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="bg-gradient-to-r from-red-50/95 via-rose-50/90 to-amber-50/80 border-b border-rose-200/90 shrink-0 select-none z-20 transition-all">
+        {/* Header bar */}
+        <div className="px-2.5 sm:px-3 py-1.5 border-b border-rose-200/50 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2 min-w-0 flex-wrap">
+            {focusTasks.length > 0 && (
+              <div className="flex items-center gap-1" title={L(`Focus: ${focusTasks.length}件`, `Focus: ${focusTasks.length}`, `Focus : ${focusTasks.length}`)}>
+                <Zap size={13} className="text-red-500 fill-red-500 shrink-0" />
+                <span className="font-mono font-bold text-xs text-red-600 leading-none">
+                  {focusTasks.length}
+                </span>
+              </div>
+            )}
+            {focusTasks.length > 0 && pinnedTasks.length > 0 && (
+              <span className="w-px h-3 bg-rose-300/80 shrink-0" />
+            )}
+            {pinnedTasks.length > 0 && (
+              <div className="flex items-center gap-1" title={L(`ピン留め: ${pinnedTasks.length}件`, `Pinned: ${pinnedTasks.length}`, `Épinglé : ${pinnedTasks.length}`)}>
+                <Pin size={12} className="text-indigo-600 fill-indigo-600 shrink-0" />
+                <span className="font-mono font-bold text-xs text-indigo-600 leading-none">
+                  {pinnedTasks.length}
+                </span>
+              </div>
+            )}
+            <span className="text-[10px] text-red-800/80 hidden sm:inline ml-1 font-medium truncate">
+              {L('最優先・固定表示タスク (クリックでタイムライン上の位置に移動)', 'Top priority & pinned tasks (Click to jump on timeline)', 'Tâches prioritaires et épinglées')}
+            </span>
+          </div>
+
+          {/* Minimize button */}
+          <button
+            type="button"
+            onClick={toggleFocusBarMinimized}
+            className="px-2 py-0.5 rounded-md text-[11px] font-bold text-red-800 hover:text-red-950 hover:bg-red-100/70 flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+            title={L("最小化してタイムラインを広く表示", "Minimize bar", "Réduire")}
+          >
+            <ChevronUp size={13} className="shrink-0" />
+            <span>{L("最小化", "Minimize", "Réduire")}</span>
+          </button>
+        </div>
+
+        {/* Tasks List: 1 line per task */}
+        <div className="p-1.5 sm:p-2 space-y-1.5 max-h-[160px] overflow-y-auto custom-scrollbar">
+          {priorityBannerTasks.map(task => {
+            const isSelected = activeTaskId === task.id;
+            const isFocus = task.category === 'Urgent' || task.category?.trim().toLowerCase() === 'urgent' || Boolean((task as any).isUrgent);
+            const isPinned = Boolean(task.isPinned);
+            const alert = task.deadline ? getTaskDeadlineAlert(task.deadline, task.isDone, language, task.isAllDay) : undefined;
+            const colName = timelineMode === 'custom' && getTaskCurrentColumnId(task, customColumns, activePattern.id)
+              ? customColumns.find(c => c.id === getTaskCurrentColumnId(task, customColumns, activePattern.id))?.name
+              : undefined;
+
+            return (
+              <div
+                key={task.id}
+                onClick={() => handleJumpToTask(task.id)}
+                className={cn(
+                  "group flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer shadow-2xs",
+                  isSelected
+                    ? isFocus
+                      ? "bg-red-100/95 border-red-400 ring-1 ring-red-400 font-semibold"
+                      : "bg-indigo-100/95 border-indigo-400 ring-1 ring-indigo-400 font-semibold"
+                    : isFocus
+                      ? "bg-white/95 hover:bg-white border-rose-200 hover:border-rose-300"
+                      : "bg-white/95 hover:bg-white border-indigo-200 hover:border-indigo-300"
+                )}
+                title={L(`${task.title} (クリックしてタイムラインへ移動)`, `${task.title} (Click to jump to timeline)`, task.title)}
+              >
+                {/* Left: Checkbox + Clean Filled Icon(s) + Title */}
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleDone(task.id);
+                    }}
+                    className="shrink-0 w-5 h-5 flex items-center justify-center text-slate-300 hover:text-emerald-600 rounded-full transition-transform active:scale-90 cursor-pointer"
+                    title={L("完了にする", "Mark done", "Marquer terminé")}
+                  >
+                    <Circle size={15} strokeWidth={1.8} />
+                  </button>
+
+                  {/* Clean filled icons like in Explore, no background container */}
+                  {isFocus && (
+                    <Zap size={13} className="text-red-500 fill-red-500 shrink-0" title="Focus" />
+                  )}
+                  {isPinned && (
+                    <Pin size={12} className="text-indigo-600 fill-indigo-600 shrink-0" title={L("ピン留め", "Pinned", "Épinglé")} />
+                  )}
+
+                  <span className="text-xs font-bold text-slate-900 truncate">
+                    {task.title}
+                  </span>
+
+                  {task.isStarred && (
+                    <Star size={11} fill="currentColor" className="text-amber-400 shrink-0" />
+                  )}
+                </div>
+
+                {/* Right: Folder + Column/Deadline + Actions */}
+                <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                  {/* Project folder tag */}
+                  <span className="hidden xs:inline-flex items-center gap-1 text-[10px] text-slate-600 bg-slate-100/80 px-1.5 py-0.5 rounded border border-slate-200/70 max-w-[120px] truncate">
+                    <Folder size={10} className="shrink-0 text-slate-400" />
+                    <span className="truncate">{task.project || 'General'}</span>
+                  </span>
+
+                  {/* Deadline / Column info */}
+                  {task.deadline ? (
+                    <span className={cn(
+                      "px-1.5 py-0.5 rounded text-[10px] font-mono font-bold leading-tight flex items-center gap-1 shrink-0 shadow-2xs border",
+                      alert?.isOverdue
+                        ? "bg-red-100 text-red-700 border-red-200"
+                        : alert
+                          ? "bg-amber-100 text-amber-800 border-amber-200"
+                          : "bg-slate-100 text-slate-700 border-slate-200"
+                    )}>
+                      <Clock size={10} className="shrink-0" />
+                      <span>{format(new Date(task.deadline), isTaskAllDayDeadline(task) ? 'yyyy/MM/dd' : 'MM/dd HH:mm')}</span>
+                    </span>
+                  ) : colName ? (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 shrink-0">
+                      {colName}
+                    </span>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200 shrink-0">
+                      {L('ToDo', 'ToDo', 'À faire')}
+                    </span>
+                  )}
+
+                  {/* Remove Focus button if Focus */}
+                  {isFocus && (
+                    <button
+                      type="button"
+                      onClick={() => onMoveTask?.(task.id, 'Focus')}
+                      className="px-1.5 py-0.5 rounded text-[10px] font-bold text-red-600 hover:text-white hover:bg-red-500 border border-red-200 hover:border-red-500 transition-colors cursor-pointer shrink-0"
+                      title={L("Focusを解除 (ToDoへ戻す)", "Remove Focus", "Retirer du Focus")}
+                    >
+                      {L("解除", "Remove", "Retirer")}
+                    </button>
+                  )}
+
+                  {/* Unpin button if Pinned */}
+                  {isPinned && onTogglePin && (
+                    <button
+                      type="button"
+                      onClick={() => onTogglePin(task.id)}
+                      className="px-1.5 py-0.5 rounded text-[10px] font-bold text-indigo-600 hover:text-white hover:bg-indigo-600 border border-indigo-200 hover:border-indigo-600 transition-colors cursor-pointer shrink-0"
+                      title={L("ピン留めを解除", "Unpin task", "Désépingler")}
+                    >
+                      {L("ピン解除", "Unpin", "Désépingler")}
+                    </button>
+                  )}
+
+                  {/* Star toggle */}
+                  <button
+                    type="button"
+                    onClick={() => onToggleStar(task.id)}
+                    className={cn(
+                      "p-1 rounded transition-colors cursor-pointer shrink-0",
+                      task.isStarred ? "text-amber-500 hover:text-amber-600" : "text-slate-300 hover:text-amber-500 hover:bg-slate-100"
+                    )}
+                    title={L("スター切り替え", "Toggle Star", "Basculer favori")}
+                  >
+                    <Star size={12} fill={task.isStarred ? "currentColor" : "none"} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     );
   };
 
@@ -4534,43 +4853,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
               </button>
             </div>
 
-            {/* 3b. Focus Indicator (Right of Time filter button, left of Deadline alerts) */}
-            {focusTasks.length > 0 && (
-              <button
-                type="button"
-                data-dropdown-trigger="deadline-alert"
-                onClick={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  setDeadlineAlertTriggerRect(rect);
-                  setDeadlineAlertModalType(prev => prev === 'focus' ? null : 'focus');
-                }}
-                className={cn(
-                  "py-1 sm:py-1 px-2 sm:px-2.5 text-xs sm:text-[11px] font-bold rounded-xl border transition-all flex items-center gap-1 shadow-2xs cursor-pointer select-none shrink-0 min-h-[30px] sm:min-h-[30px]",
-                  deadlineAlertModalType === 'focus'
-                    ? "bg-red-600 text-white border-red-700 shadow-xs"
-                    : "bg-red-50 text-red-900 border-red-200 hover:bg-red-100 hover:border-red-300"
-                )}
-                title={L(
-                  `Focusタスク: ${focusTasks.length}件 (クリックで一覧表示・移動)`,
-                  `Focus tasks: ${focusTasks.length} (click to view / jump)`,
-                  `Tâches Focus : ${focusTasks.length}`
-                )}
-              >
-                <Zap 
-                  size={13} 
-                  fill="currentColor"
-                  className={cn(
-                    "shrink-0",
-                    deadlineAlertModalType === 'focus' ? "text-white fill-white" : "text-red-500 fill-red-500"
-                  )} 
-                />
-                <span className="font-mono font-bold text-xs leading-none flex items-center">
-                  <span className="text-[10px] opacity-75 mr-0.5">×</span>{focusTasks.length}
-                </span>
-              </button>
-            )}
-
-            {/* 3c. Approaching & Overdue Deadline Alert Indicators */}
+            {/* Approaching & Overdue Deadline Alert Indicators */}
             {approachingTasks.length > 0 && (
               <button
                 type="button"
@@ -4678,6 +4961,9 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Prominently displayed Focus tasks banner (between toolbar and timeline grid) */}
+      {!isFullscreen && renderFocusTasksBanner()}
 
       {/* Timeline Grid Container */}
       <div 
