@@ -50,6 +50,61 @@ export const clearFirestoreCache = async () => {
   }
 };
 
+const deleteIdbWithTimeout = (dbName: string, timeoutMs = 1000): Promise<void> => {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    try {
+      const req = indexedDB.deleteDatabase(dbName);
+      req.onsuccess = () => {
+        clearTimeout(timer);
+        finish();
+      };
+      req.onerror = () => {
+        clearTimeout(timer);
+        finish();
+      };
+      req.onblocked = () => {
+        clearTimeout(timer);
+        finish();
+      };
+    } catch {
+      clearTimeout(timer);
+      finish();
+    }
+  });
+};
+
+export const resetLocalBrowserCaches = async (): Promise<boolean> => {
+  try {
+    await Promise.race([
+      (async () => {
+        try {
+          await terminate(db);
+        } catch {}
+        try {
+          await clearIndexedDbPersistence(db);
+        } catch {}
+      })(),
+      new Promise<void>((resolve) => setTimeout(resolve, 1500))
+    ]);
+    await Promise.all([
+      deleteIdbWithTimeout('navfor_local_sync_db', 1000),
+      deleteIdbWithTimeout('firebaseLocalStorageDb', 1000),
+    ]);
+    return true;
+  } catch (err) {
+    console.error("Failed to reset local browser caches:", err);
+    return false;
+  }
+};
+
 export const signIn = async (forceConsent = false) => {
   if (forceConsent) {
     googleProvider.setCustomParameters({ prompt: 'consent select_account' });

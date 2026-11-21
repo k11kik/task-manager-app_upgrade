@@ -90,7 +90,7 @@ import { Category, Task, FolderMeta, TaskRecurrence, PhasePattern } from './type
 import { cn, formatDate, tr } from './lib/utils';
 import { getParentFolderDeadline } from './lib/folderDeadlineUtils';
 import { isTaskOccurringOnDate } from './lib/taskDateUtils';
-import { auth, db, signIn, logOut } from './lib/firebase';
+import { auth, db, signIn, logOut, resetLocalBrowserCaches } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { AuthModal } from './components/AuthModal';
 import { SignInView } from './components/SignInView';
@@ -249,8 +249,31 @@ async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle, uid?: strin
   });
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string): Promise<FileSystemDirectoryHandle | null> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (val: FileSystemDirectoryHandle | null) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve(val);
+      }
+    };
+    const timer = setTimeout(() => finish(null), 1500);
     try {
       const req = indexedDB.open(IDB_NAME, 1);
       req.onupgradeneeded = () => {
@@ -259,6 +282,7 @@ async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string):
           db.createObjectStore(IDB_STORE);
         }
       };
+      req.onblocked = () => finish(null);
       req.onsuccess = () => {
         try {
           const db = req.result;
@@ -269,49 +293,49 @@ async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string):
             userReq.onsuccess = () => {
               const userHandle = (userReq.result as FileSystemDirectoryHandle) || null;
               if (userHandle) {
-                db.close();
-                resolve(userHandle);
+                try { db.close(); } catch {}
+                finish(userHandle);
                 return;
               }
               const fallbackReq = store.get(IDB_KEY);
               fallbackReq.onsuccess = () => {
-                db.close();
+                try { db.close(); } catch {}
                 const fbHandle = (fallbackReq.result as FileSystemDirectoryHandle) || null;
                 if (fbHandle && (!expectedPath || fbHandle.name === expectedPath)) {
-                  resolve(fbHandle);
+                  finish(fbHandle);
                 } else if (fbHandle && !expectedPath) {
-                  resolve(fbHandle);
+                  finish(fbHandle);
                 } else {
-                  resolve(null);
+                  finish(null);
                 }
               };
               fallbackReq.onerror = () => {
-                db.close();
-                resolve(null);
+                try { db.close(); } catch {}
+                finish(null);
               };
             };
             userReq.onerror = () => {
-              db.close();
-              resolve(null);
+              try { db.close(); } catch {}
+              finish(null);
             };
           } else {
             const getReq = store.get(IDB_KEY);
             getReq.onsuccess = () => {
-              db.close();
-              resolve((getReq.result as FileSystemDirectoryHandle) || null);
+              try { db.close(); } catch {}
+              finish((getReq.result as FileSystemDirectoryHandle) || null);
             };
             getReq.onerror = () => {
-              db.close();
-              resolve(null);
+              try { db.close(); } catch {}
+              finish(null);
             };
           }
         } catch {
-          resolve(null);
+          finish(null);
         }
       };
-      req.onerror = () => resolve(null);
+      req.onerror = () => finish(null);
     } catch {
-      resolve(null);
+      finish(null);
     }
   });
 }
@@ -361,9 +385,11 @@ async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
 }
 
 export default function App() {
-  const APP_VERSION = "3.1.26";
+  const APP_VERSION = "3.1.27";
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [loadingTooLong, setLoadingTooLong] = useState(false);
+  const [isResettingCache, setIsResettingCache] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalError, setAuthModalError] = useState<any>(null);
   const [isUserGuideOpen, setIsUserGuideOpen] = useState(false);
@@ -1185,63 +1211,79 @@ export default function App() {
   const [showTrashMenu, setShowTrashMenu] = useState(false);
   const [showProjectFilter, setShowProjectFilter] = useState(false);
 
+  const idbRefreshPromiseRef = useRef<Promise<FileSystemDirectoryHandle | null> | null>(null);
+
   // Restore saved FileSystemDirectoryHandle from IndexedDB on startup, focus, and cross-tab events
   const refreshDirHandleFromIDB = async (uidOverride?: string | null, expectedPathOverride?: string) => {
-    try {
-      const targetUid = uidOverride !== undefined ? uidOverride : userRef.current?.uid;
-      const expectedPath = expectedPathOverride !== undefined ? expectedPathOverride : settingsRef.current?.localBackupPath;
-      const handle = await loadDirHandleFromIDB(targetUid, expectedPath);
-      if (!handle) {
-        if (dirHandleRef.current !== null) {
-          dirHandleRef.current = null;
-          setDirHandle(null);
-        }
-        setIsIdbLoaded(true);
-        return null;
-      }
-      let activeHandle = dirHandleRef.current;
-      let isSame = false;
-      if (activeHandle && typeof (activeHandle as any).isSameEntry === 'function') {
-        try {
-          isSame = await (activeHandle as any).isSameEntry(handle);
-        } catch {}
-      }
-      if (!isSame) {
-        activeHandle = handle;
-      }
-      let resolvedPerm: 'granted' | 'prompt' | 'denied' = 'prompt';
-      try {
-        if (typeof (activeHandle as any).queryPermission === 'function') {
-          resolvedPerm = await (activeHandle as any).queryPermission({ mode: 'readwrite' });
-        } else {
-          resolvedPerm = 'granted';
-        }
-      } catch {
-        resolvedPerm = 'prompt';
-      }
-      if (!isSame) {
-        dirHandleRef.current = activeHandle;
-        setDirHandle(activeHandle);
-      }
-      if (dirPermissionRef.current !== resolvedPerm) {
-        dirPermissionRef.current = resolvedPerm;
-        setDirPermission(resolvedPerm);
-      }
-      if (targetUid && activeHandle) {
-        try {
-          localStorage.setItem(`navfor_pc_local_path_${targetUid}`, activeHandle.name);
-        } catch {}
-      }
-      setIsIdbLoaded(true);
-      return activeHandle;
-    } catch {
-      setIsIdbLoaded(true);
-      return null;
+    if (idbRefreshPromiseRef.current) {
+      return idbRefreshPromiseRef.current;
     }
+    const run = async (): Promise<FileSystemDirectoryHandle | null> => {
+      try {
+        const targetUid = uidOverride !== undefined ? uidOverride : userRef.current?.uid;
+        const expectedPath = expectedPathOverride !== undefined ? expectedPathOverride : settingsRef.current?.localBackupPath;
+        const handle = await withTimeout(loadDirHandleFromIDB(targetUid, expectedPath), 1500, null);
+        if (!handle) {
+          if (dirHandleRef.current !== null) {
+            dirHandleRef.current = null;
+            setDirHandle(null);
+          }
+          return null;
+        }
+        let activeHandle = dirHandleRef.current;
+        let isSame = false;
+        if (activeHandle && typeof (activeHandle as any).isSameEntry === 'function') {
+          try {
+            isSame = await withTimeout<boolean>((activeHandle as any).isSameEntry(handle), 1200, false);
+          } catch {}
+        }
+        if (!isSame) {
+          activeHandle = handle;
+        }
+        let resolvedPerm: 'granted' | 'prompt' | 'denied' = 'prompt';
+        try {
+          if (typeof (activeHandle as any).queryPermission === 'function') {
+            resolvedPerm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+              (activeHandle as any).queryPermission({ mode: 'readwrite' }),
+              1200,
+              'prompt'
+            );
+          } else {
+            resolvedPerm = 'granted';
+          }
+        } catch {
+          resolvedPerm = 'prompt';
+        }
+        if (!isSame) {
+          dirHandleRef.current = activeHandle;
+          setDirHandle(activeHandle);
+        }
+        if (dirPermissionRef.current !== resolvedPerm) {
+          dirPermissionRef.current = resolvedPerm;
+          setDirPermission(resolvedPerm);
+        }
+        if (targetUid && activeHandle) {
+          try {
+            localStorage.setItem(`navfor_pc_local_path_${targetUid}`, activeHandle.name);
+          } catch {}
+        }
+        return activeHandle;
+      } catch {
+        return null;
+      } finally {
+        setIsIdbLoaded(true);
+        idbRefreshPromiseRef.current = null;
+      }
+    };
+    idbRefreshPromiseRef.current = run();
+    return idbRefreshPromiseRef.current;
   };
 
   useEffect(() => {
     refreshDirHandleFromIDB();
+    const idbSafetyTimer = setTimeout(() => {
+      setIsIdbLoaded(true);
+    }, 2000);
 
     const handleFocusOrVisibility = () => {
       if (document.visibilityState === 'visible') {
@@ -1324,6 +1366,7 @@ export default function App() {
     }
 
     return () => {
+      clearTimeout(idbSafetyTimer);
       window.removeEventListener('focus', handleFocusOrVisibility);
       document.removeEventListener('visibilitychange', handleFocusOrVisibility);
       window.removeEventListener('storage', handleStorage);
@@ -2035,9 +2078,27 @@ export default function App() {
     }, 3200);
   };
 
-  // Auth State: resolve IDB handle and cached settings before completing authLoading
+  // Auth State: resolve cached settings and unblock authLoading immediately with safety fallback
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+    let authResolved = false;
+    const authSafetyTimer = setTimeout(() => {
+      if (!authResolved) {
+        console.warn("Firebase onAuthStateChanged timed out; falling back to current auth state.");
+        const fallbackUser = auth.currentUser || null;
+        userRef.current = fallbackUser;
+        setUser(fallbackUser);
+        if (!fallbackUser) {
+          settingsLoadedRef.current = true;
+          setIsSettingsLoaded(true);
+        }
+        setIsIdbLoaded(true);
+        setAuthLoading(false);
+      }
+    }, 4000);
+
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      authResolved = true;
+      clearTimeout(authSafetyTimer);
       userRef.current = u;
       if (u) {
         try {
@@ -2049,18 +2110,30 @@ export default function App() {
             setSettings(prev => ({ ...prev, ...parsed }));
           }
         } catch {}
-        await refreshDirHandleFromIDB(u.uid, settingsRef.current.localBackupPath);
+        void refreshDirHandleFromIDB(u.uid, settingsRef.current.localBackupPath);
         setUser(u);
         setAuthLoading(false);
       } else {
-        await refreshDirHandleFromIDB(null, '');
+        void refreshDirHandleFromIDB(null, '');
         settingsLoadedRef.current = true;
         setIsSettingsLoaded(true);
         setUser(null);
         setAuthLoading(false);
       }
+    }, (err) => {
+      authResolved = true;
+      clearTimeout(authSafetyTimer);
+      console.error("onAuthStateChanged error:", err);
+      settingsLoadedRef.current = true;
+      setIsSettingsLoaded(true);
+      setIsIdbLoaded(true);
+      setUser(null);
+      setAuthLoading(false);
     });
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(authSafetyTimer);
+      unsubscribe();
+    };
   }, []);
 
   // Settings Sync
@@ -2075,7 +2148,6 @@ export default function App() {
 
     const settingsRefDoc = doc(db, 'settings', user.uid);
     const unsubscribe = onSnapshot(settingsRefDoc, async (docSnap) => {
-      clearTimeout(safetyTimer);
       if (docSnap.exists()) {
         const data = docSnap.data();
         const loadedSections = (data.sections && data.sections.length > 0) ? data.sections : ['General'];
@@ -2090,10 +2162,10 @@ export default function App() {
           }
         } catch {}
 
-        // Ensure we have checked IDB for this user/path before finalizing Sync button state
+        // Ensure we have checked IDB for this user/path before finalizing Sync button state (bounded by timeout)
         let currentHandle = dirHandleRef.current;
         if (!currentHandle) {
-          currentHandle = await refreshDirHandleFromIDB(user.uid, data.localBackupPath || '');
+          currentHandle = await withTimeout(refreshDirHandleFromIDB(user.uid, data.localBackupPath || ''), 1200, null);
         }
 
         let resolvedIsLocalBackupEnabled = Boolean(data.isLocalBackupEnabled);
@@ -2239,6 +2311,7 @@ export default function App() {
           return prev;
         });
 
+        clearTimeout(safetyTimer);
         settingsLoadedRef.current = true;
         setIsSettingsLoaded(true);
       } else {
@@ -2261,6 +2334,7 @@ export default function App() {
           language: 'en',
           sections: ['General']
         };
+        clearTimeout(safetyTimer);
         settingsLoadedRef.current = true;
         setIsSettingsLoaded(true);
         setDoc(settingsRefDoc, defaultUserSettings).catch(err => handleFirestoreError(err, OperationType.WRITE, `settings/${user.uid}`));
@@ -5924,13 +5998,92 @@ export default function App() {
     });
   };
 
-  if (authLoading || !isIdbLoaded || (user && !isSettingsLoaded)) {
+  const isStartupBlocking = authLoading || !isIdbLoaded || Boolean(user && !isSettingsLoaded);
+
+  useEffect(() => {
+    if (!isStartupBlocking) {
+      setLoadingTooLong(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setLoadingTooLong(true);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [isStartupBlocking]);
+
+  if (isStartupBlocking) {
+    const waitingLabel = authLoading
+      ? L('Firebase認証を確認中', 'Checking Firebase Auth', 'Vérification Firebase Auth')
+      : !isIdbLoaded
+        ? L('ローカルフォルダ設定を確認中', 'Checking local storage', 'Vérification du stockage local')
+        : L('ユーザー設定を読み込み中', 'Loading user settings', 'Chargement des paramètres');
+
     return (
-      <div className="h-dvh w-full bg-[#f8fafc] text-slate-800 flex flex-col items-center justify-center font-sans">
+      <div className="h-dvh w-full bg-[#f8fafc] text-slate-800 flex flex-col items-center justify-center font-sans px-6 text-center">
         <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4" />
         <p className="text-xs font-bold uppercase tracking-widest text-slate-500">
           {L('NavFOR 認証状態を確認中...', 'Checking NavFOR authentication...', "Vérification de l'authentification NavFOR...")}
         </p>
+
+        {loadingTooLong && (
+          <div className="mt-6 max-w-md w-full bg-white border border-slate-200 rounded-2xl p-5 shadow-sm text-left space-y-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle size={18} className="text-amber-500 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-bold text-slate-800">
+                  {L(
+                    '読み込みに時間がかかっています',
+                    'Loading is taking longer than expected',
+                    'Le chargement prend plus de temps que prévu'
+                  )}
+                </p>
+                <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                  {L(
+                    `現在の待機状態: ${waitingLabel}。Chromeのブラウザキャッシュ（IndexedDB）のロックやネットワーク遅延が原因の場合があります。クラウド上のタスクデータは失われません。`,
+                    `Waiting on: ${waitingLabel}. This may be caused by a locked Chrome browser cache (IndexedDB) or network delay. Your cloud task data is safe.`,
+                    `En attente de : ${waitingLabel}. Cela peut être dû à un cache navigateur (IndexedDB) bloqué ou à un délai réseau. Vos tâches dans le cloud sont en sécurité.`
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthLoading(false);
+                  setIsIdbLoaded(true);
+                  settingsLoadedRef.current = true;
+                  setIsSettingsLoaded(true);
+                }}
+                className="flex-1 min-w-[120px] px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-colors cursor-pointer"
+              >
+                {L('続行する', 'Continue', 'Continuer')}
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+              >
+                {L('再読み込み', 'Reload', 'Recharger')}
+              </button>
+              <button
+                type="button"
+                disabled={isResettingCache}
+                onClick={async () => {
+                  setIsResettingCache(true);
+                  await resetLocalBrowserCaches();
+                  window.location.reload();
+                }}
+                className="w-full px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {isResettingCache
+                  ? L('キャッシュをリセット中...', 'Resetting browser cache...', 'Réinitialisation du cache...')
+                  : L('ブラウザキャッシュを修復して再ログイン', 'Repair Browser Cache & Reload', 'Réparer le cache et recharger')}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
