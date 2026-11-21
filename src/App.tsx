@@ -263,17 +263,44 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Pro
   }
 }
 
-async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string): Promise<FileSystemDirectoryHandle | null> {
+function withRejectTimeout<T>(promise: Promise<T>, ms: number, errorMessage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+type IdbLoadStatus = 'ok' | 'timeout' | 'blocked' | 'error';
+
+async function loadDirHandleFromIDBWithStatus(
+  uid?: string | null,
+  expectedPath?: string
+): Promise<{ status: IdbLoadStatus; handle: FileSystemDirectoryHandle | null }> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (val: FileSystemDirectoryHandle | null) => {
+    const finish = (status: IdbLoadStatus, handle: FileSystemDirectoryHandle | null) => {
       if (!settled) {
         settled = true;
         clearTimeout(timer);
-        resolve(val);
+        resolve({ status, handle });
       }
     };
-    const timer = setTimeout(() => finish(null), 1500);
+    const timer = setTimeout(() => finish('timeout', null), 2000);
+    const isGenericExpectedPath =
+      !expectedPath ||
+      expectedPath === 'NavFOR_Local_Backup' ||
+      expectedPath === 'Local_Backup_Folder';
     try {
       const req = indexedDB.open(IDB_NAME, 1);
       req.onupgradeneeded = () => {
@@ -282,7 +309,7 @@ async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string):
           db.createObjectStore(IDB_STORE);
         }
       };
-      req.onblocked = () => finish(null);
+      req.onblocked = () => finish('blocked', null);
       req.onsuccess = () => {
         try {
           const db = req.result;
@@ -294,50 +321,53 @@ async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string):
               const userHandle = (userReq.result as FileSystemDirectoryHandle) || null;
               if (userHandle) {
                 try { db.close(); } catch {}
-                finish(userHandle);
+                finish('ok', userHandle);
                 return;
               }
               const fallbackReq = store.get(IDB_KEY);
               fallbackReq.onsuccess = () => {
                 try { db.close(); } catch {}
                 const fbHandle = (fallbackReq.result as FileSystemDirectoryHandle) || null;
-                if (fbHandle && (!expectedPath || fbHandle.name === expectedPath)) {
-                  finish(fbHandle);
-                } else if (fbHandle && !expectedPath) {
-                  finish(fbHandle);
+                if (fbHandle && (isGenericExpectedPath || fbHandle.name === expectedPath)) {
+                  finish('ok', fbHandle);
                 } else {
-                  finish(null);
+                  finish('ok', null);
                 }
               };
               fallbackReq.onerror = () => {
                 try { db.close(); } catch {}
-                finish(null);
+                finish('error', null);
               };
             };
             userReq.onerror = () => {
               try { db.close(); } catch {}
-              finish(null);
+              finish('error', null);
             };
           } else {
             const getReq = store.get(IDB_KEY);
             getReq.onsuccess = () => {
               try { db.close(); } catch {}
-              finish((getReq.result as FileSystemDirectoryHandle) || null);
+              finish('ok', (getReq.result as FileSystemDirectoryHandle) || null);
             };
             getReq.onerror = () => {
               try { db.close(); } catch {}
-              finish(null);
+              finish('error', null);
             };
           }
         } catch {
-          finish(null);
+          finish('error', null);
         }
       };
-      req.onerror = () => finish(null);
+      req.onerror = () => finish('error', null);
     } catch {
-      finish(null);
+      finish('error', null);
     }
   });
+}
+
+async function loadDirHandleFromIDB(uid?: string | null, expectedPath?: string): Promise<FileSystemDirectoryHandle | null> {
+  const res = await loadDirHandleFromIDBWithStatus(uid, expectedPath);
+  return res.handle;
 }
 
 async function clearDirHandleFromIDB(uid?: string | null): Promise<void> {
@@ -1138,6 +1168,7 @@ export default function App() {
   const settingsLoadedRef = useRef<boolean>(false);
   const lastCloudSyncedSlotsRef = useRef<string>('');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(() => {
     const saved = Number(localStorage.getItem('trifocus_last_backup'));
     return saved > 0 ? saved : null;
@@ -1183,6 +1214,8 @@ export default function App() {
     return latest ? format(new Date(latest.timestamp), 'yyyy-MM-dd') : '';
   })());
   const isWritingLocalRef = useRef<boolean>(false);
+  const writingStartedAtRef = useRef<number>(0);
+  const isVerifyingDiskRef = useRef<boolean>(false);
   const pendingSyncAfterWriteRef = useRef<boolean>(false);
   const tasksLoadedRef = useRef<boolean>(false);
   const backupChannelRef = useRef<BroadcastChannel | null>(null);
@@ -1212,47 +1245,59 @@ export default function App() {
   const [showProjectFilter, setShowProjectFilter] = useState(false);
 
   const idbRefreshPromiseRef = useRef<Promise<FileSystemDirectoryHandle | null> | null>(null);
+  const idbRefreshKeyRef = useRef<string>('');
 
   // Restore saved FileSystemDirectoryHandle from IndexedDB on startup, focus, and cross-tab events
   const refreshDirHandleFromIDB = async (uidOverride?: string | null, expectedPathOverride?: string) => {
-    if (idbRefreshPromiseRef.current) {
+    const targetUid = uidOverride !== undefined ? uidOverride : userRef.current?.uid;
+    const expectedPath = expectedPathOverride !== undefined ? expectedPathOverride : settingsRef.current?.localBackupPath;
+    const lookupKey = `${targetUid ?? '__anon__'}::${expectedPath || ''}`;
+
+    if (idbRefreshPromiseRef.current && idbRefreshKeyRef.current === lookupKey) {
       return idbRefreshPromiseRef.current;
     }
+
     const run = async (): Promise<FileSystemDirectoryHandle | null> => {
       try {
-        const targetUid = uidOverride !== undefined ? uidOverride : userRef.current?.uid;
-        const expectedPath = expectedPathOverride !== undefined ? expectedPathOverride : settingsRef.current?.localBackupPath;
-        const handle = await withTimeout(loadDirHandleFromIDB(targetUid, expectedPath), 1500, null);
+        const result = await withTimeout(
+          loadDirHandleFromIDBWithStatus(targetUid, expectedPath),
+          2200,
+          { status: 'timeout' as IdbLoadStatus, handle: null }
+        );
+        const handle = result.handle;
         if (!handle) {
-          if (dirHandleRef.current !== null) {
+          // Only clear an existing in-memory handle when IDB cleanly confirms no handle exists for this user
+          if (result.status === 'ok' && dirHandleRef.current !== null && (uidOverride === null || !targetUid)) {
             dirHandleRef.current = null;
             setDirHandle(null);
           }
-          return null;
+          return dirHandleRef.current;
         }
         let activeHandle = dirHandleRef.current;
         let isSame = false;
         if (activeHandle && typeof (activeHandle as any).isSameEntry === 'function') {
           try {
-            isSame = await withTimeout<boolean>((activeHandle as any).isSameEntry(handle), 1200, false);
+            isSame = await withTimeout<boolean>((activeHandle as any).isSameEntry(handle), 1500, false);
           } catch {}
         }
         if (!isSame) {
           activeHandle = handle;
         }
-        let resolvedPerm: 'granted' | 'prompt' | 'denied' = 'prompt';
+        const permFallback: 'granted' | 'prompt' | 'denied' =
+          isSame && dirPermissionRef.current === 'granted' ? 'granted' : 'prompt';
+        let resolvedPerm: 'granted' | 'prompt' | 'denied' = permFallback;
         try {
           if (typeof (activeHandle as any).queryPermission === 'function') {
             resolvedPerm = await withTimeout<'granted' | 'prompt' | 'denied'>(
               (activeHandle as any).queryPermission({ mode: 'readwrite' }),
-              1200,
-              'prompt'
+              2500,
+              permFallback
             );
           } else {
             resolvedPerm = 'granted';
           }
         } catch {
-          resolvedPerm = 'prompt';
+          resolvedPerm = permFallback;
         }
         if (!isSame) {
           dirHandleRef.current = activeHandle;
@@ -1269,14 +1314,19 @@ export default function App() {
         }
         return activeHandle;
       } catch {
-        return null;
+        return dirHandleRef.current;
       } finally {
         setIsIdbLoaded(true);
-        idbRefreshPromiseRef.current = null;
+        if (idbRefreshKeyRef.current === lookupKey) {
+          idbRefreshPromiseRef.current = null;
+          idbRefreshKeyRef.current = '';
+        }
       }
     };
-    idbRefreshPromiseRef.current = run();
-    return idbRefreshPromiseRef.current;
+    const p = run();
+    idbRefreshKeyRef.current = lookupKey;
+    idbRefreshPromiseRef.current = p;
+    return p;
   };
 
   useEffect(() => {
@@ -1400,6 +1450,7 @@ export default function App() {
       const currentHandle = dirHandleRef.current;
       if (!currentHandle) return;
       requesting = true;
+      const safetyReset = setTimeout(() => { requesting = false; }, 5000);
       try {
         if (typeof (currentHandle as any).requestPermission === 'function') {
           // Must be invoked synchronously inside the click/keydown handler to preserve transient user activation
@@ -1407,17 +1458,21 @@ export default function App() {
             .then((perm: 'granted' | 'prompt' | 'denied') => {
               dirPermissionRef.current = perm;
               setDirPermission(perm);
+              if (perm === 'granted') setLastSyncError(null);
             })
             .catch(() => {})
             .finally(() => {
+              clearTimeout(safetyReset);
               requesting = false;
             });
         } else {
           dirPermissionRef.current = 'granted';
           setDirPermission('granted');
+          clearTimeout(safetyReset);
           requesting = false;
         }
       } catch {
+        clearTimeout(safetyReset);
         requesting = false;
       }
     };
@@ -5064,14 +5119,23 @@ export default function App() {
     handle: FileSystemDirectoryHandle,
     fileName: string,
     csvContent: string,
-    userPart: string
+    userPart: string,
+    allowPrompt = false
   ): Promise<{ written: boolean; lastModified?: number }> => {
     let perm: 'granted' | 'prompt' | 'denied' = 'granted';
     if (typeof (handle as any).queryPermission === 'function') {
-      perm = await (handle as any).queryPermission({ mode: 'readwrite' });
-      if (perm !== 'granted' && typeof (handle as any).requestPermission === 'function') {
+      perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+        (handle as any).queryPermission({ mode: 'readwrite' }),
+        3000,
+        'prompt'
+      );
+      if (perm !== 'granted' && allowPrompt && typeof (handle as any).requestPermission === 'function') {
         try {
-          perm = await (handle as any).requestPermission({ mode: 'readwrite' });
+          perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+            (handle as any).requestPermission({ mode: 'readwrite' }),
+            10000,
+            perm
+          );
         } catch {
           // User activation might not be active right now
         }
@@ -5089,17 +5153,39 @@ export default function App() {
 
     // Retry up to 3 times in case another tab or OS indexer briefly locked the file
     for (let attempt = 0; attempt < 3; attempt++) {
+      let writable: any = null;
+      let writableClosed = false;
       try {
-        fileHandle = await handle.getFileHandle(fileName, { create: true });
-        const writable = await (fileHandle as any).createWritable({ keepExistingData: false });
-        await writable.write(bomCsv);
-        await writable.close();
+        fileHandle = await withRejectTimeout(
+          handle.getFileHandle(fileName, { create: true }),
+          5000,
+          `Timeout opening ${fileName}`
+        );
+        writable = await withRejectTimeout(
+          (fileHandle as any).createWritable({ keepExistingData: false }),
+          6000,
+          `Timeout acquiring write lock for ${fileName}`
+        );
+        await withRejectTimeout(
+          writable.write(bomCsv),
+          6000,
+          `Timeout writing data to ${fileName}`
+        );
+        await withRejectTimeout(
+          writable.close(),
+          8000,
+          `Timeout closing ${fileName}`
+        );
+        writableClosed = true;
         lastWriteErr = null;
         break;
       } catch (err) {
         lastWriteErr = err;
+        if (writable && !writableClosed && typeof writable.abort === 'function') {
+          await withTimeout(Promise.resolve(writable.abort()).catch(() => {}), 1000, undefined);
+        }
         if (attempt < 2) {
-          await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+          await new Promise(r => setTimeout(r, 250 * (attempt + 1)));
         }
       }
     }
@@ -5111,7 +5197,7 @@ export default function App() {
     let diskLastModified = Date.now();
     try {
       if (fileHandle) {
-        const diskFile = await fileHandle.getFile();
+        const diskFile = await withTimeout(fileHandle.getFile(), 3000, null as any);
         if (diskFile && diskFile.lastModified) {
           diskLastModified = diskFile.lastModified;
         }
@@ -5121,7 +5207,7 @@ export default function App() {
     // Remove legacy unnumbered file if present so only the max 3 numbered files remain
     try {
       if (typeof (handle as any).removeEntry === 'function') {
-        await (handle as any).removeEntry(`NavFOR_Log_${userPart}.csv`).catch(() => {});
+        await withTimeout((handle as any).removeEntry(`NavFOR_Log_${userPart}.csv`).catch(() => {}), 2000, undefined);
       }
     } catch {}
 
@@ -5130,10 +5216,15 @@ export default function App() {
 
   // Audit the actual files on disk inside dirHandle so UI timestamps always reflect real OS files
   const verifyDiskBackupSlots = async (handle: FileSystemDirectoryHandle) => {
-    if (isWritingLocalRef.current) return;
+    if (isWritingLocalRef.current || isVerifyingDiskRef.current) return;
+    isVerifyingDiskRef.current = true;
     try {
       if (typeof (handle as any).queryPermission === 'function') {
-        const perm = await (handle as any).queryPermission({ mode: 'readwrite' });
+        const perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+          (handle as any).queryPermission({ mode: 'readwrite' }),
+          2500,
+          'prompt'
+        );
         if (perm !== 'granted') return;
       }
       const hasAuthenticatedUser = Boolean(userRef.current?.email);
@@ -5163,8 +5254,16 @@ export default function App() {
         let allNotFound = true;
         for (const fName of candidateNames) {
           try {
-            const fh = await handle.getFileHandle(fName, { create: false });
-            const file = await fh.getFile();
+            const fh = await withRejectTimeout(
+              handle.getFileHandle(fName, { create: false }),
+              2500,
+              'Timeout checking file handle'
+            );
+            const file = await withRejectTimeout(
+              fh.getFile(),
+              2500,
+              'Timeout reading file metadata'
+            );
             diskTimestamps[slotNum] = { fileName: fName, lastModified: file.lastModified || Date.now() };
             found = true;
             allNotFound = false;
@@ -5180,29 +5279,35 @@ export default function App() {
         }
       }
 
-      // Fallback directory scan if any slot wasn't matched directly (e.g. before auth finishes or custom email prefix)
+      // Fallback directory scan if any slot wasn't matched directly (bounded by 2500ms timeout)
       if ((!diskTimestamps[1] || !diskTimestamps[2] || !diskTimestamps[3]) && typeof (handle as any).values === 'function') {
-        try {
-          for await (const entry of (handle as any).values()) {
-            if (entry && entry.kind === 'file' && typeof entry.name === 'string') {
-              const m = entry.name.match(/^NavFOR_Log_(.+)_([123])\.csv$/i);
-              if (m) {
-                const entryUser = m[1];
-                const slotNum = Number(m[2]) as 1 | 2 | 3;
-                if (!diskTimestamps[slotNum] && (!hasAuthenticatedUser || entryUser === userPart)) {
-                  try {
-                    const file = await entry.getFile();
-                    diskTimestamps[slotNum] = {
-                      fileName: entry.name,
-                      lastModified: file.lastModified || Date.now(),
-                    };
-                    notFoundSlots[slotNum] = false;
-                  } catch {}
+        await withTimeout((async () => {
+          try {
+            const deadline = Date.now() + 2200;
+            for await (const entry of (handle as any).values()) {
+              if (Date.now() > deadline || isWritingLocalRef.current) break;
+              if (entry && entry.kind === 'file' && typeof entry.name === 'string') {
+                const m = entry.name.match(/^NavFOR_Log_(.+)_([123])\.csv$/i);
+                if (m) {
+                  const entryUser = m[1];
+                  const slotNum = Number(m[2]) as 1 | 2 | 3;
+                  if (!diskTimestamps[slotNum] && (!hasAuthenticatedUser || entryUser === userPart)) {
+                    try {
+                      const file = await withTimeout(entry.getFile(), 1500, null as any);
+                      if (file) {
+                        diskTimestamps[slotNum] = {
+                          fileName: entry.name,
+                          lastModified: file.lastModified || Date.now(),
+                        };
+                        notFoundSlots[slotNum] = false;
+                      }
+                    } catch {}
+                  }
                 }
               }
             }
-          }
-        } catch {}
+          } catch {}
+        })(), 2500, undefined);
       }
 
       if (isWritingLocalRef.current) return;
@@ -5276,7 +5381,10 @@ export default function App() {
       nextBackupSlotRef.current = resolvedSlot;
       setBackupSlots(next);
       setNextBackupSlot(resolvedSlot);
-    } catch {}
+    } catch {
+    } finally {
+      isVerifyingDiskRef.current = false;
+    }
   };
 
   const downloadBackupSlot = (slot: 1 | 2 | 3) => {
@@ -5309,8 +5417,9 @@ export default function App() {
     try {
       const activeHandle = dirHandleRef.current;
       if (activeHandle) {
-        const res = await writeCsvToDirHandle(activeHandle, fileName, csv, userPart);
+        const res = await writeCsvToDirHandle(activeHandle, fileName, csv, userPart, true);
         if (res.written) {
+          setLastSyncError(null);
           recordBackupSlot(slot, fileName, csv, tasksRef.current.length, signature, res.lastModified || now, true);
           setMessage({
             text: L(
@@ -5396,6 +5505,7 @@ export default function App() {
       dirPermissionRef.current = 'granted';
       setDirHandle(handle);
       setDirPermission('granted');
+      setLastSyncError(null);
       await saveDirHandleToIDB(handle, userRef.current?.uid);
       if (backupChannelRef.current) {
         try {
@@ -5417,8 +5527,9 @@ export default function App() {
       const slot: 1 | 2 | 3 = getCurrentNextSlot();
       const fileName = `NavFOR_Log_${userPart}_${slot}.csv`;
       const now = Date.now();
-      const res = await writeCsvToDirHandle(handle, fileName, csvContent, userPart);
+      const res = await writeCsvToDirHandle(handle, fileName, csvContent, userPart, true);
       if (res.written) {
+        setLastSyncError(null);
         recordBackupSlot(slot, fileName, csvContent, tasksRef.current.length, getTasksSignature(), res.lastModified || now, true);
       }
       setMessage({
@@ -5446,33 +5557,92 @@ export default function App() {
   };
 
   const authorizeLocalFolderNow = async () => {
-    const currentHandle = dirHandleRef.current || (await refreshDirHandleFromIDB());
+    let currentHandle = dirHandleRef.current;
+    // Request permission immediately while user activation is fresh if handle is already in memory
+    if (currentHandle) {
+      try {
+        let perm: 'granted' | 'prompt' | 'denied' = dirPermissionRef.current;
+        if (perm !== 'granted' && typeof (currentHandle as any).requestPermission === 'function') {
+          perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+            (currentHandle as any).requestPermission({ mode: 'readwrite' }),
+            10000,
+            'prompt'
+          );
+        } else if (typeof (currentHandle as any).queryPermission === 'function') {
+          perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+            (currentHandle as any).queryPermission({ mode: 'readwrite' }),
+            2500,
+            perm
+          );
+          if (perm !== 'granted' && typeof (currentHandle as any).requestPermission === 'function') {
+            perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+              (currentHandle as any).requestPermission({ mode: 'readwrite' }),
+              10000,
+              perm
+            );
+          }
+        } else {
+          perm = 'granted';
+        }
+        dirPermissionRef.current = perm;
+        setDirPermission(perm);
+        if (perm === 'granted') {
+          setLastSyncError(null);
+          lastWrittenSignatureRef.current = '';
+          await syncToLocalSystem(true);
+        } else {
+          const permMsg = L(
+            'ローカルフォルダへの書き込み許可が拒否されました。もう一度クリックして許可してください。',
+            'Write permission was not granted. Please click again and allow access.',
+            'Autorisation d\'écriture refusée. Veuillez réessayer.'
+          );
+          setLastSyncError(permMsg);
+          setMessage({ text: permMsg, type: 'error' });
+        }
+        return;
+      } catch {
+        await selectBackupFolder();
+        return;
+      }
+    }
+
+    currentHandle = await refreshDirHandleFromIDB();
     if (!currentHandle) {
       await selectBackupFolder();
       return;
     }
     try {
       let perm: 'granted' | 'prompt' | 'denied' = 'granted';
-      if (typeof (currentHandle as any).requestPermission === 'function') {
-        perm = await (currentHandle as any).requestPermission({ mode: 'readwrite' });
+      if (typeof (currentHandle as any).queryPermission === 'function') {
+        perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+          (currentHandle as any).queryPermission({ mode: 'readwrite' }),
+          2500,
+          'prompt'
+        );
+      }
+      if (perm !== 'granted' && typeof (currentHandle as any).requestPermission === 'function') {
+        perm = await withTimeout<'granted' | 'prompt' | 'denied'>(
+          (currentHandle as any).requestPermission({ mode: 'readwrite' }),
+          10000,
+          'prompt'
+        );
       }
       dirPermissionRef.current = perm;
       setDirPermission(perm);
       if (perm === 'granted') {
-        await verifyDiskBackupSlots(currentHandle);
+        setLastSyncError(null);
         lastWrittenSignatureRef.current = '';
         await syncToLocalSystem(true);
       } else {
-        setMessage({
-          text: L(
-            'ローカルフォルダへの書き込み許可が拒否されました。もう一度クリックして許可してください。',
-            'Write permission was not granted. Please click again and allow access.',
-            'Autorisation d\'écriture refusée. Veuillez réessayer.'
-          ),
-          type: 'error'
-        });
+        const permMsg = L(
+          'ローカルフォルダへの書き込み許可が拒否されました。もう一度クリックして許可してください。',
+          'Write permission was not granted. Please click again and allow access.',
+          'Autorisation d\'écriture refusée. Veuillez réessayer.'
+        );
+        setLastSyncError(permMsg);
+        setMessage({ text: permMsg, type: 'error' });
       }
-    } catch (err: any) {
+    } catch {
       await selectBackupFolder();
     }
   };
@@ -5506,19 +5676,33 @@ export default function App() {
     }
 
     if (isWritingLocalRef.current) {
-      pendingSyncAfterWriteRef.current = true;
-      return;
+      // Safety recovery if an earlier write somehow exceeded 25s without clearing
+      const isStaleLock = writingStartedAtRef.current > 0 && Date.now() - writingStartedAtRef.current > 25000;
+      if (!isStaleLock) {
+        pendingSyncAfterWriteRef.current = true;
+        return;
+      }
     }
 
     const slot: 1 | 2 | 3 = getCurrentNextSlot();
     const signature = getTasksSignature();
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const slotInfoForToday = backupSlotsRef.current[slot];
+    const slotIsFromToday = Boolean(
+      slotInfoForToday && format(new Date(slotInfoForToday.timestamp), 'yyyy-MM-dd') === todayStr
+    );
     if (!manual && !customName) {
-      if (lastWrittenSignatureRef.current === signature && backupSlotsRef.current[slot] !== null) {
+      if (
+        lastWrittenSignatureRef.current === signature &&
+        lastWrittenDateRef.current === todayStr &&
+        slotIsFromToday
+      ) {
         return;
       }
     }
 
     isWritingLocalRef.current = true;
+    writingStartedAtRef.current = Date.now();
     setIsSyncing(true);
     try {
       const csvContent = getCSVData();
@@ -5527,24 +5711,29 @@ export default function App() {
       const now = Date.now();
 
       if (activeHandle) {
-        const res = await writeCsvToDirHandle(activeHandle, fileName, csvContent, userPart);
+        const res = await withRejectTimeout(
+          writeCsvToDirHandle(activeHandle, fileName, csvContent, userPart, manual),
+          22000,
+          `Local write timed out for ${fileName}`
+        );
         if (!res.written) {
           // Permission is still 'prompt' (waiting for user gesture); do not advance slot or fake timestamp!
+          const permMsg = L(
+            'ローカルフォルダへの書き込み許可が必要です。クリックして許可してください。',
+            'Write permission is needed for the local folder. Please click to allow.',
+            'Autorisation d\'écriture requise pour le dossier local.'
+          );
+          setLastSyncError(permMsg);
           if (manual) {
-            setMessage({
-              text: L(
-                'ローカルフォルダへの書き込み許可が必要です。もう一度クリックして許可してください。',
-                'Write permission is needed for the local folder. Please click again to allow.',
-                'Autorisation d\'écriture requise pour le dossier local.'
-              ),
-              type: 'error'
-            });
+            setMessage({ text: permMsg, type: 'error' });
           }
           return;
         }
+        setLastSyncError(null);
         recordBackupSlot(slot, fileName, csvContent, currentTasks.length, signature, Math.max(res.lastModified || 0, now), true);
       } else {
         // Fallback only for browsers without showDirectoryPicker support (e.g. mobile/Safari)
+        setLastSyncError(null);
         recordBackupSlot(slot, fileName, csvContent, currentTasks.length, signature, now, false);
       }
 
@@ -5562,7 +5751,32 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Local backup failed", err);
-      // If another tab was writing to the file at the same instant, audit the disk after a short delay to pick up the updated timestamp
+      const errName = err?.name || '';
+      const rawMsg = err?.message || String(err);
+      let friendlyMsg = rawMsg;
+      if (errName === 'NotAllowedError' || errName === 'SecurityError') {
+        dirPermissionRef.current = 'prompt';
+        setDirPermission('prompt');
+        friendlyMsg = L(
+          'ローカルフォルダへの書き込み許可が切れています。「許可して更新」をクリックしてください。',
+          'Local folder write permission expired. Click to re-authorize.',
+          'L\'autorisation d\'écriture locale a expiré. Cliquez pour réautoriser.'
+        );
+      } else if (errName === 'NotFoundError') {
+        friendlyMsg = L(
+          '指定されたローカルフォルダが見つかりません（移動または削除された可能性があります）。フォルダを再選択してください。',
+          'Selected local folder was not found. Please select the folder again.',
+          'Le dossier local sélectionné est introuvable. Veuillez le sélectionner à nouveau.'
+        );
+      } else if (errName === 'NoModificationAllowedError' || rawMsg.toLowerCase().includes('timeout')) {
+        friendlyMsg = L(
+          'ローカルCSVファイルが他アプリ（Excelやクラウド同期等）でロックされているか応答がありません。数秒後に再試行してください。',
+          'Local CSV file appears locked or unresponsive (e.g. Excel / cloud sync). Please retry shortly.',
+          'Le fichier CSV local semble verrouillé ou bloqué (ex. Excel / synchro cloud). Veuillez réessayer.'
+        );
+      }
+      setLastSyncError(friendlyMsg);
+
       if (activeHandle) {
         setTimeout(() => {
           verifyDiskBackupSlots(activeHandle!);
@@ -5570,18 +5784,19 @@ export default function App() {
       }
       if (manual) {
         setMessage({ 
-          text: `Local Backup Error: ${err.message}.`,
+          text: `Local Backup Error: ${friendlyMsg}`,
           type: 'error'
         });
       }
     } finally {
       isWritingLocalRef.current = false;
+      writingStartedAtRef.current = 0;
       setIsSyncing(false);
       if (pendingSyncAfterWriteRef.current) {
         pendingSyncAfterWriteRef.current = false;
         setTimeout(() => {
           syncToLocalSystem(false);
-        }, 50);
+        }, 150);
       } else if (activeHandle) {
         // Audit any other existing slot files on disk so all 3 slots stay in sync with OS disk
         verifyDiskBackupSlots(activeHandle);
@@ -6595,16 +6810,34 @@ export default function App() {
                   ) : (
                     <button 
                       onClick={() => setShowSyncDetails(!showSyncDetails)}
-                      className="w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70 transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
-                      title={L(
-                        'ローカルログ同期が有効です（1日ごとに3ファイルでローテーション・同日の変更は同じファイルに上書き保存）',
-                        'Local log sync is active (daily rotation across 3 files; same-day changes overwrite today\'s file)',
-                        'La synchro locale est active (rotation quotidienne sur 3 fichiers)'
+                      className={cn(
+                        "w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs",
+                        lastSyncError
+                          ? "bg-amber-50 border-amber-200 hover:bg-amber-100/80"
+                          : "bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70"
                       )}
+                      title={
+                        lastSyncError
+                          ? lastSyncError
+                          : L(
+                              'ローカルログ同期が有効です（1日ごとに3ファイルでローテーション・同日の変更は同じファイルに上書き保存）',
+                              'Local log sync is active (daily rotation across 3 files; same-day changes overwrite today\'s file)',
+                              'La synchro locale est active (rotation quotidienne sur 3 fichiers)'
+                            )
+                      }
                     >
-                      <Globe size={13} className="text-emerald-600 shrink-0" />
-                      <span className="hidden xl:inline text-[10px] font-bold uppercase tracking-tighter text-emerald-700 whitespace-nowrap">
-                        {t('SyncActive')}
+                      {isSyncing ? (
+                        <RefreshCcw size={13} className="text-indigo-600 shrink-0 animate-spin" />
+                      ) : lastSyncError ? (
+                        <AlertTriangle size={13} className="text-amber-600 shrink-0" />
+                      ) : (
+                        <Globe size={13} className="text-emerald-600 shrink-0" />
+                      )}
+                      <span className={cn(
+                        "hidden xl:inline text-[10px] font-bold uppercase tracking-tighter whitespace-nowrap",
+                        isSyncing ? "text-indigo-700" : lastSyncError ? "text-amber-700" : "text-emerald-700"
+                      )}>
+                        {isSyncing ? t('Syncing') : lastSyncError ? L('同期エラー', 'Sync Issue', 'Erreur Synchro') : t('SyncActive')}
                       </span>
                     </button>
                   )}
@@ -6615,7 +6848,7 @@ export default function App() {
                       <div className="absolute top-full right-0 mt-2 w-80 max-w-[calc(100vw-1.5rem)] bg-white border border-slate-200 rounded-2xl shadow-2xl z-[60] p-4">
                         <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
                           <div className="flex items-center gap-2 text-slate-800">
-                            <Activity size={13} className={isLocalDiskReady ? "text-emerald-500" : "text-amber-500"} />
+                            <Activity size={13} className={isLocalDiskReady && !lastSyncError ? "text-emerald-500" : "text-amber-500"} />
                             <p className="text-[10px] font-black uppercase tracking-widest">{t('AutomatedSyncStatus')}</p>
                           </div>
                           <div className="flex items-center gap-1">
@@ -6626,7 +6859,7 @@ export default function App() {
                               disabled={isSyncing}
                             >
                               <RefreshCcw size={12} className={cn(isSyncing && "animate-spin")} />
-                              <span>{L('今すぐ更新', 'Sync Now', 'Synchroniser')}</span>
+                              <span>{isSyncing ? t('Syncing') : L('今すぐ更新', 'Sync Now', 'Synchroniser')}</span>
                             </button>
                           </div>
                         </div>
@@ -6636,12 +6869,18 @@ export default function App() {
                               <label className="text-[8px] font-black text-slate-400 uppercase">{t('LocalDirectoryPath')}</label>
                               <span className={cn(
                                 "text-[8px] font-black uppercase px-1.5 py-0.5 rounded",
-                                isLocalDiskReady
+                                isSyncing
+                                  ? "bg-indigo-100 text-indigo-700"
+                                  : isLocalDiskReady && !lastSyncError
                                   ? "bg-emerald-100 text-emerald-700"
                                   : "bg-amber-100 text-amber-700"
                               )}>
-                                {isLocalDiskReady
+                                {isSyncing
+                                  ? t('Syncing')
+                                  : isLocalDiskReady && !lastSyncError
                                   ? t('SyncActive')
+                                  : lastSyncError
+                                  ? L('同期エラー', 'Sync Error', 'Erreur Synchro')
                                   : dirHandle
                                   ? L('要書き込み許可', 'Permission Needed', 'Autorisation requise')
                                   : L('フォルダ未接続', 'Folder Disconnected', 'Dossier non lié')}
@@ -6650,7 +6889,12 @@ export default function App() {
                             <p className="text-[10px] font-mono break-all text-slate-700 leading-tight">
                               {dirHandle?.name || settings.localBackupPath || t('AuthorizedLocalFolder')}
                             </p>
-                            {!isLocalDiskReady && (
+                            {lastSyncError && (
+                              <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-2 leading-snug">
+                                {lastSyncError}
+                              </p>
+                            )}
+                            {(!isLocalDiskReady || lastSyncError) && (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -6660,7 +6904,9 @@ export default function App() {
                               >
                                 {!dirHandle
                                   ? L('保存先フォルダを選択して自動上書きを有効化', 'Select Folder to Enable Direct Overwrite', 'Sélectionner le dossier')
-                                  : L('クリックしてローカルファイル上書き保存を許可', 'Click to Authorize Local File Overwrite', 'Autoriser l\'écriture locale')}
+                                  : dirPermission !== 'granted'
+                                  ? L('クリックしてローカルファイル上書き保存を許可', 'Click to Authorize Local File Overwrite', 'Autoriser l\'écriture locale')
+                                  : L('今すぐ再試行してローカル上書き', 'Retry Local File Sync Now', 'Réessayer la synchro locale')}
                               </button>
                             )}
                           </div>
@@ -7501,14 +7747,20 @@ export default function App() {
                               <p className="font-bold text-slate-900">{t('LocalFolderLog')}</p>
                               <span className={cn(
                                 "text-[9px] font-black uppercase px-2 py-0.5 rounded-full border",
-                                isLocalDiskReady
+                                isSyncing
+                                  ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                  : isLocalDiskReady && !lastSyncError
                                   ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                                   : "bg-amber-50 text-amber-700 border-amber-200"
                               )}>
-                                {isLocalDiskReady
+                                {isSyncing
+                                  ? t('Syncing')
+                                  : isLocalDiskReady && !lastSyncError
                                   ? t('SyncActive')
                                   : !isLocalLogConfigured
                                   ? L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')
+                                  : lastSyncError
+                                  ? L('同期エラー', 'Sync Issue', 'Erreur Synchro')
                                   : dirHandle
                                   ? L('要書き込み許可 (クリックで再開)', 'Write Permission Needed', 'Autorisation requise')
                                   : L('保存先フォルダ未接続', 'Folder Not Connected', 'Dossier non connecté')}
@@ -7553,16 +7805,20 @@ export default function App() {
                         </div>
                         
                         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-inner space-y-4">
-                          {isLocalLogConfigured && !isLocalDiskReady && (
+                          {isLocalLogConfigured && (!isLocalDiskReady || lastSyncError) && (
                             <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                               <div className="text-xs text-amber-800">
                                 <p className="font-bold">
-                                  {dirHandle
+                                  {lastSyncError
+                                    ? L('ローカルファイルへの書き込みが停止しています', 'Local file write encountered an issue', 'Échec d\'écriture du fichier local')
+                                    : dirHandle
                                     ? L('ブラウザ再読み込み後の書き込み許可が必要です', 'Write permission needed after browser reload', 'Autorisation d\'écriture requise après rechargement')
                                     : L('PCの保存先フォルダが接続されていません', 'Local PC folder is not connected yet', 'Le dossier PC local n\'est pas encore connecté')}
                                 </p>
                                 <p className="text-[11px] text-amber-700 mt-0.5">
-                                  {dirHandle
+                                  {lastSyncError
+                                    ? lastSyncError
+                                    : dirHandle
                                     ? L('右のボタンを押すと、ローカルフォルダ内のCSVファイルを即座に最新状態へ上書き更新します。', 'Click the button to grant write access and immediately overwrite the local CSV file with the latest data.', 'Cliquez pour autoriser l\'accès et mettre à jour le fichier CSV local.')
                                     : window.self !== window.top
                                     ? L('プレビュー枠内ではフォルダ選択ダイアログが開けないため、「新しいタブで開く (↗)」から一度フォルダを選択してください（選択後はこの画面からも自動更新されます）。', 'Open in a new tab (↗) once to pick your PC folder. Once selected, changes here will also sync automatically.', 'Ouvrez dans un nouvel onglet (↗) pour choisir le dossier PC.')
@@ -7574,7 +7830,9 @@ export default function App() {
                                   onClick={authorizeLocalFolderNow}
                                   className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
                                 >
-                                  {L('書き込みを許可して今すぐ更新', 'Allow Write & Sync Now', 'Autoriser et synchroniser')}
+                                  {dirPermission !== 'granted'
+                                    ? L('書き込みを許可して今すぐ更新', 'Allow Write & Sync Now', 'Autoriser et synchroniser')
+                                    : L('今すぐ再試行', 'Retry Sync Now', 'Réessayer')}
                                 </button>
                               ) : window.self !== window.top ? (
                                 <a
@@ -7602,10 +7860,10 @@ export default function App() {
                               <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">{t('LocalDirectoryPath')}</label>
                               <div className="text-xs font-mono break-all py-1.5 text-slate-600 bg-slate-50 px-2.5 rounded border border-slate-100 flex items-center justify-between gap-2">
                                 <div className="flex items-center gap-2 min-w-0">
-                                  <Activity size={12} className={cn("shrink-0", isLocalDiskReady ? "text-emerald-500" : "text-amber-500")} />
+                                  <Activity size={12} className={cn("shrink-0", isLocalDiskReady && !lastSyncError ? "text-emerald-500" : "text-amber-500")} />
                                   <span className="truncate">{dirHandle?.name || settings.localBackupPath || t('NoFolderSelected')}</span>
                                 </div>
-                                {isLocalDiskReady && (
+                                {isLocalDiskReady && !lastSyncError && (
                                   <span className="text-[9px] font-sans font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 shrink-0">
                                     {L('ローカル直結・自動上書き中', 'Direct Disk Write Active', 'Écriture disque active')}
                                   </span>
@@ -7631,7 +7889,9 @@ export default function App() {
                                 className="p-2 px-3 rounded-lg text-[10px] font-bold transition-all w-full h-10 flex items-center justify-center gap-1.5 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
                               >
                                 <RefreshCcw size={12} className={cn(isSyncing && "animate-spin")} />
-                                {dirHandle
+                                {isSyncing
+                                  ? t('Syncing')
+                                  : dirHandle
                                   ? L(`今すぐローカル上書き (#${nextBackupSlot})`, `Overwrite Local Now (#${nextBackupSlot})`, `Écraser maintenant (#${nextBackupSlot})`)
                                   : L(`手動バックアップ (#${nextBackupSlot})`, `Manual Backup (#${nextBackupSlot})`, `Sauvegarde (#${nextBackupSlot})`)}
                               </button>

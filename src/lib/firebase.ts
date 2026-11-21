@@ -95,7 +95,6 @@ export const resetLocalBrowserCaches = async (): Promise<boolean> => {
       new Promise<void>((resolve) => setTimeout(resolve, 1500))
     ]);
     await Promise.all([
-      deleteIdbWithTimeout('navfor_local_sync_db', 1000),
       deleteIdbWithTimeout('firebaseLocalStorageDb', 1000),
     ]);
     return true;
