@@ -4114,7 +4114,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   );
 };
 
-  // Smoothly scroll and center any task on the timeline
+  // Smoothly scroll and center any task on the timeline without hiding behind sticky Project/ToDo columns
   const handleJumpToTask = (taskId: string) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
@@ -4124,15 +4124,119 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     if (isUnscheduled && !showUnscheduledColumn) {
       setShowUnscheduledColumn(true);
     }
+
+    // Ensure the task's project lane and all ancestor folders are expanded so the element is mounted
+    if (task.project) {
+      const parts = task.project.split(/[\/\\]/).filter(Boolean);
+      const prefixes: string[] = [];
+      let cur = '';
+      for (const part of parts) {
+        cur = cur ? `${cur}/${part}` : part;
+        prefixes.push(cur);
+      }
+      if (prefixes.some(p => collapsedProjectPaths.has(p))) {
+        setCollapsedProjectPaths(prev => {
+          const next = new Set(prev);
+          prefixes.forEach(p => next.delete(p));
+          return next;
+        });
+      }
+    }
+
     onSelectTask(taskId, true);
     setSelectedKey(`task:${taskId}`);
     setSelectedFolderPath(null);
     setDeadlineAlertModalType(null);
     setTimeout(() => {
       const el = document.getElementById(`timeline-task-${taskId}`);
-      el?.focus({ preventScroll: true });
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-    }, 80);
+      if (!el) return;
+      el.focus({ preventScroll: true });
+
+      const container = timelineGridRef.current;
+      if (!container) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        return;
+      }
+
+      // Measure total width of sticky left columns (Project Lanes + ToDo List)
+      let stickyLeftWidth = 0;
+      container.querySelectorAll('[data-sticky-left-col="true"]').forEach(sEl => {
+        stickyLeftWidth += (sEl as HTMLElement).getBoundingClientRect().width;
+      });
+
+      // Measure sticky top header height
+      const headerEl = container.firstElementChild as HTMLElement | null;
+      const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 52;
+
+      const containerRect = container.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+
+      // Vertical scroll: center in unobscured area below sticky header
+      const elTopInContent = elRect.top - containerRect.top + container.scrollTop;
+      const unobscuredHeight = Math.max(0, container.clientHeight - headerHeight);
+      const centeredTop = elTopInContent - headerHeight - Math.max(0, (unobscuredHeight - elRect.height) / 2);
+      const maxTopForTopEdge = Math.max(0, elTopInContent - headerHeight - 8);
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      const targetScrollTop = Math.min(maxScrollTop, Math.max(0, Math.min(centeredTop, maxTopForTopEdge)));
+
+      // Horizontal scroll
+      const isInStickyToDo = isUnscheduled || Boolean(el.closest('[data-sticky-todo-cell="true"]'));
+      if (isInStickyToDo) {
+        container.scrollTo({
+          left: container.scrollLeft,
+          top: targetScrollTop,
+          behavior: 'smooth',
+        });
+        return;
+      }
+
+      const elLeftInContent = elRect.left - containerRect.left + container.scrollLeft;
+      const elRightInContent = elLeftInContent + elRect.width;
+      const unobscuredWidth = Math.max(0, container.clientWidth - stickyLeftWidth);
+
+      let targetLeftInContent = elLeftInContent;
+      let targetWidth = elRect.width;
+
+      if (timelineMode !== 'calendar') {
+        const colId = getTaskCurrentColumnId(task, customColumns, activePattern.id);
+        if (colId) {
+          const colHeaderEl = container.querySelector(`[data-custom-col-id="${colId}"]`) as HTMLElement | null;
+          if (colHeaderEl) {
+            const colRect = colHeaderEl.getBoundingClientRect();
+            const colLeftInContent = colRect.left - containerRect.left + container.scrollLeft;
+            const colRightInContent = colLeftInContent + colRect.width;
+            const combinedRight = Math.max(colRightInContent, elRightInContent);
+            if (combinedRight - colLeftInContent <= unobscuredWidth - 16) {
+              targetLeftInContent = colLeftInContent;
+              targetWidth = combinedRight - colLeftInContent;
+            } else if (elRightInContent - colLeftInContent <= unobscuredWidth - 16) {
+              targetLeftInContent = colLeftInContent;
+              targetWidth = elRightInContent - colLeftInContent;
+            }
+          }
+        }
+      }
+
+      // Position within the unobscured viewport [stickyLeftWidth, container.clientWidth],
+      // strictly preventing targetLeftInContent or elLeftInContent from going behind stickyLeftWidth
+      const centeredLeft =
+        targetLeftInContent -
+        stickyLeftWidth -
+        Math.max(0, (unobscuredWidth - targetWidth) / 2);
+      const maxLeftForColEdge = Math.max(0, targetLeftInContent - stickyLeftWidth - 8);
+      const maxLeftForTaskEdge = Math.max(0, elLeftInContent - stickyLeftWidth - 12);
+      const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+      const targetScrollLeft = Math.min(
+        maxScrollLeft,
+        Math.max(0, Math.min(centeredLeft, maxLeftForColEdge, maxLeftForTaskEdge))
+      );
+
+      container.scrollTo({
+        left: targetScrollLeft,
+        top: targetScrollTop,
+        behavior: 'smooth',
+      });
+    }, 90);
   };
 
   const renderDeadlineAlertModal = () => {
@@ -5003,6 +5107,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 (window as any).__navforDraggingFolder = null;
               }
             }}
+            data-sticky-left-col="true"
             style={{ width: `${effectiveProjectColWidth}px` }}
             className={cn(
               "shrink-0 px-2 sm:px-3 border-r border-slate-200 flex items-center justify-between text-xs sm:text-[11px] font-bold uppercase tracking-wider text-slate-700 bg-slate-100 sticky left-0 z-50 transition-colors group/projcol",
@@ -5054,6 +5159,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           {/* ToDo List Column Header */}
           {effectiveShowUnscheduled && (
             <div 
+              data-sticky-left-col="true"
               style={{ 
                 width: `${todoColWidth}px`, 
                 left: hideSideColumns ? 0 : `${effectiveProjectColWidth}px`
@@ -5183,6 +5289,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                 return (
                   <div
                     key={col.id}
+                    data-custom-col-id={col.id}
                     style={{ width: `${colWidth}px` }}
                     className="shrink-0 border-r border-slate-200 bg-slate-100 text-slate-700 flex flex-col justify-between group relative select-none"
                   >
@@ -5713,6 +5820,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
                     {/* Unscheduled / Backlog Cell */}
                     {effectiveShowUnscheduled && (
                       <div
+                        data-sticky-todo-cell="true"
                         onDragOver={(e) => {
                           e.preventDefault();
                           setDragOverCell({ project: project.fullPath, slotKey: 'backlog' });
