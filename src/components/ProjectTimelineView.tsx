@@ -49,6 +49,7 @@ import { isTaskOccurringOnDate } from '../lib/taskDateUtils';
 import { db } from '../lib/firebase';
 import { doc, setDoc, onSnapshot, query, collection, where } from 'firebase/firestore';
 import { User } from 'firebase/auth';
+import { getUserStorageItem, setUserStorageItem, getUserStorageBaseKeysWithPrefix } from '../lib/userStorage';
 
 export interface CustomTimelineColumn {
   id: string;
@@ -330,11 +331,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     }
   };
 
-  // Phase Patterns State (Prop-driven from App.tsx settings with local storage fallback)
+  // Phase Patterns State (Prop-driven from App.tsx settings with account-scoped storage fallback)
   const [localPhasePatterns, setLocalPhasePatterns] = useState<PhasePattern[]>(() => {
     if (propPhasePatterns && propPhasePatterns.length > 0) return propPhasePatterns;
     try {
-      const saved = localStorage.getItem(`navfor_phase_patterns_${activeSection}`);
+      const saved = getUserStorageItem(`navfor_phase_patterns_${activeSection}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -342,7 +343,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         }
       }
       // Check legacy single-pattern custom columns if existing
-      const legacyColsSaved = localStorage.getItem(`navfor_custom_timeline_cols_${activeSection}`);
+      const legacyColsSaved = getUserStorageItem(`navfor_custom_timeline_cols_${activeSection}`);
       let legacyCols: CustomTimelineColumn[] | undefined;
       if (legacyColsSaved) {
         const parsed = JSON.parse(legacyColsSaved);
@@ -379,13 +380,13 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const [localActivePatternId, setLocalActivePatternId] = useState<string>(() => {
     if (propActivePatternId) return propActivePatternId;
     try {
-      const saved = localStorage.getItem(`navfor_active_phase_pattern_${activeSection}`);
+      const saved = getUserStorageItem(`navfor_active_phase_pattern_${activeSection}`);
       if (saved) return saved;
     } catch (e) {}
     return DEFAULT_PATTERN_ID;
   });
 
-  // Effective state: merge prop from App.tsx, local state, and localStorage so user patterns are NEVER lost or overwritten
+  // Effective state: merge prop from App.tsx, local state, and account-scoped storage so user patterns are NEVER lost or mixed across accounts
   const phasePatterns = useMemo(() => {
     const map = new Map<string, PhasePattern>();
     // 1. Local state (including Firestore real-time listener updates)
@@ -405,11 +406,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         }
       });
     }
-    // 3. Fallback from localStorage (all sections across user account)
+    // 3. Fallback from account-scoped storage (all sections across THIS user account)
     try {
-      const keys = Object.keys(localStorage).filter(k => k.startsWith('navfor_phase_patterns_'));
+      const keys = getUserStorageBaseKeysWithPrefix('navfor_phase_patterns_', user?.uid);
       keys.forEach(k => {
-        const saved = localStorage.getItem(k);
+        const saved = getUserStorageItem(k, user?.uid);
         if (saved) {
           const parsed = JSON.parse(saved);
           if (Array.isArray(parsed)) {
@@ -433,7 +434,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         updatedAt: Date.now()
       }
     ];
-  }, [localPhasePatterns, propPhasePatterns, activeSection, language]);
+  }, [localPhasePatterns, propPhasePatterns, activeSection, language, user?.uid]);
 
   const activePatternId = useMemo(() => {
     if (propActivePatternId && phasePatterns.some(p => p.id === propActivePatternId)) {
@@ -454,20 +455,20 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         propPhasePatterns.forEach(p => map.set(p.id, p));
         const merged = Array.from(map.values());
         try {
-          localStorage.setItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(merged));
+          setUserStorageItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(merged), user?.uid);
           if (propActivePatternId) {
-            localStorage.setItem(`navfor_active_phase_pattern_${activeSection}`, propActivePatternId);
+            setUserStorageItem(`navfor_active_phase_pattern_${activeSection}`, propActivePatternId, user?.uid);
           }
         } catch {}
         return merged;
       });
     }
-  }, [propPhasePatterns, propActivePatternId, activeSection]);
+  }, [propPhasePatterns, propActivePatternId, activeSection, user?.uid]);
 
   // Re-sync patterns and active pattern when activeSection changes or external update occurs
   const syncPatterns = useCallback(() => {
     try {
-      const saved = localStorage.getItem(`navfor_phase_patterns_${activeSection}`);
+      const saved = getUserStorageItem(`navfor_phase_patterns_${activeSection}`, user?.uid);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -479,14 +480,14 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
           });
         }
       }
-      const savedActive = localStorage.getItem(`navfor_active_phase_pattern_${activeSection}`);
+      const savedActive = getUserStorageItem(`navfor_active_phase_pattern_${activeSection}`, user?.uid);
       if (savedActive) {
         setLocalActivePatternId(savedActive);
       }
     } catch (e) {
       console.error(e);
     }
-  }, [activeSection]);
+  }, [activeSection, user?.uid]);
 
   useEffect(() => {
     syncPatterns();
@@ -527,8 +528,8 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         }
       });
 
-      // Get current local patterns from storage
-      const localRaw = localStorage.getItem(`navfor_phase_patterns_${activeSection}`);
+      // Get current local patterns from account-scoped storage
+      const localRaw = getUserStorageItem(`navfor_phase_patterns_${activeSection}`, user.uid);
       let localParsed: PhasePattern[] = [];
       try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
 
@@ -556,11 +557,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
         setLocalActivePatternId(targetActive);
 
         try {
-          localStorage.setItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(mergedPatterns));
-          localStorage.setItem(`navfor_active_phase_pattern_${activeSection}`, targetActive);
+          setUserStorageItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(mergedPatterns), user.uid);
+          setUserStorageItem(`navfor_active_phase_pattern_${activeSection}`, targetActive, user.uid);
           const current = mergedPatterns.find(p => p.id === targetActive) || mergedPatterns[0];
           if (current) {
-            localStorage.setItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns));
+            setUserStorageItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns), user.uid);
           }
         } catch {}
 
@@ -608,11 +609,11 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
       setLocalActivePatternId(newActivePatternId);
     }
     try {
-      localStorage.setItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(patterns));
-      localStorage.setItem(`navfor_active_phase_pattern_${activeSection}`, targetActiveId);
+      setUserStorageItem(`navfor_phase_patterns_${activeSection}`, JSON.stringify(patterns), user?.uid);
+      setUserStorageItem(`navfor_active_phase_pattern_${activeSection}`, targetActiveId, user?.uid);
       const current = patterns.find(p => p.id === targetActiveId) || patterns[0];
       if (current) {
-        localStorage.setItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns));
+        setUserStorageItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns), user?.uid);
       }
       window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
     } catch (e) {
@@ -651,10 +652,10 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   const handleSelectPattern = (patternId: string) => {
     setLocalActivePatternId(patternId);
     try {
-      localStorage.setItem(`navfor_active_phase_pattern_${activeSection}`, patternId);
+      setUserStorageItem(`navfor_active_phase_pattern_${activeSection}`, patternId, user?.uid);
       const current = phasePatterns.find(p => p.id === patternId);
       if (current) {
-        localStorage.setItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns));
+        setUserStorageItem(`navfor_custom_timeline_cols_${activeSection}`, JSON.stringify(current.columns), user?.uid);
       }
       window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
     } catch (e) {
@@ -779,7 +780,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   // Time Filter State (filter tasks by updatedAt)
   const [timeFilter, setTimeFilter] = useState<TimelineTimeFilter>(() => {
     try {
-      const saved = localStorage.getItem(`navfor_timeline_time_filter_${activeSection}`);
+      const saved = getUserStorageItem(`navfor_timeline_time_filter_${activeSection}`, user?.uid);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (typeof parsed === 'object' && parsed !== null) {
@@ -897,7 +898,7 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     setTimeFilter(prev => {
       const next = { ...prev, ...updates };
       try {
-        localStorage.setItem(`navfor_timeline_time_filter_${activeSection}`, JSON.stringify(next));
+        setUserStorageItem(`navfor_timeline_time_filter_${activeSection}`, JSON.stringify(next), user?.uid);
       } catch (e) {}
       return next;
     });
@@ -1139,18 +1140,18 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
   // Per-workspace custom folders (including empty folders)
   const [customFolders, setCustomFolders] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
+      const saved = getUserStorageItem(`navfor_folders_${activeSection}`, user?.uid);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
     }
   });
 
-  // Re-sync customFolders when activeSection changes or custom folders updated
+  // Re-sync customFolders when activeSection or user changes or custom folders updated
   useEffect(() => {
     const syncFolders = () => {
       try {
-        const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
+        const saved = getUserStorageItem(`navfor_folders_${activeSection}`, user?.uid);
         setCustomFolders(saved ? JSON.parse(saved) : []);
       } catch {
         setCustomFolders([]);
@@ -1159,12 +1160,12 @@ export const ProjectTimelineView: React.FC<ProjectTimelineViewProps> = ({
     syncFolders();
     window.addEventListener('navfor_folders_updated', syncFolders);
     return () => window.removeEventListener('navfor_folders_updated', syncFolders);
-  }, [activeSection]);
+  }, [activeSection, user?.uid]);
 
   const saveCustomFolders = (folders: string[]) => {
     setCustomFolders(folders);
     try {
-      localStorage.setItem(`navfor_folders_${activeSection}`, JSON.stringify(folders));
+      setUserStorageItem(`navfor_folders_${activeSection}`, JSON.stringify(folders), user?.uid);
       window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch (err) {
       console.error(err);

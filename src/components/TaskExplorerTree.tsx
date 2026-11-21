@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { Task, Category, FolderMeta } from '../types';
 import { cn, tr } from '../lib/utils';
+import { getUserStorageItem, setUserStorageItem } from '../lib/userStorage';
 import { format, isToday, isTomorrow, differenceInCalendarDays } from 'date-fns';
 
 export interface FolderNode {
@@ -120,38 +121,43 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   // Per-workspace collapsed folders state
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => {
     try {
-      const saved = localStorage.getItem(`navfor_collapsed_${activeSection}`);
+      const saved = getUserStorageItem(`navfor_collapsed_${activeSection}`);
       return saved ? new Set<string>(JSON.parse(saved)) : new Set<string>();
     } catch {
       return new Set<string>();
     }
   });
 
-  // Re-sync collapsed folders when activeSection changes
+  // Re-sync collapsed folders when activeSection changes or account switches
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(`navfor_collapsed_${activeSection}`);
-      setCollapsedFolders(saved ? new Set<string>(JSON.parse(saved)) : new Set<string>());
-    } catch {
-      setCollapsedFolders(new Set<string>());
-    }
+    const syncCollapsed = () => {
+      try {
+        const saved = getUserStorageItem(`navfor_collapsed_${activeSection}`);
+        setCollapsedFolders(saved ? new Set<string>(JSON.parse(saved)) : new Set<string>());
+      } catch {
+        setCollapsedFolders(new Set<string>());
+      }
+    };
+    syncCollapsed();
+    window.addEventListener('navfor_folders_updated', syncCollapsed);
+    return () => window.removeEventListener('navfor_folders_updated', syncCollapsed);
   }, [activeSection]);
 
   // Per-workspace custom empty folders
   const [customFolders, setCustomFolders] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
+      const saved = getUserStorageItem(`navfor_folders_${activeSection}`);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
     }
   });
 
-  // Re-sync customFolders when activeSection changes (ensures workspace isolation)
+  // Re-sync customFolders when activeSection changes (ensures workspace and account isolation)
   useEffect(() => {
     const syncFolders = () => {
       try {
-        const saved = localStorage.getItem(`navfor_folders_${activeSection}`);
+        const saved = getUserStorageItem(`navfor_folders_${activeSection}`);
         setCustomFolders(saved ? JSON.parse(saved) : []);
       } catch {
         setCustomFolders([]);
@@ -233,7 +239,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   const saveCollapsed = (newSet: Set<string>) => {
     setCollapsedFolders(newSet);
     try {
-      localStorage.setItem(`navfor_collapsed_${activeSection}`, JSON.stringify(Array.from(newSet)));
+      setUserStorageItem(`navfor_collapsed_${activeSection}`, JSON.stringify(Array.from(newSet)));
     } catch (e) {
       console.error(e);
     }
@@ -242,7 +248,7 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
   const saveCustomFolders = (folders: string[]) => {
     setCustomFolders(folders);
     try {
-      localStorage.setItem(`navfor_folders_${activeSection}`, JSON.stringify(folders));
+      setUserStorageItem(`navfor_folders_${activeSection}`, JSON.stringify(folders));
       window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch (err) {
       console.error(err);
@@ -938,7 +944,13 @@ export const TaskExplorerTree: React.FC<TaskExplorerTreeProps> = ({
           updatedAt: Date.now()
         });
 
-        // Ensure any parent segments are active as well
+        // Ensure folder metadata is saved to Firestore (and any parent segments revived)
+        onUpdateFolderMeta?.(newFolderPath, {
+          category: 'Focus',
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }, { skipHistory: true });
+
         const segments = newFolderPath.split('/').filter(Boolean);
         let acc = '';
         segments.forEach(seg => {

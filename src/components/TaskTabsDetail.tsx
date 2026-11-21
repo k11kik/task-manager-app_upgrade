@@ -35,6 +35,7 @@ import { cn, tr } from '../lib/utils';
 import { format } from 'date-fns';
 import { getParentFolderDeadline } from '../lib/folderDeadlineUtils';
 import { FolderDetailPane } from './FolderDetailPane';
+import { getUserStorageItem, setUserStorageItem, removeUserStorageItem } from '../lib/userStorage';
 
 export type SplitLayoutType = 'single' | 'split-right' | 'split-down' | 'grid-2x2';
 
@@ -1665,7 +1666,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     }
 
     try {
-      const saved = localStorage.getItem(panesStorageKey);
+      const saved = getUserStorageItem(panesStorageKey);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length >= 4) {
@@ -1730,16 +1731,16 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
   useEffect(() => {
     try {
       localStorage.setItem('navfor_editor_layout', layout);
-      localStorage.setItem(panesStorageKey, JSON.stringify(panes));
+      setUserStorageItem(panesStorageKey, JSON.stringify(panes));
       localStorage.setItem('navfor_split_x_ratio', String(splitXRatio));
       localStorage.setItem('navfor_split_y_ratio', String(splitYRatio));
       const allOpenIds = Array.from(new Set(panes.flatMap(p => p.openTaskIds)));
       if (onOpenTaskIdsChange) {
         onOpenTaskIdsChange(allOpenIds);
       }
-      localStorage.setItem(openTabsStorageKey, JSON.stringify(allOpenIds));
+      setUserStorageItem(openTabsStorageKey, JSON.stringify(allOpenIds));
       if (allOpenIds.length === 0) {
-        localStorage.removeItem(activeTabStorageKey);
+        removeUserStorageItem(activeTabStorageKey);
       }
     } catch (e) {
       console.error(e);
@@ -1839,18 +1840,18 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
     ];
     setPanes(emptyPanes);
     try {
-      localStorage.setItem(openTabsStorageKey, '[]');
-      localStorage.removeItem(activeTabStorageKey);
-      localStorage.setItem(panesStorageKey, JSON.stringify(emptyPanes));
-      localStorage.removeItem('navfor_open_tabs');
-      localStorage.removeItem('navfor_active_tab');
-      localStorage.removeItem('navfor_editor_panes');
-      localStorage.setItem(`navfor_open_tabs_${activeSection}`, '[]');
-      localStorage.removeItem(`navfor_active_tab_${activeSection}`);
-      localStorage.setItem(`navfor_editor_panes_${activeSection}`, JSON.stringify(emptyPanes));
-      localStorage.setItem('navfor_open_tabs_General', '[]');
-      localStorage.removeItem('navfor_active_tab_General');
-      localStorage.setItem('navfor_editor_panes_General', JSON.stringify(emptyPanes));
+      setUserStorageItem(openTabsStorageKey, '[]');
+      removeUserStorageItem(activeTabStorageKey);
+      setUserStorageItem(panesStorageKey, JSON.stringify(emptyPanes));
+      removeUserStorageItem('navfor_open_tabs');
+      removeUserStorageItem('navfor_active_tab');
+      removeUserStorageItem('navfor_editor_panes');
+      setUserStorageItem(`navfor_open_tabs_${activeSection}`, '[]');
+      removeUserStorageItem(`navfor_active_tab_${activeSection}`);
+      setUserStorageItem(`navfor_editor_panes_${activeSection}`, JSON.stringify(emptyPanes));
+      setUserStorageItem('navfor_open_tabs_General', '[]');
+      removeUserStorageItem('navfor_active_tab_General');
+      setUserStorageItem('navfor_editor_panes_General', JSON.stringify(emptyPanes));
       localStorage.setItem('navfor_detail_visible', 'false');
     } catch (e) {
       console.error(e);
@@ -2035,10 +2036,10 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
         onOpenTaskIdsChange(nextAllOpen);
       }
       try {
-        localStorage.setItem(panesStorageKey, JSON.stringify(updated));
-        localStorage.setItem(openTabsStorageKey, JSON.stringify(nextAllOpen));
+        setUserStorageItem(panesStorageKey, JSON.stringify(updated));
+        setUserStorageItem(openTabsStorageKey, JSON.stringify(nextAllOpen));
         if (nextActiveForParent) {
-          localStorage.setItem(activeTabStorageKey, nextActiveForParent);
+          setUserStorageItem(activeTabStorageKey, nextActiveForParent);
         }
       } catch (e) {}
 
@@ -2423,11 +2424,11 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
 
       const allOpen = Array.from(new Set(nextPanes.flatMap(p => p.openTaskIds)));
       try {
-        localStorage.setItem(panesStorageKey, JSON.stringify(nextPanes));
-        localStorage.setItem(openTabsStorageKey, JSON.stringify(allOpen));
+        setUserStorageItem(panesStorageKey, JSON.stringify(nextPanes));
+        setUserStorageItem(openTabsStorageKey, JSON.stringify(allOpen));
         const activePane = nextPanes.find(p => p.id === activePaneId) || nextPanes[0];
         if (activePane?.activeTaskId) {
-          localStorage.setItem(activeTabStorageKey, activePane.activeTaskId);
+          setUserStorageItem(activeTabStorageKey, activePane.activeTaskId);
         }
       } catch (e) {
         console.error(e);
@@ -2552,7 +2553,7 @@ export const TaskTabsDetail: React.FC<TaskTabsDetailProps> = ({
                 const pinnedPanes = panes.map(p => ({ ...p, previewTaskId: null }));
                 setPanes(pinnedPanes);
                 try {
-                  localStorage.setItem(panesStorageKey, JSON.stringify(pinnedPanes));
+                  setUserStorageItem(panesStorageKey, JSON.stringify(pinnedPanes));
                 } catch (e) {
                   console.error(e);
                 }

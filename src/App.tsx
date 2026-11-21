@@ -88,6 +88,16 @@ import {
 import { ja, fr, enUS } from 'date-fns/locale';
 import { Category, Task, FolderMeta, TaskRecurrence, PhasePattern } from './types';
 import { cn, formatDate, tr } from './lib/utils';
+import {
+  getActiveStorageUid,
+  setActiveStorageUid,
+  userScopedKey,
+  getUserStorageItem,
+  setUserStorageItem,
+  removeUserStorageItem,
+  getUserStorageBaseKeysWithPrefix,
+  purgeUnscopedLegacyAccountData,
+} from './lib/userStorage';
 import { getParentFolderDeadline } from './lib/folderDeadlineUtils';
 import { isTaskOccurringOnDate } from './lib/taskDateUtils';
 import { auth, db, signIn, logOut, resetLocalBrowserCaches } from './lib/firebase';
@@ -149,14 +159,18 @@ interface LocalBackupSlotInfo {
   writtenToDisk?: boolean;
 }
 
+// Purge legacy unscoped localStorage keys that could mix folders/backup logs between accounts
+purgeUnscopedLegacyAccountData();
+
 function resolveDailyBackupSlot(
   slotsMap: Record<1 | 2 | 3, LocalBackupSlotInfo | null>,
-  now: number = Date.now()
+  now: number = Date.now(),
+  uid?: string | null
 ): 1 | 2 | 3 {
   const todayStr = format(new Date(now), 'yyyy-MM-dd');
   try {
-    const savedActiveDate = localStorage.getItem('navfor_local_backup_active_date');
-    const savedActiveSlot = Number(localStorage.getItem('navfor_local_backup_active_slot'));
+    const savedActiveDate = getUserStorageItem('navfor_local_backup_active_date', uid);
+    const savedActiveSlot = Number(getUserStorageItem('navfor_local_backup_active_slot', uid));
     if (
       savedActiveDate === todayStr &&
       (savedActiveSlot === 1 || savedActiveSlot === 2 || savedActiveSlot === 3)
@@ -186,8 +200,8 @@ function resolveDailyBackupSlot(
   }
 
   try {
-    const savedActiveDate = localStorage.getItem('navfor_local_backup_active_date');
-    const savedActiveSlot = Number(localStorage.getItem('navfor_local_backup_active_slot'));
+    const savedActiveDate = getUserStorageItem('navfor_local_backup_active_date', uid);
+    const savedActiveSlot = Number(getUserStorageItem('navfor_local_backup_active_slot', uid));
     if (
       savedActiveDate &&
       savedActiveDate !== todayStr &&
@@ -205,12 +219,11 @@ const IDB_STORE = 'handles';
 const IDB_KEY = 'backup_dir';
 
 async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle, uid?: string | null): Promise<void> {
+  if (!uid) return;
   try {
-    localStorage.setItem('navfor_pc_local_path', handle.name);
-    if (uid) {
-      localStorage.setItem(`navfor_pc_local_path_${uid}`, handle.name);
-      localStorage.removeItem(`navfor_local_backup_explicit_off_${uid}`);
-    }
+    localStorage.removeItem('navfor_pc_local_path');
+    localStorage.setItem(`navfor_pc_local_path_${uid}`, handle.name);
+    localStorage.removeItem(`navfor_local_backup_explicit_off_${uid}`);
   } catch {}
   return new Promise((resolve) => {
     try {
@@ -226,10 +239,9 @@ async function saveDirHandleToIDB(handle: FileSystemDirectoryHandle, uid?: strin
           const db = req.result;
           const tx = db.transaction(IDB_STORE, 'readwrite');
           const store = tx.objectStore(IDB_STORE);
-          store.put(handle, IDB_KEY);
-          if (uid) {
-            store.put(handle, `${IDB_KEY}_${uid}`);
-          }
+          // Store strictly under user-scoped key and delete legacy unscoped key so accounts never share a handle
+          store.delete(IDB_KEY);
+          store.put(handle, `${IDB_KEY}_${uid}`);
           tx.oncomplete = () => {
             db.close();
             resolve();
@@ -285,8 +297,11 @@ type IdbLoadStatus = 'ok' | 'timeout' | 'blocked' | 'error';
 
 async function loadDirHandleFromIDBWithStatus(
   uid?: string | null,
-  expectedPath?: string
+  _expectedPath?: string
 ): Promise<{ status: IdbLoadStatus; handle: FileSystemDirectoryHandle | null }> {
+  if (!uid) {
+    return { status: 'ok', handle: null };
+  }
   return new Promise((resolve) => {
     let settled = false;
     const finish = (status: IdbLoadStatus, handle: FileSystemDirectoryHandle | null) => {
@@ -297,10 +312,6 @@ async function loadDirHandleFromIDBWithStatus(
       }
     };
     const timer = setTimeout(() => finish('timeout', null), 2000);
-    const isGenericExpectedPath =
-      !expectedPath ||
-      expectedPath === 'NavFOR_Local_Backup' ||
-      expectedPath === 'Local_Backup_Folder';
     try {
       const req = indexedDB.open(IDB_NAME, 1);
       req.onupgradeneeded = () => {
@@ -315,45 +326,16 @@ async function loadDirHandleFromIDBWithStatus(
           const db = req.result;
           const tx = db.transaction(IDB_STORE, 'readonly');
           const store = tx.objectStore(IDB_STORE);
-          if (uid) {
-            const userReq = store.get(`${IDB_KEY}_${uid}`);
-            userReq.onsuccess = () => {
-              const userHandle = (userReq.result as FileSystemDirectoryHandle) || null;
-              if (userHandle) {
-                try { db.close(); } catch {}
-                finish('ok', userHandle);
-                return;
-              }
-              const fallbackReq = store.get(IDB_KEY);
-              fallbackReq.onsuccess = () => {
-                try { db.close(); } catch {}
-                const fbHandle = (fallbackReq.result as FileSystemDirectoryHandle) || null;
-                if (fbHandle && (isGenericExpectedPath || fbHandle.name === expectedPath)) {
-                  finish('ok', fbHandle);
-                } else {
-                  finish('ok', null);
-                }
-              };
-              fallbackReq.onerror = () => {
-                try { db.close(); } catch {}
-                finish('error', null);
-              };
-            };
-            userReq.onerror = () => {
-              try { db.close(); } catch {}
-              finish('error', null);
-            };
-          } else {
-            const getReq = store.get(IDB_KEY);
-            getReq.onsuccess = () => {
-              try { db.close(); } catch {}
-              finish('ok', (getReq.result as FileSystemDirectoryHandle) || null);
-            };
-            getReq.onerror = () => {
-              try { db.close(); } catch {}
-              finish('error', null);
-            };
-          }
+          // Strictly load only this UID's handle; never fall back to global IDB_KEY
+          const userReq = store.get(`${IDB_KEY}_${uid}`);
+          userReq.onsuccess = () => {
+            try { db.close(); } catch {}
+            finish('ok', (userReq.result as FileSystemDirectoryHandle) || null);
+          };
+          userReq.onerror = () => {
+            try { db.close(); } catch {}
+            finish('error', null);
+          };
         } catch {
           finish('error', null);
         }
@@ -438,13 +420,8 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [allFolderMetas, setAllFolderMetas] = useState<Record<string, Record<string, FolderMeta>>>(() => {
     try {
-      const savedBySec = localStorage.getItem('navfor_folder_metas_by_section');
+      const savedBySec = getUserStorageItem('navfor_folder_metas_by_section');
       if (savedBySec) return JSON.parse(savedBySec);
-      const savedLegacy = localStorage.getItem('navfor_folder_metas');
-      if (savedLegacy) {
-        const parsed = JSON.parse(savedLegacy);
-        return { General: parsed };
-      }
       return {};
     } catch {
       return {};
@@ -466,7 +443,7 @@ export default function App() {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
   const [activeSection, setActiveSection] = useState<string>(() => {
     try {
-      return localStorage.getItem('navfor_active_section') || 'General';
+      return getUserStorageItem('navfor_active_section') || 'General';
     } catch {
       return 'General';
     }
@@ -486,7 +463,7 @@ export default function App() {
     return `${uid}_sec_${safeSec}__${safePath}`;
   };
 
-  // Multi-tab and Explorer state (isolated per workspace)
+  // Multi-tab and Explorer state (isolated per account & workspace)
   const [openTaskIds, setOpenTaskIds] = useState<string[]>(() => {
     try {
       // On mobile devices/screens, app restart should never restore leftover detail tabs as minimized
@@ -497,12 +474,12 @@ export default function App() {
       if (isMobile) {
         return [];
       }
-      const sec = localStorage.getItem('navfor_active_section') || 'General';
+      const sec = getUserStorageItem('navfor_active_section') || 'General';
       const detailVis = localStorage.getItem('navfor_detail_visible');
       if (detailVis === 'false') {
         return [];
       }
-      const namespaced = localStorage.getItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_open_tabs') : null);
+      const namespaced = getUserStorageItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? getUserStorageItem('navfor_open_tabs') : null);
       if (namespaced !== null) {
         const parsed = JSON.parse(namespaced);
         return Array.isArray(parsed) ? parsed : [];
@@ -521,17 +498,17 @@ export default function App() {
       if (isMobile) {
         return null;
       }
-      const sec = localStorage.getItem('navfor_active_section') || 'General';
+      const sec = getUserStorageItem('navfor_active_section') || 'General';
       const detailVis = localStorage.getItem('navfor_detail_visible');
       if (detailVis === 'false') {
         return null;
       }
-      const namespacedTabs = localStorage.getItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_open_tabs') : null);
+      const namespacedTabs = getUserStorageItem(`navfor_open_tabs_${sec}`) || (sec === 'General' ? getUserStorageItem('navfor_open_tabs') : null);
       const parsedTabs: string[] = namespacedTabs ? JSON.parse(namespacedTabs) : [];
       if (!parsedTabs || parsedTabs.length === 0) {
         return null;
       }
-      const namespacedActive = localStorage.getItem(`navfor_active_tab_${sec}`) || (sec === 'General' ? localStorage.getItem('navfor_active_tab') : null);
+      const namespacedActive = getUserStorageItem(`navfor_active_tab_${sec}`) || (sec === 'General' ? getUserStorageItem('navfor_active_tab') : null);
       if (namespacedActive && parsedTabs.includes(namespacedActive)) {
         return namespacedActive;
       }
@@ -667,22 +644,23 @@ export default function App() {
   // Switch open tabs & active tab when workspace (activeSection) changes
   const prevSectionForTabsRef = useRef<string>(activeSection);
   useEffect(() => {
-    try {
-      localStorage.setItem('navfor_active_section', activeSection);
-    } catch {}
+    const uid = userRef.current?.uid || getActiveStorageUid();
+    if (uid) {
+      setUserStorageItem('navfor_active_section', activeSection, uid);
+    }
     if (prevSectionForTabsRef.current !== activeSection) {
       prevSectionForTabsRef.current = activeSection;
       setSelectedProject('All');
       setEditingTask(null);
       try {
-        const savedTabs = localStorage.getItem(`navfor_open_tabs_${activeSection}`);
+        const savedTabs = getUserStorageItem(`navfor_open_tabs_${activeSection}`, uid);
         const parsedTabs: string[] = savedTabs ? JSON.parse(savedTabs) : [];
         if (!parsedTabs || parsedTabs.length === 0) {
           setOpenTaskIds([]);
           setActiveTabTaskId(null);
           setIsDetailPaneVisible(false);
         } else {
-          const savedActive = localStorage.getItem(`navfor_active_tab_${activeSection}`);
+          const savedActive = getUserStorageItem(`navfor_active_tab_${activeSection}`, uid);
           setOpenTaskIds(parsedTabs);
           setActiveTabTaskId(savedActive && parsedTabs.includes(savedActive) ? savedActive : parsedTabs[0]);
         }
@@ -695,17 +673,19 @@ export default function App() {
   }, [activeSection]);
 
   useEffect(() => {
+    const uid = userRef.current?.uid;
+    if (!uid || getActiveStorageUid() !== uid) return;
     try {
-      localStorage.setItem(`navfor_open_tabs_${activeSection}`, JSON.stringify(openTaskIds));
+      setUserStorageItem(`navfor_open_tabs_${activeSection}`, JSON.stringify(openTaskIds), uid);
       if (activeTabTaskId) {
-        localStorage.setItem(`navfor_active_tab_${activeSection}`, activeTabTaskId);
+        setUserStorageItem(`navfor_active_tab_${activeSection}`, activeTabTaskId, uid);
       } else {
-        localStorage.removeItem(`navfor_active_tab_${activeSection}`);
+        removeUserStorageItem(`navfor_active_tab_${activeSection}`, uid);
       }
     } catch (e) {
       console.error(e);
     }
-  }, [openTaskIds, activeTabTaskId, activeSection]);
+  }, [openTaskIds, activeTabTaskId, activeSection, user?.uid]);
 
   const [lastOpenEvent, setLastOpenEvent] = useState<{ taskId: string; isPermanent: boolean; timestamp: number } | null>(null);
 
@@ -750,23 +730,24 @@ export default function App() {
     setOpenTaskIds([]);
     setActiveTabTaskId(null);
     setIsDetailPaneVisible(false);
+    const uid = userRef.current?.uid || getActiveStorageUid();
     try {
-      localStorage.setItem(`navfor_open_tabs_${activeSection}`, '[]');
-      localStorage.removeItem(`navfor_active_tab_${activeSection}`);
+      setUserStorageItem(`navfor_open_tabs_${activeSection}`, '[]', uid);
+      removeUserStorageItem(`navfor_active_tab_${activeSection}`, uid);
       localStorage.setItem('navfor_detail_visible', 'false');
-      localStorage.setItem('navfor_open_tabs', '[]');
-      localStorage.removeItem('navfor_active_tab');
-      localStorage.removeItem('navfor_editor_panes');
+      setUserStorageItem('navfor_open_tabs', '[]', uid);
+      removeUserStorageItem('navfor_active_tab', uid);
+      removeUserStorageItem('navfor_editor_panes', uid);
       const emptyPanes = [
         { id: 0, openTaskIds: [], activeTaskId: null, previewTaskId: null },
         { id: 1, openTaskIds: [], activeTaskId: null, previewTaskId: null },
         { id: 2, openTaskIds: [], activeTaskId: null, previewTaskId: null },
         { id: 3, openTaskIds: [], activeTaskId: null, previewTaskId: null },
       ];
-      localStorage.setItem(`navfor_editor_panes_${activeSection}`, JSON.stringify(emptyPanes));
-      localStorage.setItem('navfor_open_tabs_General', '[]');
-      localStorage.removeItem('navfor_active_tab_General');
-      localStorage.setItem('navfor_editor_panes_General', JSON.stringify(emptyPanes));
+      setUserStorageItem(`navfor_editor_panes_${activeSection}`, JSON.stringify(emptyPanes), uid);
+      setUserStorageItem('navfor_open_tabs_General', '[]', uid);
+      removeUserStorageItem('navfor_active_tab_General', uid);
+      setUserStorageItem('navfor_editor_panes_General', JSON.stringify(emptyPanes), uid);
     } catch (e) {
       console.error(e);
     }
@@ -832,7 +813,7 @@ export default function App() {
 
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user.uid);
       const existingCustom: string[] = saved ? JSON.parse(saved) : [];
       let customChanged = false;
       const nextCustom = [...existingCustom];
@@ -843,7 +824,7 @@ export default function App() {
         }
       }
       if (customChanged) {
-        localStorage.setItem(storageKey, JSON.stringify(nextCustom));
+        setUserStorageItem(storageKey, JSON.stringify(nextCustom), user.uid);
         window.dispatchEvent(new Event('navfor_folders_updated'));
       }
     } catch {}
@@ -987,10 +968,10 @@ export default function App() {
       syncLocalTasks([...copiedTasks, ...tasks]);
     }
 
-    // Also update custom folders in localStorage so empty or nested custom folders are duplicated
+    // Also update custom folders in account-scoped storage so empty or nested custom folders are duplicated
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user?.uid);
       const currentFolders: string[] = saved ? JSON.parse(saved) : [];
       const additionalFolders = [newFolderPath];
       currentFolders.forEach(f => {
@@ -999,7 +980,7 @@ export default function App() {
         }
       });
       const merged = Array.from(new Set([...currentFolders, ...additionalFolders]));
-      localStorage.setItem(storageKey, JSON.stringify(merged));
+      setUserStorageItem(storageKey, JSON.stringify(merged), user?.uid);
       window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch {}
 
@@ -1156,7 +1137,7 @@ export default function App() {
   const [isNewTaskMemoExpanded, setIsNewTaskMemoExpanded] = useState(false);
   const [isMemoModalOpen, setIsMemoModalOpen] = useState(false);
   const [lastBackupTime, setLastBackupTime] = useState<number>(() => {
-    return Number(localStorage.getItem('trifocus_last_backup')) || 0;
+    return Number(getUserStorageItem('trifocus_last_backup')) || 0;
   });
   const [archiveFilter, setArchiveFilter] = useState<'all' | '1m' | '3m' | '6m' | '1y'>('all');
   const [trashFilter, setTrashFilter] = useState<'all' | '1w' | '2w'>('all');
@@ -1170,12 +1151,12 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(() => {
-    const saved = Number(localStorage.getItem('trifocus_last_backup'));
+    const saved = Number(getUserStorageItem('trifocus_last_backup'));
     return saved > 0 ? saved : null;
   });
   const [backupSlots, setBackupSlots] = useState<Record<1 | 2 | 3, LocalBackupSlotInfo | null>>(() => {
     try {
-      const saved = localStorage.getItem('navfor_local_backup_slots');
+      const saved = getUserStorageItem('navfor_local_backup_slots');
       if (saved) {
         const parsed = JSON.parse(saved);
         return {
@@ -1190,7 +1171,7 @@ export default function App() {
   const backupSlotsRef = useRef<Record<1 | 2 | 3, LocalBackupSlotInfo | null>>(backupSlots);
   backupSlotsRef.current = backupSlots;
   const [nextBackupSlot, setNextBackupSlot] = useState<1 | 2 | 3>(() => {
-    return resolveDailyBackupSlot(backupSlots, Date.now());
+    return resolveDailyBackupSlot(backupSlots, Date.now(), getActiveStorageUid());
   });
   const nextBackupSlotRef = useRef<1 | 2 | 3>(nextBackupSlot);
   const lastWrittenSignatureRef = useRef<string>((() => {
@@ -1266,11 +1247,17 @@ export default function App() {
         );
         const handle = result.handle;
         if (!handle) {
-          // Only clear an existing in-memory handle when IDB cleanly confirms no handle exists for this user
-          if (result.status === 'ok' && dirHandleRef.current !== null && (uidOverride === null || !targetUid)) {
+          // Clear handle if IDB confirms no handle exists for this user or user signed out
+          if (result.status === 'ok' && dirHandleRef.current !== null) {
             dirHandleRef.current = null;
             setDirHandle(null);
+            dirPermissionRef.current = 'prompt';
+            setDirPermission('prompt');
           }
+          return dirHandleRef.current;
+        }
+        // Ignore result if active user changed while IDB query was in flight
+        if (targetUid && userRef.current?.uid && userRef.current.uid !== targetUid) {
           return dirHandleRef.current;
         }
         let activeHandle = dirHandleRef.current;
@@ -1330,25 +1317,31 @@ export default function App() {
   };
 
   useEffect(() => {
-    refreshDirHandleFromIDB();
+    if (userRef.current?.uid) {
+      refreshDirHandleFromIDB(userRef.current.uid);
+    }
     const idbSafetyTimer = setTimeout(() => {
       setIsIdbLoaded(true);
     }, 2000);
 
     const handleFocusOrVisibility = () => {
       if (document.visibilityState === 'visible') {
-        refreshDirHandleFromIDB().then((h) => {
-          if (h && dirPermissionRef.current === 'granted' && !isWritingLocalRef.current && userRef.current) {
+        const currentUid = userRef.current?.uid;
+        if (!currentUid) return;
+        refreshDirHandleFromIDB(currentUid).then((h) => {
+          if (h && dirPermissionRef.current === 'granted' && !isWritingLocalRef.current && userRef.current?.uid === currentUid) {
             verifyDiskBackupSlots(h);
           }
         });
-        const todaySlot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now());
+        const todaySlot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now(), currentUid);
         nextBackupSlotRef.current = todaySlot;
         setNextBackupSlot(todaySlot);
       }
     };
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'navfor_local_backup_slots' && e.newValue) {
+      const currentUid = userRef.current?.uid;
+      if (!currentUid) return;
+      if (e.key === userScopedKey('navfor_local_backup_slots', currentUid) && e.newValue) {
         try {
           const parsed = JSON.parse(e.newValue);
           const nextSlots: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = {
@@ -1358,15 +1351,19 @@ export default function App() {
           };
           backupSlotsRef.current = nextSlots;
           setBackupSlots(nextSlots);
-          const todaySlot = resolveDailyBackupSlot(nextSlots, Date.now());
+          const todaySlot = resolveDailyBackupSlot(nextSlots, Date.now(), currentUid);
           nextBackupSlotRef.current = todaySlot;
           setNextBackupSlot(todaySlot);
         } catch {}
-      } else if ((e.key === 'navfor_local_backup_next_slot' || e.key === 'navfor_local_backup_active_slot') && e.newValue) {
-        const todaySlot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now());
+      } else if (
+        (e.key === userScopedKey('navfor_local_backup_next_slot', currentUid) ||
+          e.key === userScopedKey('navfor_local_backup_active_slot', currentUid)) &&
+        e.newValue
+      ) {
+        const todaySlot = resolveDailyBackupSlot(backupSlotsRef.current, Date.now(), currentUid);
         nextBackupSlotRef.current = todaySlot;
         setNextBackupSlot(todaySlot);
-      } else if (e.key === 'trifocus_last_backup' && e.newValue) {
+      } else if (e.key === userScopedKey('trifocus_last_backup', currentUid) && e.newValue) {
         const ts = Number(e.newValue);
         if (ts > 0) setLastSyncTime(ts);
       }
@@ -1384,6 +1381,8 @@ export default function App() {
         channel.onmessage = async (ev) => {
           const msg = ev.data;
           if (!msg) return;
+          const activeUid = userRef.current?.uid || null;
+          if (!activeUid || (msg.uid || null) !== activeUid) return;
           if (msg.type === 'DIR_HANDLE_UPDATED' && msg.handle) {
             const receivedHandle = msg.handle as FileSystemDirectoryHandle;
             setDirHandle(receivedHandle);
@@ -2118,7 +2117,29 @@ export default function App() {
       settings.localBackupPath === 'NavFOR_Local_Backup' ||
       settings.localBackupPath === 'Local_Backup_Folder')
   );
-  const isLocalDiskReady = Boolean(isLocalLogConfigured && isPcFolderConnected);
+  const isLocalDiskReady = Boolean(isLocalLogConfigured && isPcFolderConnected && dirPermission === 'granted');
+
+  const filterBackupSlotsForUser = (
+    slotsMap: Record<1 | 2 | 3, LocalBackupSlotInfo | null>,
+    targetUser: User | null
+  ): { clean: Record<1 | 2 | 3, LocalBackupSlotInfo | null>; hadForeign: boolean } => {
+    const expectedUserPart = targetUser?.email ? targetUser.email.split('@')[0] : null;
+    const clean: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
+    let hadForeign = false;
+    for (const s of [1, 2, 3] as const) {
+      const info = slotsMap[s];
+      if (!info || !info.writtenToDisk) continue;
+      if (expectedUserPart && info.fileName) {
+        const m = info.fileName.match(/^NavFOR_Log_(.+)_([123])\.csv$/i);
+        if (m && m[1] !== expectedUserPart) {
+          hadForeign = true;
+          continue;
+        }
+      }
+      clean[s] = info;
+    }
+    return { clean, hadForeign };
+  };
 
   const jumpToLocalLogSettings = () => {
     setShowSyncDetails(false);
@@ -2133,14 +2154,142 @@ export default function App() {
     }, 3200);
   };
 
-  // Auth State: resolve cached settings and unblock authLoading immediately with safety fallback
+  const prevAuthUidRef = useRef<string | null>(getActiveStorageUid());
+
+  // Auth State: resolve cached settings, enforce strict per-UID isolation, and unblock authLoading immediately
   useEffect(() => {
     let authResolved = false;
+    const resetAccountScopedRuntimeState = (nextUser: User | null) => {
+      const nextUid = nextUser?.uid || null;
+      purgeUnscopedLegacyAccountData();
+      setActiveStorageUid(nextUid);
+
+      tasksLoadedRef.current = false;
+      tasksRef.current = [];
+      setTasks([]);
+      setEditingTask(null);
+      setSelectedProject('All');
+      setHistory([]);
+      historyRef.current = [];
+      setRedoStack([]);
+      redoStackRef.current = [];
+
+      dirHandleRef.current = null;
+      setDirHandle(null);
+      dirPermissionRef.current = 'prompt';
+      setDirPermission('prompt');
+      setLastSyncError(null);
+      isWritingLocalRef.current = false;
+      writingStartedAtRef.current = 0;
+      isVerifyingDiskRef.current = false;
+      pendingSyncAfterWriteRef.current = false;
+      lastCloudSyncedSlotsRef.current = '';
+      lastWrittenSignatureRef.current = '';
+      lastWrittenDateRef.current = '';
+
+      if (nextUid) {
+        let nextMetas: Record<string, Record<string, FolderMeta>> = {};
+        try {
+          const savedMetas = getUserStorageItem('navfor_folder_metas_by_section', nextUid);
+          if (savedMetas) nextMetas = JSON.parse(savedMetas);
+        } catch {}
+        allFolderMetasRef.current = nextMetas;
+        setAllFolderMetas(nextMetas);
+
+        const nextSec = getUserStorageItem('navfor_active_section', nextUid) || 'General';
+        prevSectionForTabsRef.current = nextSec;
+        setActiveSection(nextSec);
+
+        try {
+          const savedTabs = getUserStorageItem(`navfor_open_tabs_${nextSec}`, nextUid);
+          const parsedTabs: string[] = savedTabs ? JSON.parse(savedTabs) : [];
+          const savedActive = getUserStorageItem(`navfor_active_tab_${nextSec}`, nextUid);
+          setOpenTaskIds(Array.isArray(parsedTabs) ? parsedTabs : []);
+          setActiveTabTaskId(savedActive && parsedTabs.includes(savedActive) ? savedActive : (parsedTabs[0] || null));
+        } catch {
+          setOpenTaskIds([]);
+          setActiveTabTaskId(null);
+        }
+
+        let loadedSlots: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
+        try {
+          const rawSlots = getUserStorageItem('navfor_local_backup_slots', nextUid);
+          if (rawSlots) {
+            const parsedSlots = JSON.parse(rawSlots);
+            const filtered = filterBackupSlotsForUser(parsedSlots, nextUser);
+            loadedSlots = filtered.clean;
+            if (filtered.hadForeign) {
+              setUserStorageItem('navfor_local_backup_slots', JSON.stringify(loadedSlots), nextUid);
+            }
+          }
+        } catch {}
+        backupSlotsRef.current = loadedSlots;
+        setBackupSlots(loadedSlots);
+        const resolvedSlot = resolveDailyBackupSlot(loadedSlots, Date.now(), nextUid);
+        nextBackupSlotRef.current = resolvedSlot;
+        setNextBackupSlot(resolvedSlot);
+
+        let latestSlotTs = 0;
+        for (const s of [1, 2, 3] as const) {
+          const info = loadedSlots[s];
+          if (info && info.timestamp > latestSlotTs) {
+            latestSlotTs = info.timestamp;
+            lastWrittenSignatureRef.current = info.signature || '';
+            lastWrittenDateRef.current = format(new Date(info.timestamp), 'yyyy-MM-dd');
+          }
+        }
+        const savedBackupTs = Number(getUserStorageItem('trifocus_last_backup', nextUid)) || 0;
+        const resolvedTs = latestSlotTs || savedBackupTs;
+        setLastBackupTime(resolvedTs);
+        setLastSyncTime(resolvedTs > 0 ? resolvedTs : null);
+      } else {
+        allFolderMetasRef.current = {};
+        setAllFolderMetas({});
+        prevSectionForTabsRef.current = 'General';
+        setActiveSection('General');
+        setOpenTaskIds([]);
+        setActiveTabTaskId(null);
+        const emptySlots: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
+        backupSlotsRef.current = emptySlots;
+        setBackupSlots(emptySlots);
+        nextBackupSlotRef.current = 1;
+        setNextBackupSlot(1);
+        setLastBackupTime(0);
+        setLastSyncTime(null);
+      }
+
+      window.dispatchEvent(new Event('navfor_folders_updated'));
+      window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
+    };
+
+    const getDefaultSettings = () => ({
+      urgentLimit: 3,
+      deadlineThreshold: 3,
+      archiveThresholdDays: 90,
+      doneToTrashThresholdDays: 7,
+      trashCleanupThresholdDays: 30,
+      archiveDoneToTrashDays: 7,
+      archiveInactiveToTrashDays: 99999,
+      criticalThreshold: 100,
+      isLocalBackupEnabled: false,
+      localBackupPath: '',
+      displayMode: 'standard' as 'compact' | 'standard' | 'large',
+      displayModeFocus: 'standard' as 'compact' | 'standard' | 'large',
+      displayModeTodo: 'standard' as 'compact' | 'standard' | 'large',
+      language: settingsRef.current.language || ('en' as 'en' | 'ja' | 'fr'),
+      sections: ['General'],
+      phaseConfigs: {} as Record<string, any>,
+    });
+
     const authSafetyTimer = setTimeout(() => {
       if (!authResolved) {
         console.warn("Firebase onAuthStateChanged timed out; falling back to current auth state.");
         const fallbackUser = auth.currentUser || null;
         userRef.current = fallbackUser;
+        if (prevAuthUidRef.current !== (fallbackUser?.uid || null)) {
+          prevAuthUidRef.current = fallbackUser?.uid || null;
+          resetAccountScopedRuntimeState(fallbackUser);
+        }
         setUser(fallbackUser);
         if (!fallbackUser) {
           settingsLoadedRef.current = true;
@@ -2155,20 +2304,42 @@ export default function App() {
       authResolved = true;
       clearTimeout(authSafetyTimer);
       userRef.current = u;
+      const nextUid = u?.uid || null;
+      const uidChanged = prevAuthUidRef.current !== nextUid;
+      if (uidChanged) {
+        prevAuthUidRef.current = nextUid;
+        resetAccountScopedRuntimeState(u);
+      } else {
+        purgeUnscopedLegacyAccountData();
+        setActiveStorageUid(nextUid);
+      }
+
       if (u) {
+        let resolvedBackupPath = '';
         try {
           localStorage.setItem('navfor_last_uid', u.uid);
           const cached = localStorage.getItem(`navfor_cached_settings_${u.uid}`);
           if (cached) {
             const parsed = JSON.parse(cached);
-            settingsRef.current = { ...settingsRef.current, ...parsed };
-            setSettings(prev => ({ ...prev, ...parsed }));
+            const merged = { ...getDefaultSettings(), ...parsed };
+            settingsRef.current = merged;
+            setSettings(merged);
+            resolvedBackupPath = merged.localBackupPath || '';
+          } else if (uidChanged) {
+            const freshDefaults = getDefaultSettings();
+            settingsRef.current = freshDefaults;
+            setSettings(freshDefaults);
+            settingsLoadedRef.current = false;
+            setIsSettingsLoaded(false);
           }
         } catch {}
-        void refreshDirHandleFromIDB(u.uid, settingsRef.current.localBackupPath);
+        void refreshDirHandleFromIDB(u.uid, resolvedBackupPath);
         setUser(u);
         setAuthLoading(false);
       } else {
+        const freshDefaults = getDefaultSettings();
+        settingsRef.current = freshDefaults;
+        setSettings(freshDefaults);
         void refreshDirHandleFromIDB(null, '');
         settingsLoadedRef.current = true;
         setIsSettingsLoaded(true);
@@ -2203,6 +2374,7 @@ export default function App() {
 
     const settingsRefDoc = doc(db, 'settings', user.uid);
     const unsubscribe = onSnapshot(settingsRefDoc, async (docSnap) => {
+      if (userRef.current?.uid !== user.uid) return;
       if (docSnap.exists()) {
         const data = docSnap.data();
         const loadedSections = (data.sections && data.sections.length > 0) ? data.sections : ['General'];
@@ -2236,7 +2408,7 @@ export default function App() {
           currentHandle &&
           !explicitlyDisabled &&
           (!resolvedIsLocalBackupEnabled || !resolvedLocalBackupPath) &&
-          (data.localBackupSlots || data.lastLocalSyncTime || localStorage.getItem(`navfor_pc_local_path_${user.uid}`) || localStorage.getItem('trifocus_last_backup'))
+          (data.localBackupSlots || data.lastLocalSyncTime || localStorage.getItem(`navfor_pc_local_path_${user.uid}`) || getUserStorageItem('trifocus_last_backup', user.uid))
         ) {
           resolvedIsLocalBackupEnabled = true;
           resolvedLocalBackupPath = resolvedLocalBackupPath || currentHandle.name;
@@ -2274,17 +2446,16 @@ export default function App() {
           localStorage.setItem(`navfor_cached_settings_${user.uid}`, JSON.stringify(nextSettingsObj));
         } catch {}
 
-        // Sync cloud phase configs into local storage so all sections & patterns are up to date across devices
+        // Sync cloud phase configs into account-scoped local storage so patterns never mix across accounts
         if (data.phaseConfigs && typeof data.phaseConfigs === 'object') {
           let hasSyncedPatterns = false;
           for (const [secKey, config] of Object.entries(data.phaseConfigs as Record<string, any>)) {
             if (config && Array.isArray(config.patterns) && config.patterns.length > 0) {
               const targetSec = config.section || secKey;
-              const localRaw = localStorage.getItem(`navfor_phase_patterns_${targetSec}`);
+              const localRaw = getUserStorageItem(`navfor_phase_patterns_${targetSec}`, user.uid);
               let localParsed: any[] = [];
               try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
               
-              // Merge local patterns with remote patterns so no custom pattern is ever erased
               const mergedMap = new Map<string, any>();
               config.patterns.forEach((p: any) => mergedMap.set(p.id, p));
               if (Array.isArray(localParsed)) {
@@ -2294,13 +2465,13 @@ export default function App() {
               }
               const finalPatterns = Array.from(mergedMap.values());
               try {
-                localStorage.setItem(`navfor_phase_patterns_${targetSec}`, JSON.stringify(finalPatterns));
+                setUserStorageItem(`navfor_phase_patterns_${targetSec}`, JSON.stringify(finalPatterns), user.uid);
                 if (config.activePatternId) {
-                  localStorage.setItem(`navfor_active_phase_pattern_${targetSec}`, config.activePatternId);
+                  setUserStorageItem(`navfor_active_phase_pattern_${targetSec}`, config.activePatternId, user.uid);
                 }
                 const activeP = finalPatterns.find((p: any) => p.id === (config.activePatternId || 'default')) || finalPatterns[0];
                 if (activeP?.columns) {
-                  localStorage.setItem(`navfor_custom_timeline_cols_${targetSec}`, JSON.stringify(activeP.columns));
+                  setUserStorageItem(`navfor_custom_timeline_cols_${targetSec}`, JSON.stringify(activeP.columns), user.uid);
                 }
                 hasSyncedPatterns = true;
               } catch {}
@@ -2311,17 +2482,34 @@ export default function App() {
           }
         }
 
+        let hasPollutedRemoteSlots = false;
+        let newestValidSlotTs = 0;
         if (data.localBackupSlots && typeof data.localBackupSlots === 'object') {
           const remoteSlots = data.localBackupSlots;
-          const mergedSlots: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = {
-            ...backupSlotsRef.current,
-          };
-          let slotsChanged = false;
-          let newestTs = 0;
+          const expectedUserPart = user.email ? user.email.split('@')[0] : null;
+          const localFiltered = filterBackupSlotsForUser(backupSlotsRef.current, user);
+          const mergedSlots: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { ...localFiltered.clean };
+          const cleanedRemoteSlots: Record<string, any> = {};
+          let slotsChanged = localFiltered.hadForeign;
+
           for (const s of [1, 2, 3] as const) {
             const rSlot = remoteSlots[s] || remoteSlots[String(s)];
             const lSlot = mergedSlots[s];
+            const remoteMatch = rSlot?.fileName ? String(rSlot.fileName).match(/^NavFOR_Log_(.+)_([123])\.csv$/i) : null;
+            const isForeignRemote = Boolean(expectedUserPart && remoteMatch && remoteMatch[1] !== expectedUserPart);
+
+            if (isForeignRemote) {
+              hasPollutedRemoteSlots = true;
+              cleanedRemoteSlots[String(s)] = null;
+              if (lSlot && lSlot.fileName === rSlot.fileName) {
+                mergedSlots[s] = null;
+                slotsChanged = true;
+              }
+              continue;
+            }
+
             if (rSlot && rSlot.writtenToDisk && typeof rSlot.timestamp === 'number' && rSlot.timestamp > 0) {
+              cleanedRemoteSlots[String(s)] = rSlot;
               if (!lSlot || rSlot.timestamp > lSlot.timestamp || lSlot.taskCount !== rSlot.taskCount) {
                 mergedSlots[s] = {
                   slot: s,
@@ -2333,27 +2521,41 @@ export default function App() {
                 };
                 slotsChanged = true;
               }
+            } else {
+              cleanedRemoteSlots[String(s)] = null;
             }
-            if (mergedSlots[s] && mergedSlots[s]!.timestamp > newestTs) {
-              newestTs = mergedSlots[s]!.timestamp;
+            if (mergedSlots[s] && mergedSlots[s]!.timestamp > newestValidSlotTs) {
+              newestValidSlotTs = mergedSlots[s]!.timestamp;
             }
           }
+
+          if (hasPollutedRemoteSlots) {
+            lastCloudSyncedSlotsRef.current = JSON.stringify(cleanedRemoteSlots);
+            updateDoc(settingsRefDoc, {
+              localBackupSlots: cleanedRemoteSlots,
+              ...(newestValidSlotTs > 0 ? { lastLocalSyncTime: newestValidSlotTs } : { lastLocalSyncTime: deleteField() }),
+            }).catch(() => {});
+          }
+
           if (slotsChanged) {
             backupSlotsRef.current = mergedSlots;
             setBackupSlots(mergedSlots);
-            const resolved = resolveDailyBackupSlot(mergedSlots, Date.now());
+            const resolved = resolveDailyBackupSlot(mergedSlots, Date.now(), user.uid);
             nextBackupSlotRef.current = resolved;
             setNextBackupSlot(resolved);
             try {
-              localStorage.setItem('navfor_local_backup_slots', JSON.stringify(mergedSlots));
+              setUserStorageItem('navfor_local_backup_slots', JSON.stringify(mergedSlots), user.uid);
             } catch {}
           }
-          if (newestTs > 0) {
-            setLastSyncTime(prev => (!prev || newestTs > prev ? newestTs : prev));
-            setLastBackupTime(prev => (!prev || newestTs > prev ? newestTs : prev));
+          if (newestValidSlotTs > 0) {
+            setLastSyncTime(prev => (!prev || newestValidSlotTs > prev ? newestValidSlotTs : prev));
+            setLastBackupTime(prev => (!prev || newestValidSlotTs > prev ? newestValidSlotTs : prev));
+          } else if (hasPollutedRemoteSlots) {
+            setLastSyncTime(null);
+            setLastBackupTime(0);
           }
         }
-        if (typeof data.lastLocalSyncTime === 'number' && data.lastLocalSyncTime > 0) {
+        if (!hasPollutedRemoteSlots && typeof data.lastLocalSyncTime === 'number' && data.lastLocalSyncTime > 0) {
           setLastSyncTime(prev => (!prev || data.lastLocalSyncTime > prev ? data.lastLocalSyncTime : prev));
           setLastBackupTime(prev => (!prev || data.lastLocalSyncTime > prev ? data.lastLocalSyncTime : prev));
         }
@@ -2466,7 +2668,7 @@ export default function App() {
         if (data.userId === user.uid && Array.isArray(data.patterns) && data.patterns.length > 0) {
           const sec = data.section || 'General';
           const safeSec = encodeURIComponent(sec).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
-          const localRaw = localStorage.getItem(`navfor_phase_patterns_${sec}`);
+          const localRaw = getUserStorageItem(`navfor_phase_patterns_${sec}`, user.uid);
           let localParsed: any[] = [];
           try { if (localRaw) localParsed = JSON.parse(localRaw); } catch {}
 
@@ -2478,7 +2680,7 @@ export default function App() {
             });
           }
           const finalPatterns = Array.from(mergedMap.values());
-          const resolvedActiveId = data.activePatternId || localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || finalPatterns[0]?.id || 'default';
+          const resolvedActiveId = data.activePatternId || getUserStorageItem(`navfor_active_phase_pattern_${sec}`, user.uid) || finalPatterns[0]?.id || 'default';
 
           cloudPhaseConfigs[sec] = {
             section: sec,
@@ -2489,11 +2691,11 @@ export default function App() {
           cloudPhaseConfigs[safeSec] = cloudPhaseConfigs[sec];
 
           try {
-            localStorage.setItem(`navfor_phase_patterns_${sec}`, JSON.stringify(finalPatterns));
-            localStorage.setItem(`navfor_active_phase_pattern_${sec}`, resolvedActiveId);
+            setUserStorageItem(`navfor_phase_patterns_${sec}`, JSON.stringify(finalPatterns), user.uid);
+            setUserStorageItem(`navfor_active_phase_pattern_${sec}`, resolvedActiveId, user.uid);
             const activeP = finalPatterns.find((p: any) => p.id === resolvedActiveId) || finalPatterns[0];
             if (activeP?.columns) {
-              localStorage.setItem(`navfor_custom_timeline_cols_${sec}`, JSON.stringify(activeP.columns));
+              setUserStorageItem(`navfor_custom_timeline_cols_${sec}`, JSON.stringify(activeP.columns), user.uid);
             }
             hasUpdates = true;
           } catch {}
@@ -2510,12 +2712,12 @@ export default function App() {
         }));
       }
 
-      // Also check if any local custom patterns exist on this device that are not yet in cloud, and upload them
+      // Also check if any account-scoped custom patterns exist on this device that are not yet in cloud, and upload them
       try {
-        const localKeys = Object.keys(localStorage).filter(k => k.startsWith('navfor_phase_patterns_'));
+        const localKeys = getUserStorageBaseKeysWithPrefix('navfor_phase_patterns_', user.uid);
         for (const k of localKeys) {
           const sec = k.replace('navfor_phase_patterns_', '');
-          const raw = localStorage.getItem(k);
+          const raw = getUserStorageItem(k, user.uid);
           if (raw) {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed) && parsed.length > 0) {
@@ -2524,7 +2726,7 @@ export default function App() {
               if (hasCustom && (!cloudDoc || !cloudDoc.data()?.patterns || cloudDoc.data().patterns.length <= 1)) {
                 const safeSection = encodeURIComponent(sec).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
                 const docRef = doc(db, 'phase_configs', `${user.uid}_${safeSection}`);
-                const activeId = localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || parsed[0]?.id || 'default';
+                const activeId = getUserStorageItem(`navfor_active_phase_pattern_${sec}`, user.uid) || parsed[0]?.id || 'default';
                 setDoc(docRef, {
                   userId: user.uid,
                   section: sec,
@@ -2615,14 +2817,14 @@ export default function App() {
     if (!user?.uid || authLoading) return;
 
     try {
-      const keys = Object.keys(localStorage);
+      const keys = getUserStorageBaseKeysWithPrefix('navfor_phase_patterns_', user.uid);
       let needsSave = false;
       const nextPhaseConfigs = { ...(settings.phaseConfigs || {}) };
 
       for (const k of keys) {
         if (k.startsWith('navfor_phase_patterns_')) {
           const sec = k.replace('navfor_phase_patterns_', '') || 'General';
-          const raw = localStorage.getItem(k);
+          const raw = getUserStorageItem(k, user.uid);
           if (!raw) continue;
           let parsed: any[] = [];
           try { parsed = JSON.parse(raw); } catch {}
@@ -2632,7 +2834,7 @@ export default function App() {
             const cloudPatterns = settings.phaseConfigs?.[sec]?.patterns || settings.phaseConfigs?.[safeSec]?.patterns;
 
             if (hasCustom && (!cloudPatterns || cloudPatterns.length <= 1)) {
-              const activePat = localStorage.getItem(`navfor_active_phase_pattern_${sec}`) || parsed[0]?.id || 'default';
+              const activePat = getUserStorageItem(`navfor_active_phase_pattern_${sec}`, user.uid) || parsed[0]?.id || 'default';
               const payload = {
                 section: sec,
                 activePatternId: activePat,
@@ -2671,11 +2873,14 @@ export default function App() {
   };
 
   const syncLocalFolderMetas = (newSectionMetas: Record<string, FolderMeta>, targetSection: string = activeSection) => {
+    const uid = userRef.current?.uid || getActiveStorageUid();
     setAllFolderMetas(prev => {
       const next = { ...prev, [targetSection]: newSectionMetas };
       allFolderMetasRef.current = next;
       try {
-        localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify(next));
+        if (uid) {
+          setUserStorageItem('navfor_folder_metas_by_section', JSON.stringify(next), uid);
+        }
       } catch (e) {
         console.error('Failed to save folder metas to local storage', e);
       }
@@ -2732,14 +2937,15 @@ export default function App() {
     const secKey = section || 'General';
     const safeSec = encodeURIComponent(secKey).replace(/[^a-zA-Z0-9_-]/g, '_') || 'General';
     const targetActiveId = activePatternId || patterns[0]?.id || 'default';
+    const uid = user?.uid || userRef.current?.uid || getActiveStorageUid();
 
-    // 1. Immediately cache in localStorage & dispatch event for instant UI update
+    // 1. Immediately cache in account-scoped localStorage & dispatch event for instant UI update
     try {
-      localStorage.setItem(`navfor_phase_patterns_${secKey}`, JSON.stringify(patterns));
-      localStorage.setItem(`navfor_active_phase_pattern_${secKey}`, targetActiveId);
+      setUserStorageItem(`navfor_phase_patterns_${secKey}`, JSON.stringify(patterns), uid);
+      setUserStorageItem(`navfor_active_phase_pattern_${secKey}`, targetActiveId, uid);
       const current = patterns.find(p => p.id === targetActiveId) || patterns[0];
       if (current) {
-        localStorage.setItem(`navfor_custom_timeline_cols_${secKey}`, JSON.stringify(current.columns));
+        setUserStorageItem(`navfor_custom_timeline_cols_${secKey}`, JSON.stringify(current.columns), uid);
       }
       window.dispatchEvent(new Event('navfor_phase_patterns_updated'));
     } catch (e) {
@@ -2796,12 +3002,13 @@ export default function App() {
     return ['All', ...p];
   }, [sectionTasks]);
 
-  // Ensure all projects from tasks are registered in customFolders so folders persist even when tasks are moved to trash, archived, or auto-deleted
+  // Ensure all projects from tasks and Firestore folderMetas for THIS user are registered in account-scoped customFolders
   useEffect(() => {
-    if (isUndoing || isUndoingRef.current) return;
+    if (!user?.uid || isUndoing || isUndoingRef.current) return;
+    if (getActiveStorageUid() !== user.uid) return;
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user.uid);
       const existing: string[] = saved ? JSON.parse(saved) : [];
       const set = new Set(existing);
       let changed = false;
@@ -2826,6 +3033,21 @@ export default function App() {
         }
       });
 
+      // Also restore any empty active folders from Firestore folderMetas belonging to this account
+      (Object.entries(folderMetas) as [string, FolderMeta][]).forEach(([folderPath, meta]) => {
+        if (!folderPath || folderPath === 'General') return;
+        if (meta?.category === 'Trash' || meta?.category === 'Archive') return;
+        const parts = folderPath.split(/[\/\\]/).map(s => s.trim()).filter(Boolean);
+        let curPath = '';
+        for (const p of parts) {
+          curPath = curPath ? `${curPath}/${p}` : p;
+          if (!set.has(curPath)) {
+            set.add(curPath);
+            changed = true;
+          }
+        }
+      });
+
       sectionTasks.forEach(t => {
         const proj = t.project?.trim();
         if (!proj || proj === 'General') return;
@@ -2842,11 +3064,11 @@ export default function App() {
       });
 
       if (changed) {
-        localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+        setUserStorageItem(storageKey, JSON.stringify(Array.from(set)), user.uid);
         window.dispatchEvent(new Event('navfor_folders_updated'));
       }
     } catch {}
-  }, [sectionTasks, activeSection, folderMetas]);
+  }, [user?.uid, sectionTasks, activeSection, folderMetas]);
 
   const stats = useMemo(() => {
     // Current workspace filter
@@ -2965,20 +3187,19 @@ export default function App() {
 
   const getCustomFoldersSnapshot = (): Record<string, string[]> => {
     const result: Record<string, string[]> = {};
+    const uid = userRef.current?.uid || getActiveStorageUid();
     const sections = new Set<string>(settings?.sections || ['General']);
     sections.add(activeSection);
     try {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith('navfor_folders_')) {
-          sections.add(key.replace('navfor_folders_', ''));
-        }
-      }
+      const folderKeys = getUserStorageBaseKeysWithPrefix('navfor_folders_', uid);
+      folderKeys.forEach((key) => {
+        sections.add(key.replace('navfor_folders_', ''));
+      });
     } catch {}
 
     sections.forEach((sec: string) => {
       try {
-        const saved = localStorage.getItem(`navfor_folders_${sec}`);
+        const saved = getUserStorageItem(`navfor_folders_${sec}`, uid);
         result[sec] = saved ? JSON.parse(saved) : [];
       } catch {
         result[sec] = [];
@@ -3058,10 +3279,11 @@ export default function App() {
       syncLocalTasks(prevState.tasks);
 
       // Custom Folders (empty and populated folders for all sections)
+      const uid = user?.uid || userRef.current?.uid || getActiveStorageUid();
       const restoredFolders = prevState.customFolders || {};
       Object.entries(restoredFolders).forEach(([sec, fList]) => {
         try {
-          localStorage.setItem(`navfor_folders_${sec}`, JSON.stringify(fList));
+          setUserStorageItem(`navfor_folders_${sec}`, JSON.stringify(fList), uid);
         } catch {}
       });
 
@@ -3112,7 +3334,7 @@ export default function App() {
       folderMetasRef.current = activeMetas;
       syncLocalFolderMetas(activeMetas, activeSection);
       try {
-        localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify(restoredMetas));
+        setUserStorageItem('navfor_folder_metas_by_section', JSON.stringify(restoredMetas), uid);
       } catch {}
 
       // Synchronously notify Timeline and Explorer so empty/restored folders reappear immediately!
@@ -3122,7 +3344,9 @@ export default function App() {
       if (prevState.settings) {
         setSettings(prevState.settings);
         try {
-          localStorage.setItem('navfor_local_settings', JSON.stringify(prevState.settings));
+          if (uid) {
+            localStorage.setItem(`navfor_cached_settings_${uid}`, JSON.stringify(prevState.settings));
+          }
         } catch {}
       }
 
@@ -3241,6 +3465,7 @@ export default function App() {
       tasksRef.current = nextState.tasks;
       syncLocalTasks(nextState.tasks);
 
+      const uid = user?.uid || userRef.current?.uid || getActiveStorageUid();
       const restoredMetas = JSON.parse(JSON.stringify(nextState.allFolderMetas || {}));
       allFolderMetasRef.current = restoredMetas;
       setAllFolderMetas(restoredMetas);
@@ -3248,13 +3473,13 @@ export default function App() {
       folderMetasRef.current = activeMetas;
       syncLocalFolderMetas(activeMetas, activeSection);
       try {
-        localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify(restoredMetas));
+        setUserStorageItem('navfor_folder_metas_by_section', JSON.stringify(restoredMetas), uid);
       } catch {}
 
       const restoredFolders = nextState.customFolders || {};
       Object.entries(restoredFolders).forEach(([sec, fList]) => {
         try {
-          localStorage.setItem(`navfor_folders_${sec}`, JSON.stringify(fList));
+          setUserStorageItem(`navfor_folders_${sec}`, JSON.stringify(fList), uid);
         } catch {}
       });
       window.dispatchEvent(new Event('navfor_folders_updated'));
@@ -3262,7 +3487,9 @@ export default function App() {
       if (nextState.settings) {
         setSettings(nextState.settings);
         try {
-          localStorage.setItem('navfor_local_settings', JSON.stringify(nextState.settings));
+          if (uid) {
+            localStorage.setItem(`navfor_cached_settings_${uid}`, JSON.stringify(nextState.settings));
+          }
         } catch {}
       }
 
@@ -3643,7 +3870,7 @@ export default function App() {
 
         try {
           const storageKey = `navfor_folders_${activeSection}`;
-          const saved = localStorage.getItem(storageKey);
+          const saved = getUserStorageItem(storageKey, user?.uid);
           const existing: string[] = saved ? JSON.parse(saved) : [];
           const set = new Set(existing);
           let curPath = '';
@@ -3656,7 +3883,7 @@ export default function App() {
             }
           }
           if (added || anyFolderRevived) {
-            localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+            setUserStorageItem(storageKey, JSON.stringify(Array.from(set)), user?.uid);
             window.dispatchEvent(new Event('navfor_folders_updated'));
           }
         } catch {}
@@ -3890,14 +4117,14 @@ export default function App() {
       return;
     }
 
-    // Ensure new workspace starts from a completely clean initial state in localStorage
+    // Ensure new workspace starts from a completely clean initial state in account-scoped storage
     try {
-      localStorage.removeItem(`navfor_folders_${trimmedName}`);
-      localStorage.removeItem(`navfor_collapsed_${trimmedName}`);
-      localStorage.removeItem(`navfor_open_tabs_${trimmedName}`);
-      localStorage.removeItem(`navfor_active_tab_${trimmedName}`);
-      localStorage.removeItem(`navfor_editor_panes_${trimmedName}`);
-      localStorage.removeItem(`navfor_custom_timeline_cols_${trimmedName}`);
+      removeUserStorageItem(`navfor_folders_${trimmedName}`, user.uid);
+      removeUserStorageItem(`navfor_collapsed_${trimmedName}`, user.uid);
+      removeUserStorageItem(`navfor_open_tabs_${trimmedName}`, user.uid);
+      removeUserStorageItem(`navfor_active_tab_${trimmedName}`, user.uid);
+      removeUserStorageItem(`navfor_editor_panes_${trimmedName}`, user.uid);
+      removeUserStorageItem(`navfor_custom_timeline_cols_${trimmedName}`, user.uid);
     } catch {}
 
     const next = [...settings.sections, trimmedName];
@@ -3970,7 +4197,7 @@ export default function App() {
 
       await batch.commit();
 
-      // 3. Migrate per-workspace localStorage keys
+      // 3. Migrate per-workspace account-scoped storage keys
       try {
         const keysToMigrate = [
           'navfor_folders_',
@@ -3981,10 +4208,10 @@ export default function App() {
           'navfor_custom_timeline_cols_'
         ];
         keysToMigrate.forEach(prefix => {
-          const val = localStorage.getItem(`${prefix}${oldName}`);
+          const val = getUserStorageItem(`${prefix}${oldName}`, user.uid);
           if (val !== null) {
-            localStorage.setItem(`${prefix}${trimmedNew}`, val);
-            localStorage.removeItem(`${prefix}${oldName}`);
+            setUserStorageItem(`${prefix}${trimmedNew}`, val, user.uid);
+            removeUserStorageItem(`${prefix}${oldName}`, user.uid);
           }
         });
       } catch {}
@@ -4040,14 +4267,14 @@ export default function App() {
 
       await batch.commit();
 
-      // 3. Clean up per-workspace localStorage keys
+      // 3. Clean up per-workspace account-scoped storage keys
       try {
-        localStorage.removeItem(`navfor_folders_${name}`);
-        localStorage.removeItem(`navfor_collapsed_${name}`);
-        localStorage.removeItem(`navfor_open_tabs_${name}`);
-        localStorage.removeItem(`navfor_active_tab_${name}`);
-        localStorage.removeItem(`navfor_editor_panes_${name}`);
-        localStorage.removeItem(`navfor_custom_timeline_cols_${name}`);
+        removeUserStorageItem(`navfor_folders_${name}`, user.uid);
+        removeUserStorageItem(`navfor_collapsed_${name}`, user.uid);
+        removeUserStorageItem(`navfor_open_tabs_${name}`, user.uid);
+        removeUserStorageItem(`navfor_active_tab_${name}`, user.uid);
+        removeUserStorageItem(`navfor_editor_panes_${name}`, user.uid);
+        removeUserStorageItem(`navfor_custom_timeline_cols_${name}`, user.uid);
       } catch {}
 
       setDeletingWorkspaceName(null);
@@ -4185,10 +4412,10 @@ export default function App() {
     }));
 
     try {
-      localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify({
+      setUserStorageItem('navfor_folder_metas_by_section', JSON.stringify({
         ...allFolderMetasRef.current,
         [activeSection]: nextSecMap
-      }));
+      }), user?.uid);
     } catch {}
     window.dispatchEvent(new Event('navfor_folders_updated'));
 
@@ -4299,14 +4526,14 @@ export default function App() {
       setActiveTabTaskId(null);
     }
 
-    // Clean up custom folders in localStorage
+    // Clean up custom folders in account-scoped storage
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user?.uid);
       if (saved) {
         const folders: string[] = JSON.parse(saved);
         const updated = folders.filter(f => !isInsideFolder(f));
-        localStorage.setItem(storageKey, JSON.stringify(updated));
+        setUserStorageItem(storageKey, JSON.stringify(updated), user?.uid);
         window.dispatchEvent(new Event('navfor_folders_updated'));
       }
     } catch {}
@@ -4391,14 +4618,14 @@ export default function App() {
       setActiveTabTaskId(null);
     }
 
-    // Also clean up any custom empty folders in localStorage
+    // Also clean up any custom empty folders in account-scoped storage
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user?.uid);
       if (saved) {
         const folders: string[] = JSON.parse(saved);
         const updated = folders.filter(f => !isInsideFolder(f));
-        localStorage.setItem(storageKey, JSON.stringify(updated));
+        setUserStorageItem(storageKey, JSON.stringify(updated), user?.uid);
         window.dispatchEvent(new Event('navfor_folders_updated'));
       }
     } catch {}
@@ -4462,10 +4689,10 @@ export default function App() {
     // 2. Synchronously update affected tasks to 'Focus' (ToDo)
     syncLocalTasks(tasks.map(t => (getTaskSection(t) === activeSection && isInsideFolder(t.project)) ? { ...t, category: 'Focus', updatedAt: now } : t));
 
-    // 3. Register folder and descendants in localStorage customFolders
+    // 3. Register folder and descendants in account-scoped customFolders
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user?.uid);
       const existing: string[] = saved ? JSON.parse(saved) : [];
       const set = new Set(existing);
       let curPath = '';
@@ -4478,7 +4705,7 @@ export default function App() {
           set.add(p);
         }
       });
-      localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+      setUserStorageItem(storageKey, JSON.stringify(Array.from(set)), user?.uid);
       window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch {}
 
@@ -4614,16 +4841,16 @@ export default function App() {
     }));
 
     try {
-      localStorage.setItem('navfor_folder_metas_by_section', JSON.stringify({
+      setUserStorageItem('navfor_folder_metas_by_section', JSON.stringify({
         ...allFolderMetasRef.current,
         [activeSection]: nextMetas
-      }));
+      }), user?.uid);
     } catch {}
 
-    // 3. Optimistically and synchronously update customFolders in localStorage
+    // 3. Optimistically and synchronously update customFolders in account-scoped storage
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user?.uid);
       const folders: string[] = saved ? JSON.parse(saved) : [];
       const updated = folders.map(f => {
         if (f === oldFolderPath) return newFolderPath;
@@ -4633,7 +4860,7 @@ export default function App() {
       if (!updated.includes(newFolderPath)) {
         updated.push(newFolderPath);
       }
-      localStorage.setItem(storageKey, JSON.stringify(updated));
+      setUserStorageItem(storageKey, JSON.stringify(updated), user?.uid);
     } catch {}
 
     // 4. Optimistically and synchronously update tabs, panes, and collapsed states
@@ -4645,7 +4872,7 @@ export default function App() {
           return id;
         });
         try {
-          localStorage.setItem(`navfor_open_tabs_${activeSection}`, JSON.stringify(updated));
+          setUserStorageItem(`navfor_open_tabs_${activeSection}`, JSON.stringify(updated), user?.uid);
         } catch {}
         return updated;
       });
@@ -4659,7 +4886,7 @@ export default function App() {
         }
         if (updated) {
           try {
-            localStorage.setItem(`navfor_active_tab_${activeSection}`, updated);
+            setUserStorageItem(`navfor_active_tab_${activeSection}`, updated, user?.uid);
           } catch {}
         }
         return updated;
@@ -4667,7 +4894,7 @@ export default function App() {
 
       try {
         const panesKey = `navfor_editor_panes_${activeSection}`;
-        const savedPanes = localStorage.getItem(panesKey);
+        const savedPanes = getUserStorageItem(panesKey, user?.uid);
         if (savedPanes) {
           const parsedPanes = JSON.parse(savedPanes);
           if (Array.isArray(parsedPanes)) {
@@ -4689,14 +4916,14 @@ export default function App() {
                   ? `folder:${newFolderPath}${p.previewTaskId.slice(`folder:${oldFolderPath}`.length)}`
                   : p.previewTaskId
             }));
-            localStorage.setItem(panesKey, JSON.stringify(nextPanes));
+            setUserStorageItem(panesKey, JSON.stringify(nextPanes), user?.uid);
           }
         }
       } catch {}
 
       try {
         const collapsedKey = `navfor_collapsed_${activeSection}`;
-        const savedCollapsed = localStorage.getItem(collapsedKey);
+        const savedCollapsed = getUserStorageItem(collapsedKey, user?.uid);
         if (savedCollapsed) {
           const parsed: string[] = JSON.parse(savedCollapsed);
           const updatedCollapsed = parsed.map(p => {
@@ -4704,7 +4931,7 @@ export default function App() {
             if (p.startsWith(oldFolderPath + '/')) return newFolderPath + p.slice(oldFolderPath.length);
             return p;
           });
-          localStorage.setItem(collapsedKey, JSON.stringify(updatedCollapsed));
+          setUserStorageItem(collapsedKey, JSON.stringify(updatedCollapsed), user?.uid);
         }
       } catch {}
     }
@@ -4771,10 +4998,10 @@ export default function App() {
     if (newPath === sourceFolderPath) return;
     await handleRenameFolder(sourceFolderPath, newPath);
 
-    // Also sync localStorage customFolders
+    // Also sync account-scoped customFolders
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey, user?.uid);
       if (saved) {
         const folders: string[] = JSON.parse(saved);
         const updated = folders.map(f => {
@@ -4782,7 +5009,7 @@ export default function App() {
           if (f.startsWith(sourceFolderPath + '/')) return newPath + f.slice(sourceFolderPath.length);
           return f;
         });
-        localStorage.setItem(storageKey, JSON.stringify(updated));
+        setUserStorageItem(storageKey, JSON.stringify(updated), user?.uid);
         window.dispatchEvent(new Event('navfor_folders_updated'));
       }
     } catch {}
@@ -5078,18 +5305,19 @@ export default function App() {
     };
     backupSlotsRef.current = updated;
 
+    const currentUid = userRef.current?.uid || getActiveStorageUid();
     try {
-      localStorage.setItem('navfor_local_backup_slots', JSON.stringify(updated));
-      localStorage.setItem('navfor_local_backup_active_date', todayStr);
-      localStorage.setItem('navfor_local_backup_active_slot', String(activeSlotForToday));
-      localStorage.setItem('navfor_local_backup_next_slot', String(activeSlotForToday));
-      localStorage.setItem('trifocus_last_backup', String(now));
+      setUserStorageItem('navfor_local_backup_slots', JSON.stringify(updated), currentUid);
+      setUserStorageItem('navfor_local_backup_active_date', todayStr, currentUid);
+      setUserStorageItem('navfor_local_backup_active_slot', String(activeSlotForToday), currentUid);
+      setUserStorageItem('navfor_local_backup_next_slot', String(activeSlotForToday), currentUid);
+      setUserStorageItem('trifocus_last_backup', String(now), currentUid);
     } catch (e) {
       console.warn('Failed to store backup slot metadata in localStorage', e);
     }
 
     try {
-      localStorage.setItem(`navfor_local_backup_csv_${slot}`, csvContent);
+      setUserStorageItem(`navfor_local_backup_csv_${slot}`, csvContent, currentUid);
     } catch {}
 
     setBackupSlots(updated);
@@ -5101,10 +5329,11 @@ export default function App() {
       syncBackupSlotsToCloud(updated, now);
     }
 
-    if (backupChannelRef.current) {
+    if (backupChannelRef.current && currentUid) {
       try {
         backupChannelRef.current.postMessage({
           type: 'BACKUP_SLOTS_UPDATED',
+          uid: currentUid,
           slots: updated,
           nextSlot: activeSlotForToday,
           activeDate: todayStr,
@@ -5214,9 +5443,10 @@ export default function App() {
     return { written: true, lastModified: diskLastModified };
   };
 
-  // Audit the actual files on disk inside dirHandle so UI timestamps always reflect real OS files
+  // Audit the actual files on disk inside dirHandle so UI timestamps always reflect ONLY the current account's OS files
   const verifyDiskBackupSlots = async (handle: FileSystemDirectoryHandle) => {
-    if (isWritingLocalRef.current || isVerifyingDiskRef.current) return;
+    const activeUser = userRef.current;
+    if (!activeUser || isWritingLocalRef.current || isVerifyingDiskRef.current) return;
     isVerifyingDiskRef.current = true;
     try {
       if (typeof (handle as any).queryPermission === 'function') {
@@ -5227,9 +5457,7 @@ export default function App() {
         );
         if (perm !== 'granted') return;
       }
-      const hasAuthenticatedUser = Boolean(userRef.current?.email);
-      const userPart = userRef.current?.email?.split('@')[0] || 'local';
-      const prev = backupSlotsRef.current;
+      const userPart = activeUser.email?.split('@')[0] || 'local';
       const diskTimestamps: Record<1 | 2 | 3, { fileName: string; lastModified: number } | null> = {
         1: null,
         2: null,
@@ -5242,56 +5470,40 @@ export default function App() {
       };
 
       for (const slotNum of [1, 2, 3] as const) {
-        const candidateNames = Array.from(
-          new Set(
-            [
-              `NavFOR_Log_${userPart}_${slotNum}.csv`,
-              prev[slotNum]?.fileName,
-            ].filter((x): x is string => Boolean(x))
-          )
-        );
-        let found = false;
-        let allNotFound = true;
-        for (const fName of candidateNames) {
-          try {
-            const fh = await withRejectTimeout(
-              handle.getFileHandle(fName, { create: false }),
-              2500,
-              'Timeout checking file handle'
-            );
-            const file = await withRejectTimeout(
-              fh.getFile(),
-              2500,
-              'Timeout reading file metadata'
-            );
-            diskTimestamps[slotNum] = { fileName: fName, lastModified: file.lastModified || Date.now() };
-            found = true;
-            allNotFound = false;
-            break;
-          } catch (err: any) {
-            if (err?.name !== 'NotFoundError') {
-              allNotFound = false;
-            }
+        // Strictly check ONLY the active account's own filename; never check previous/other accounts' filenames
+        const ownFileName = `NavFOR_Log_${userPart}_${slotNum}.csv`;
+        try {
+          const fh = await withRejectTimeout(
+            handle.getFileHandle(ownFileName, { create: false }),
+            2500,
+            'Timeout checking file handle'
+          );
+          const file = await withRejectTimeout(
+            fh.getFile(),
+            2500,
+            'Timeout reading file metadata'
+          );
+          diskTimestamps[slotNum] = { fileName: ownFileName, lastModified: file.lastModified || Date.now() };
+        } catch (err: any) {
+          if (err?.name === 'NotFoundError') {
+            notFoundSlots[slotNum] = true;
           }
-        }
-        if (!found && allNotFound) {
-          notFoundSlots[slotNum] = true;
         }
       }
 
-      // Fallback directory scan if any slot wasn't matched directly (bounded by 2500ms timeout)
+      // Fallback directory scan if any slot wasn't matched directly (strictly matching ONLY this account's prefix)
       if ((!diskTimestamps[1] || !diskTimestamps[2] || !diskTimestamps[3]) && typeof (handle as any).values === 'function') {
         await withTimeout((async () => {
           try {
             const deadline = Date.now() + 2200;
             for await (const entry of (handle as any).values()) {
-              if (Date.now() > deadline || isWritingLocalRef.current) break;
+              if (Date.now() > deadline || isWritingLocalRef.current || userRef.current?.uid !== activeUser.uid) break;
               if (entry && entry.kind === 'file' && typeof entry.name === 'string') {
                 const m = entry.name.match(/^NavFOR_Log_(.+)_([123])\.csv$/i);
                 if (m) {
                   const entryUser = m[1];
                   const slotNum = Number(m[2]) as 1 | 2 | 3;
-                  if (!diskTimestamps[slotNum] && (!hasAuthenticatedUser || entryUser === userPart)) {
+                  if (!diskTimestamps[slotNum] && entryUser === userPart) {
                     try {
                       const file = await withTimeout(entry.getFile(), 1500, null as any);
                       if (file) {
@@ -5310,7 +5522,7 @@ export default function App() {
         })(), 2500, undefined);
       }
 
-      if (isWritingLocalRef.current) return;
+      if (isWritingLocalRef.current || userRef.current?.uid !== activeUser.uid) return;
 
       const currentPrev = backupSlotsRef.current;
       const next: Record<1 | 2 | 3, LocalBackupSlotInfo | null> = { 1: null, 2: null, 3: null };
@@ -5318,6 +5530,7 @@ export default function App() {
       const now = Date.now();
 
       for (const slotNum of [1, 2, 3] as const) {
+        const ownFileName = `NavFOR_Log_${userPart}_${slotNum}.csv`;
         const diskInfo = diskTimestamps[slotNum];
         const existing = currentPrev[slotNum];
         if (diskInfo) {
@@ -5336,9 +5549,10 @@ export default function App() {
         } else if (
           existing &&
           existing.writtenToDisk &&
-          (!hasAuthenticatedUser || !notFoundSlots[slotNum] || now - existing.timestamp < 5000)
+          existing.fileName === ownFileName &&
+          (!notFoundSlots[slotNum] || now - existing.timestamp < 5000)
         ) {
-          // Preserve existing slot if user auth wasn't ready yet, or if a transient file read lock occurred
+          // Preserve existing slot belonging to this user only if a transient file read lock occurred
           next[slotNum] = existing;
           if (!latestDiskSlot || existing.timestamp > latestDiskSlot.timestamp) {
             latestDiskSlot = existing;
@@ -5350,17 +5564,15 @@ export default function App() {
 
       backupSlotsRef.current = next;
       try {
-        localStorage.setItem('navfor_local_backup_slots', JSON.stringify(next));
+        setUserStorageItem('navfor_local_backup_slots', JSON.stringify(next), activeUser.uid);
         if (!latestDiskSlot) {
-          if (hasAuthenticatedUser) {
-            localStorage.removeItem('navfor_local_backup_active_date');
-            localStorage.removeItem('navfor_local_backup_active_slot');
-          }
+          removeUserStorageItem('navfor_local_backup_active_date', activeUser.uid);
+          removeUserStorageItem('navfor_local_backup_active_slot', activeUser.uid);
         } else {
           const latestDateStr = format(new Date(latestDiskSlot.timestamp), 'yyyy-MM-dd');
-          localStorage.setItem('navfor_local_backup_active_date', latestDateStr);
-          localStorage.setItem('navfor_local_backup_active_slot', String(latestDiskSlot.slot));
-          localStorage.setItem('trifocus_last_backup', String(latestDiskSlot.timestamp));
+          setUserStorageItem('navfor_local_backup_active_date', latestDateStr, activeUser.uid);
+          setUserStorageItem('navfor_local_backup_active_slot', String(latestDiskSlot.slot), activeUser.uid);
+          setUserStorageItem('trifocus_last_backup', String(latestDiskSlot.timestamp), activeUser.uid);
         }
       } catch {}
 
@@ -5372,12 +5584,12 @@ export default function App() {
         setLastSyncTime(prevTs => (!prevTs || latestDiskSlot!.timestamp > prevTs ? latestDiskSlot!.timestamp : prevTs));
         setLastBackupTime(prevTs => (!prevTs || latestDiskSlot!.timestamp > prevTs ? latestDiskSlot!.timestamp : prevTs));
         syncBackupSlotsToCloud(next, latestDiskSlot.timestamp);
-      } else if (hasAuthenticatedUser) {
+      } else {
         lastWrittenSignatureRef.current = '';
         lastWrittenDateRef.current = '';
       }
 
-      const resolvedSlot = resolveDailyBackupSlot(next, Date.now());
+      const resolvedSlot = resolveDailyBackupSlot(next, Date.now(), activeUser.uid);
       nextBackupSlotRef.current = resolvedSlot;
       setBackupSlots(next);
       setNextBackupSlot(resolvedSlot);
@@ -5390,7 +5602,7 @@ export default function App() {
   const downloadBackupSlot = (slot: 1 | 2 | 3) => {
     const userPart = user?.email?.split('@')[0] || 'local';
     const slotInfo = backupSlots[slot];
-    const savedCsv = localStorage.getItem(`navfor_local_backup_csv_${slot}`);
+    const savedCsv = getUserStorageItem(`navfor_local_backup_csv_${slot}`, user?.uid);
     const csv = savedCsv || getCSVData();
     const fileName = slotInfo?.fileName || `NavFOR_Log_${userPart}_${slot}.csv`;
 
@@ -5507,9 +5719,9 @@ export default function App() {
       setDirPermission('granted');
       setLastSyncError(null);
       await saveDirHandleToIDB(handle, userRef.current?.uid);
-      if (backupChannelRef.current) {
+      if (backupChannelRef.current && userRef.current?.uid) {
         try {
-          backupChannelRef.current.postMessage({ type: 'DIR_HANDLE_UPDATED', handle });
+          backupChannelRef.current.postMessage({ type: 'DIR_HANDLE_UPDATED', uid: userRef.current.uid, handle });
         } catch {}
       }
       
@@ -6173,7 +6385,7 @@ export default function App() {
       // Update local state too to avoid full reload if possible, but the current code reloads.
       // Let's stick to reload for consistency with how it clear caches.
       
-      localStorage.removeItem('trifocus_last_backup');
+      removeUserStorageItem('trifocus_last_backup', user.uid);
       
       setTimeout(() => {
         window.location.reload();
@@ -6776,22 +6988,18 @@ export default function App() {
                         {L('ローカル設定が必要', 'Local Setting Needed', 'Config. locale requise')}
                       </span>
                     </button>
-                  ) : !isLocalDiskReady ? (
+                  ) : !isLocalDiskReady || lastSyncError ? (
                     <button
-                      onClick={() => {
-                        if (dirHandle && dirPermission !== 'granted') {
-                          authorizeLocalFolderNow();
-                        } else {
-                          setShowSyncDetails(!showSyncDetails);
-                        }
-                      }}
+                      onClick={() => setShowSyncDetails(!showSyncDetails)}
                       className="w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border bg-amber-50/90 border-amber-200 hover:bg-amber-100/80 text-amber-700 transition-all shadow-sm cursor-pointer flex items-center justify-center gap-1.5"
                       title={
-                        dirHandle
+                        lastSyncError
+                          ? `${lastSyncError} — ${L('クリックしてフォルダを再選択または再試行', 'Click to re-select folder or retry', 'Cliquez pour resélectionner le dossier')}`
+                          : dirHandle
                           ? L(
-                              'クリックしてローカルフォルダへの上書き保存を許可します',
-                              'Click to authorize writing to your local folder',
-                              'Cliquez pour autoriser l\'écriture dans le dossier local'
+                              'ローカルフォルダへの書き込み許可またはフォルダ再選択が必要です（クリックして詳細を開く）',
+                              'Write permission or folder re-selection needed (click for options)',
+                              'Autorisation d\'écriture ou resélection du dossier requise'
                             )
                           : L(
                               'PCの保存先フォルダを選択してください',
@@ -6800,44 +7008,41 @@ export default function App() {
                             )
                       }
                     >
-                      <RefreshCcw size={13} className={cn("text-amber-600 shrink-0", isSyncing && "animate-spin")} />
+                      {isSyncing ? (
+                        <RefreshCcw size={13} className="text-indigo-600 shrink-0 animate-spin" />
+                      ) : (
+                        <AlertTriangle size={13} className="text-amber-600 shrink-0" />
+                      )}
                       <span className="hidden xl:inline text-[10px] font-bold uppercase tracking-tighter whitespace-nowrap">
-                        {dirHandle
-                          ? L('上書き許可が必要', 'Allow Local Write', 'Autoriser écriture')
-                          : L('フォルダ未接続', 'Connect Folder', 'Connecter dossier')}
+                        {isSyncing
+                          ? t('Syncing')
+                          : !dirHandle
+                          ? L('フォルダ再選択', 'Reselect Folder', 'Resélectionner')
+                          : dirPermission !== 'granted'
+                          ? L('要書き込み許可', 'Allow Write', 'Autoriser écriture')
+                          : L('同期エラー・再選択', 'Sync Issue', 'Erreur Synchro')}
                       </span>
                     </button>
                   ) : (
                     <button 
                       onClick={() => setShowSyncDetails(!showSyncDetails)}
-                      className={cn(
-                        "w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs",
-                        lastSyncError
-                          ? "bg-amber-50 border-amber-200 hover:bg-amber-100/80"
-                          : "bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70"
+                      className="w-7 h-7 sm:w-8 sm:h-8 xl:w-auto xl:h-auto xl:px-3 xl:py-1.5 rounded-lg sm:rounded-xl border transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70"
+                      title={L(
+                        'ローカルログ同期が有効です（1日ごとに3ファイルでローテーション・同日の変更は同じファイルに上書き保存）',
+                        'Local log sync is active (daily rotation across 3 files; same-day changes overwrite today\'s file)',
+                        'La synchro locale est active (rotation quotidienne sur 3 fichiers)'
                       )}
-                      title={
-                        lastSyncError
-                          ? lastSyncError
-                          : L(
-                              'ローカルログ同期が有効です（1日ごとに3ファイルでローテーション・同日の変更は同じファイルに上書き保存）',
-                              'Local log sync is active (daily rotation across 3 files; same-day changes overwrite today\'s file)',
-                              'La synchro locale est active (rotation quotidienne sur 3 fichiers)'
-                            )
-                      }
                     >
                       {isSyncing ? (
                         <RefreshCcw size={13} className="text-indigo-600 shrink-0 animate-spin" />
-                      ) : lastSyncError ? (
-                        <AlertTriangle size={13} className="text-amber-600 shrink-0" />
                       ) : (
                         <Globe size={13} className="text-emerald-600 shrink-0" />
                       )}
                       <span className={cn(
                         "hidden xl:inline text-[10px] font-bold uppercase tracking-tighter whitespace-nowrap",
-                        isSyncing ? "text-indigo-700" : lastSyncError ? "text-amber-700" : "text-emerald-700"
+                        isSyncing ? "text-indigo-700" : "text-emerald-700"
                       )}>
-                        {isSyncing ? t('Syncing') : lastSyncError ? L('同期エラー', 'Sync Issue', 'Erreur Synchro') : t('SyncActive')}
+                        {isSyncing ? t('Syncing') : t('SyncActive')}
                       </span>
                     </button>
                   )}
@@ -6865,49 +7070,135 @@ export default function App() {
                         </div>
                         <div className="space-y-3">
                           <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100">
-                            <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center justify-between mb-1 gap-1.5">
                               <label className="text-[8px] font-black text-slate-400 uppercase">{t('LocalDirectoryPath')}</label>
-                              <span className={cn(
-                                "text-[8px] font-black uppercase px-1.5 py-0.5 rounded",
-                                isSyncing
-                                  ? "bg-indigo-100 text-indigo-700"
-                                  : isLocalDiskReady && !lastSyncError
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : "bg-amber-100 text-amber-700"
-                              )}>
-                                {isSyncing
-                                  ? t('Syncing')
-                                  : isLocalDiskReady && !lastSyncError
-                                  ? t('SyncActive')
-                                  : lastSyncError
-                                  ? L('同期エラー', 'Sync Error', 'Erreur Synchro')
-                                  : dirHandle
-                                  ? L('要書き込み許可', 'Permission Needed', 'Autorisation requise')
-                                  : L('フォルダ未接続', 'Folder Disconnected', 'Dossier non lié')}
-                              </span>
+                              <div className="flex items-center gap-1">
+                                <span className={cn(
+                                  "text-[8px] font-black uppercase px-1.5 py-0.5 rounded",
+                                  isSyncing
+                                    ? "bg-indigo-100 text-indigo-700"
+                                    : isLocalDiskReady && !lastSyncError
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : "bg-amber-100 text-amber-700"
+                                )}>
+                                  {isSyncing
+                                    ? t('Syncing')
+                                    : isLocalDiskReady && !lastSyncError
+                                    ? t('SyncActive')
+                                    : lastSyncError
+                                    ? L('同期エラー', 'Sync Error', 'Erreur Synchro')
+                                    : dirHandle
+                                    ? L('要書き込み許可', 'Permission Needed', 'Autorisation requise')
+                                    : L('フォルダ未接続', 'Folder Disconnected', 'Dossier non lié')}
+                                </span>
+                              </div>
                             </div>
-                            <p className="text-[10px] font-mono break-all text-slate-700 leading-tight">
-                              {dirHandle?.name || settings.localBackupPath || t('AuthorizedLocalFolder')}
-                            </p>
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[10px] font-mono break-all text-slate-700 leading-tight flex-1">
+                                {dirHandle?.name || settings.localBackupPath || t('AuthorizedLocalFolder')}
+                              </p>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  selectBackupFolder();
+                                }}
+                                className="px-2 py-0.5 bg-white hover:bg-indigo-50 text-indigo-600 border border-indigo-200 rounded text-[9px] font-bold shrink-0 transition-colors cursor-pointer"
+                                title={L('保存先フォルダを変更・再選択します', 'Change or re-select local backup folder', 'Changer le dossier')}
+                              >
+                                {L('フォルダ変更', 'Change', 'Changer')}
+                              </button>
+                            </div>
                             {lastSyncError && (
-                              <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-2 leading-snug">
+                              <p className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-2 leading-snug">
                                 {lastSyncError}
                               </p>
                             )}
                             {(!isLocalDiskReady || lastSyncError) && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  authorizeLocalFolderNow();
-                                }}
-                                className="mt-2 w-full py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-white rounded text-[9px] font-bold transition-colors cursor-pointer"
-                              >
-                                {!dirHandle
-                                  ? L('保存先フォルダを選択して自動上書きを有効化', 'Select Folder to Enable Direct Overwrite', 'Sélectionner le dossier')
-                                  : dirPermission !== 'granted'
-                                  ? L('クリックしてローカルファイル上書き保存を許可', 'Click to Authorize Local File Overwrite', 'Autoriser l\'écriture locale')
-                                  : L('今すぐ再試行してローカル上書き', 'Retry Local File Sync Now', 'Réessayer la synchro locale')}
-                              </button>
+                              <div className="mt-2 space-y-1.5">
+                                {!dirHandle ? (
+                                  window.self !== window.top ? (
+                                    <a
+                                      href={window.location.href}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="w-full py-1.5 px-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-bold transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+                                    >
+                                      <ArrowUpRight size={12} />
+                                      {L('新しいタブで開いてフォルダを選択', 'Open in New Tab to Select Folder', 'Ouvrir dans un nouvel onglet')}
+                                    </a>
+                                  ) : (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        selectBackupFolder();
+                                      }}
+                                      className="w-full py-1.5 px-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-bold transition-colors cursor-pointer shadow-sm"
+                                    >
+                                      {L('保存先フォルダを選択 / 再接続', 'Select / Reconnect Local Folder', 'Sélectionner le dossier')}
+                                    </button>
+                                  )
+                                ) : dirPermission !== 'granted' ? (
+                                  <>
+                                    <p className="text-[9px] text-slate-600 leading-snug">
+                                      {L(
+                                        'ブラウザ再起動後は書き込み許可が必要です。許可しても改善しない場合はフォルダを再選択してください。',
+                                        'Browser requires write permission after reload. If allowing fails, re-select the folder.',
+                                        'Autorisation requise. En cas d\'échec, resélectionnez le dossier.'
+                                      )}
+                                    </p>
+                                    <div className="grid grid-cols-2 gap-1.5">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          authorizeLocalFolderNow();
+                                        }}
+                                        className="py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[9px] font-bold transition-colors cursor-pointer shadow-sm"
+                                      >
+                                        {L('書き込みを許可', 'Allow Write', 'Autoriser')}
+                                      </button>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          selectBackupFolder();
+                                        }}
+                                        className="py-1.5 px-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[9px] font-bold transition-colors cursor-pointer shadow-sm"
+                                      >
+                                        {L('フォルダを再選択', 'Reselect Folder', 'Resélectionner')}
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <>
+                                    <p className="text-[9px] text-slate-600 leading-snug">
+                                      {L(
+                                        '現在のフォルダ参照で書き込みに失敗しました。「フォルダを再選択」すると通常すぐ解決します。',
+                                        'Writing with the current folder handle failed. Re-selecting the folder usually resolves this immediately.',
+                                        'L\'écriture a échoué. Resélectionner le dossier résout généralement ce problème.'
+                                      )}
+                                    </p>
+                                    <div className="grid grid-cols-2 gap-1.5">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          selectBackupFolder();
+                                        }}
+                                        className="py-1.5 px-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[9px] font-bold transition-colors cursor-pointer shadow-sm"
+                                      >
+                                        {L('フォルダを再選択', 'Reselect Folder', 'Resélectionner')}
+                                      </button>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          authorizeLocalFolderNow();
+                                        }}
+                                        className="py-1.5 px-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg text-[9px] font-bold transition-colors cursor-pointer"
+                                      >
+                                        {L('同じフォルダで再試行', 'Retry Same Folder', 'Réessayer')}
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
                             )}
                           </div>
 
@@ -7259,11 +7550,11 @@ export default function App() {
                             }
                           });
                         }
-                        // 3. Fallback from localStorage across all sections
+                        // 3. Fallback from account-scoped storage across all sections of THIS account
                         try {
-                          const keys = Object.keys(localStorage).filter(k => k.startsWith('navfor_phase_patterns_'));
+                          const keys = getUserStorageBaseKeysWithPrefix('navfor_phase_patterns_', user?.uid);
                           keys.forEach(k => {
-                            const raw = localStorage.getItem(k);
+                            const raw = getUserStorageItem(k, user?.uid);
                             if (raw) {
                               const parsed = JSON.parse(raw);
                               if (Array.isArray(parsed)) {
@@ -7806,7 +8097,7 @@ export default function App() {
                         
                         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-inner space-y-4">
                           {isLocalLogConfigured && (!isLocalDiskReady || lastSyncError) && (
-                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                               <div className="text-xs text-amber-800">
                                 <p className="font-bold">
                                   {lastSyncError
@@ -7815,43 +8106,68 @@ export default function App() {
                                     ? L('ブラウザ再読み込み後の書き込み許可が必要です', 'Write permission needed after browser reload', 'Autorisation d\'écriture requise après rechargement')
                                     : L('PCの保存先フォルダが接続されていません', 'Local PC folder is not connected yet', 'Le dossier PC local n\'est pas encore connecté')}
                                 </p>
-                                <p className="text-[11px] text-amber-700 mt-0.5">
+                                <p className="text-[11px] text-amber-700 mt-0.5 leading-relaxed">
                                   {lastSyncError
-                                    ? lastSyncError
+                                    ? `${lastSyncError} (${L('再試行で直らない場合は「フォルダを再選択」をお試しください', 'If retrying does not resolve this, please use "Reselect Folder"', 'En cas d\'échec, resélectionnez le dossier')})`
                                     : dirHandle
-                                    ? L('右のボタンを押すと、ローカルフォルダ内のCSVファイルを即座に最新状態へ上書き更新します。', 'Click the button to grant write access and immediately overwrite the local CSV file with the latest data.', 'Cliquez pour autoriser l\'accès et mettre à jour le fichier CSV local.')
+                                    ? L('「書き込みを許可」を押すと即座に上書き更新します。許可しても改善しない場合は「フォルダを再選択」してください。', 'Click "Allow Write" to sync now, or "Reselect Folder" if access remains blocked.', 'Cliquez pour autoriser l\'accès ou resélectionner le dossier.')
                                     : window.self !== window.top
                                     ? L('プレビュー枠内ではフォルダ選択ダイアログが開けないため、「新しいタブで開く (↗)」から一度フォルダを選択してください（選択後はこの画面からも自動更新されます）。', 'Open in a new tab (↗) once to pick your PC folder. Once selected, changes here will also sync automatically.', 'Ouvrez dans un nouvel onglet (↗) pour choisir le dossier PC.')
                                     : L('「フォルダを選択」からPC上の保存先フォルダを指定すると、変更のたびローカルファイルが自動更新されます。', 'Click "Select Folder" to choose a folder on your PC for automatic file updates.', 'Cliquez sur « Choisir dossier » pour sélectionner un dossier sur votre PC.')}
                                 </p>
                               </div>
-                              {dirHandle ? (
-                                <button
-                                  onClick={authorizeLocalFolderNow}
-                                  className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
-                                >
-                                  {dirPermission !== 'granted'
-                                    ? L('書き込みを許可して今すぐ更新', 'Allow Write & Sync Now', 'Autoriser et synchroniser')
-                                    : L('今すぐ再試行', 'Retry Sync Now', 'Réessayer')}
-                                </button>
-                              ) : window.self !== window.top ? (
-                                <a
-                                  href={window.location.href}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm flex items-center gap-1"
-                                >
-                                  <ArrowUpRight size={13} />
-                                  {L('新しいタブで開いてフォルダ設定', 'Open in New Tab to Select Folder', 'Ouvrir dans un nouvel onglet')}
-                                </a>
-                              ) : (
-                                <button
-                                  onClick={selectBackupFolder}
-                                  className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
-                                >
-                                  {t('SelectFolder')}
-                                </button>
-                              )}
+                              <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 shrink-0">
+                                {dirHandle ? (
+                                  dirPermission !== 'granted' ? (
+                                    <>
+                                      <button
+                                        onClick={authorizeLocalFolderNow}
+                                        className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
+                                      >
+                                        {L('書き込みを許可して更新', 'Allow Write & Sync', 'Autoriser et synchroniser')}
+                                      </button>
+                                      <button
+                                        onClick={selectBackupFolder}
+                                        className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
+                                      >
+                                        {L('フォルダを再選択', 'Reselect Folder', 'Resélectionner')}
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <button
+                                        onClick={selectBackupFolder}
+                                        className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
+                                      >
+                                        {L('フォルダを再選択して修復', 'Reselect Folder to Fix', 'Resélectionner le dossier')}
+                                      </button>
+                                      <button
+                                        onClick={authorizeLocalFolderNow}
+                                        className="px-3 py-2 bg-white hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer"
+                                      >
+                                        {L('同じフォルダで再試行', 'Retry', 'Réessayer')}
+                                      </button>
+                                    </>
+                                  )
+                                ) : window.self !== window.top ? (
+                                  <a
+                                    href={window.location.href}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm flex items-center gap-1"
+                                  >
+                                    <ArrowUpRight size={13} />
+                                    {L('新しいタブで開いてフォルダ設定', 'Open in New Tab to Select Folder', 'Ouvrir dans un nouvel onglet')}
+                                  </a>
+                                ) : (
+                                  <button
+                                    onClick={selectBackupFolder}
+                                    className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[11px] font-bold shrink-0 transition-colors cursor-pointer shadow-sm"
+                                  >
+                                    {t('SelectFolder')}
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           )}
 
@@ -8177,13 +8493,13 @@ export default function App() {
               >
                 <div className={cn(
                   "w-1.5 h-1.5 rounded-full shrink-0",
-                  isLocalDiskReady ? "bg-emerald-500" : "bg-amber-500"
+                  isLocalDiskReady && !lastSyncError ? "bg-emerald-500" : "bg-amber-500"
                 )} />
                 <span className="text-slate-600 hover:text-indigo-600 font-semibold tracking-tight">
                   {!isLocalLogConfigured
                     ? L('ローカルログ: 未設定', 'Local Log: Not Configured', 'Journal local : Non configuré')
-                    : !isLocalDiskReady
-                      ? L('ローカルログ: フォルダ接続/許可が必要', 'Local Log: Folder Authorization Needed', 'Journal local : Autorisation requise')
+                    : !isLocalDiskReady || lastSyncError
+                      ? L('ローカルログ: フォルダ再選択・許可が必要', 'Local Log: Folder Reselect / Permission Needed', 'Journal local : Autorisation requise')
                       : L(
                           `ローカルログ有効${(dirHandle?.name || settings.localBackupPath) ? ` (${dirHandle?.name || settings.localBackupPath})` : ''}`,
                           `Local Log Active${(dirHandle?.name || settings.localBackupPath) ? ` (${dirHandle?.name || settings.localBackupPath})` : ''}`,

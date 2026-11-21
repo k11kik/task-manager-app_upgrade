@@ -11,6 +11,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { cn, tr } from '../lib/utils';
+import { getUserStorageItem, setUserStorageItem } from '../lib/userStorage';
 
 export interface FinderFolderPickerProps {
   selectedFolder: string;
@@ -151,18 +152,18 @@ export const FinderFolderPicker: React.FC<FinderFolderPickerProps> = ({
       newFullPath = parentPath ? `${parentPath}/${trimmed}` : trimmed;
     }
 
-    // Save to localStorage customFolders
+    // Save to account-scoped storage customFolders
     try {
       const storageKey = `navfor_folders_${activeSection}`;
-      const saved = localStorage.getItem(storageKey);
+      const saved = getUserStorageItem(storageKey);
       const currentList: string[] = saved ? JSON.parse(saved) : [];
       if (!currentList.includes(newFullPath)) {
         currentList.push(newFullPath);
-        localStorage.setItem(storageKey, JSON.stringify(currentList));
+        setUserStorageItem(storageKey, JSON.stringify(currentList));
       }
       window.dispatchEvent(new Event('navfor_folders_updated'));
     } catch (e) {
-      console.error('Failed to save new folder to localStorage:', e);
+      console.error('Failed to save new folder to storage:', e);
     }
 
     setLocallyCreatedFolders(prev => [...prev, newFullPath]);
